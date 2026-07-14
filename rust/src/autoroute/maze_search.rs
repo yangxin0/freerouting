@@ -403,7 +403,9 @@ fn via_free(board: &BasicBoard, request: &MazeRouteRequest, point: IntPoint) -> 
 }
 
 /// The centre of the destination item's shape on `layer` (or its first
-/// shape).
+/// shape). For area destinations (power planes) the arrival location is
+/// used instead: any point inside the area connects, and its centre of
+/// gravity could be across the board.
 fn destination_point(
     board: &BasicBoard,
     dest_item: ItemId,
@@ -413,6 +415,9 @@ fn destination_point(
     board
         .get_item(dest_item)
         .and_then(|item| {
+            if matches!(item.kind, crate::board::ItemKind::ObstacleArea(_)) {
+                return Some(fallback);
+            }
             let shapes = item.tile_shapes(&board.padstacks);
             shapes
                 .iter()

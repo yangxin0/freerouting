@@ -73,6 +73,13 @@ pub fn complete_shape_with_ripup(
         if item.base.contains_net(net_no) {
             continue;
         }
+        // foreign conduction areas (power planes) do not restrain: they
+        // get clearance cutouts in fabrication (Java: ConductionArea)
+        if let crate::board::ItemKind::ObstacleArea(a) = &item.kind {
+            if a.is_conduction {
+                continue;
+            }
+        }
         if ignore_rippable && is_rippable(item, net_no) {
             continue;
         }

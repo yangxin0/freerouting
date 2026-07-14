@@ -270,6 +270,45 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
     let mut board = BasicBoard::new(layer_structure, rules, padstacks);
     board.resolution = resolution.round() as i32;
 
+    // power planes: conduction areas connecting their net's pins
+    // ((plane NET (polygon LAYER aperture x y ...)))
+    for plane_node in structure.children("plane") {
+        let Some(net_name) = plane_node.arg() else {
+            continue;
+        };
+        let Some(polygon) = plane_node.child("polygon") else {
+            continue;
+        };
+        let Some(layer) = polygon
+            .arg()
+            .and_then(|n| board.layer_structure.get_no(n))
+        else {
+            continue;
+        };
+        let nums: Vec<f64> = polygon.args().skip(2).filter_map(|a| a.parse().ok()).collect();
+        let corners: Vec<crate::geometry::planar::Point> = nums
+            .chunks_exact(2)
+            .map(|c| {
+                crate::geometry::planar::Point::Int(IntPoint::new(scale(c[0]), scale(c[1])))
+            })
+            .collect();
+        if corners.len() < 3 {
+            continue;
+        }
+        let net_nos: Vec<i32> = board
+            .rules
+            .nets
+            .get_by_name(net_name)
+            .iter()
+            .map(|n| n.net_number)
+            .collect();
+        let area = crate::geometry::planar::PolylineArea::new(
+            crate::geometry::planar::PolygonShape::new(corners),
+            Vec::new(),
+        );
+        board.insert_area(area, layer, net_name, net_nos, 1, true);
+    }
+
     // boundary: keepout strips along the outline edges on all layers so
     // routes stay inside the board (Java: BoardOutline tree shapes)
     if let Some(boundary) = structure.child("boundary") {

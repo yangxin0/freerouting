@@ -243,6 +243,17 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 86): power planes imported as conduction areas —
+  (plane NET (polygon LAYER ...)) becomes a net-carrying conduction
+  ObstacleArea; conduction areas do not restrain rooms or block vias
+  (planes get fabrication cutouts, Java: ConductionArea), and pins /
+  trace endpoints / via centers inside the plane on a shared layer
+  count as contacts. First 4-layer board routes: coldfire-xilinx
+  (278 nets, 4 layers) imports and reaches ~224/278 in 120 s; its GND
+  plane merges 126 of GND's 130 items. Wavefolder improves to 31/31
+  with 63 connections (the F.Cu GND plane pre-connects GND); rest of
+  the fleet unchanged. Remaining on coldfire: one GND connection
+  fails even alone (open), and the signal tail needs more time.
 - 2026-07-15 (iter 85): net class rules imported and obeyed — (class
   NAME nets... (circuit (use_via V)) (rule (width W))) now populates
   NetClasses/ViaInfos/ViaRules, nets get their class, and the batch

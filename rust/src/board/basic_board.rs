@@ -229,8 +229,17 @@ impl BasicBoard {
         self.overlapping_items(shape, Some(layer))
             .into_iter()
             .any(|id| {
-                self.get_item(id)
-                    .is_some_and(|item| !item.base.contains_net(net_no))
+                self.get_item(id).is_some_and(|item| {
+                    // foreign conduction areas (power planes) do not block:
+                    // they receive clearance cutouts in fabrication (Java:
+                    // ConductionArea is no obstacle for foreign items)
+                    if let ItemKind::ObstacleArea(a) = &item.kind {
+                        if a.is_conduction {
+                            return false;
+                        }
+                    }
+                    !item.base.contains_net(net_no)
+                })
             })
     }
 
