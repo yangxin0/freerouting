@@ -1,0 +1,124 @@
+//! Routes a board from scratch, then audits the result: every pair of
+//! items of different nets on a shared layer must keep the pairwise
+//! clearance of the rule matrix. Prints the violations (if any).
+//!
+//! Usage: cargo run --release --example drc_check -- board.dsn [seconds]
+
+use freerouting::autoroute::{
+    batch_route_passes_with_time_limit, combine_all_traces, pull_tight_all, BatchRequest,
+};
+use freerouting::board::ItemKind;
+use freerouting::datastructures::TimeLimit;
+use freerouting::io::import_dsn;
+
+fn main() {
+    let path = std::env::args().nth(1).expect("usage: drc_check <dsn> [seconds]");
+    let limit_s: u64 = std::env::args()
+        .nth(2)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120);
+    let content = std::fs::read_to_string(&path).expect("read failed");
+    let content = match content.find("  (wiring") {
+        Some(pos) => format!("{})", &content[..pos]),
+        None => content,
+    };
+    let mut board = import_dsn(&content).expect("import failed");
+
+    let all_layers = board.layer_structure.layer_count().saturating_sub(1);
+    let via_padstack = (1..=board.padstacks.count())
+        .find(|no| {
+            board
+                .padstacks
+                .get_by_no(*no)
+                .is_some_and(|p| p.name.starts_with("Via"))
+        })
+        .or_else(|| {
+            (1..=board.padstacks.count()).find(|no| {
+                board
+                    .padstacks
+                    .get_by_no(*no)
+                    .is_some_and(|p| p.from_layer() == 0 && p.to_layer() == all_layers)
+            })
+        })
+        .unwrap_or(0);
+    let request = BatchRequest {
+        trace_half_width: board.rules.get_min_trace_half_width().max(500),
+        clearance_class: 1,
+        via_padstack,
+        via_cost: 50_000.0,
+        max_expansions: 100_000,
+        ripup_penalty: 0.0,
+        deadline: None,
+    };
+    let limit = TimeLimit::new(limit_s * 1000);
+    batch_route_passes_with_time_limit(&mut board, &request, 99, Some(&limit));
+    combine_all_traces(&mut board);
+    pull_tight_all(&mut board, 3);
+
+    // audit: routed items (component 0) vs everything foreign
+    let mut violations = 0usize;
+    let mut checked = 0usize;
+    let routed: Vec<_> = board
+        .items()
+        .filter(|(_, it)| it.base.component_no == 0 && it.base.net_count() > 0)
+        .map(|(id, _)| *id)
+        .collect();
+    for &id in &routed {
+        let Some(item) = board.get_item(id) else {
+            continue;
+        };
+        let shapes: Vec<_> = item
+            .tile_shapes(&board.padstacks)
+            .iter()
+            .cloned()
+            .collect();
+        for (shape, layer) in shapes {
+            for other_id in board.overlapping_items(&shape.offset(10_000.0), Some(layer)) {
+                if other_id == id {
+                    continue;
+                }
+                let Some(other) = board.get_item(other_id) else {
+                    continue;
+                };
+                if other.base.shares_net(&item.base) {
+                    continue;
+                }
+                if let ItemKind::ObstacleArea(a) = &other.kind {
+                    if a.is_conduction {
+                        continue; // planes get fabrication cutouts
+                    }
+                }
+                let clearance = board.rules.clearance_matrix.get_value(
+                    item.base.clearance_class,
+                    other.base.clearance_class,
+                    layer,
+                    false,
+                ) as f64;
+                let check = shape.offset(clearance);
+                checked += 1;
+                let conflict = other
+                    .tile_shapes(&board.padstacks)
+                    .iter()
+                    .any(|(s, l)| *l == layer && s.intersection(&check).dimension() >= 2);
+                if conflict {
+                    violations += 1;
+                    if violations <= 10 {
+                        println!(
+                            "VIOLATION: item {id} (nets {:?}) vs item {other_id} \
+                             (nets {:?}) on layer {layer}, required {clearance}",
+                            item.base.net_nos, other.base.net_nos
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let complete = (1..=board.rules.nets.max_net_no())
+        .filter(|&n| board.net_is_completely_connected(n))
+        .count();
+    println!(
+        "routed {complete}/{} nets; DRC: {checked} pair checks, {violations} violations",
+        board.rules.nets.max_net_no()
+    );
+    std::process::exit(if violations == 0 { 0 } else { 1 });
+}

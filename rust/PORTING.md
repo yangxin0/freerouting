@@ -258,6 +258,22 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 119): DRC SELF-CHECK BUILT — AND IT FOUND A REAL
+  ARCHITECTURE BUG. examples/drc_check.rs routes a board and audits
+  every foreign pair against the rule matrix. Results: hundreds of
+  violations per board (display 639, J2 222; wavefolder's bulk is a
+  checker artifact — planes counted as routed items, fix the filter).
+  ROOT CAUSE: room completion inflates obstacles by clearance (now
+  cl/2) but NOT by the trace half width — the maze may place the
+  centerline anywhere in a room including ON its border, so the
+  copper gap can be as low as cl/2 - hw (negative!). This has been
+  true in every era (full inflation gave cl - hw). THE FIX (next
+  session, top priority): inflate obstacles by hw + cl/2 with the
+  door shrink keeping hw + cl/2 as today (Java keeps the same margin
+  via compensated trace shapes); re-benchmark everything — the
+  completion numbers WILL drop and the sealed-pocket work may need
+  revisiting at the new band widths. Claims of "clearance-honest"
+  routing are RETRACTED until the fix lands.
 - 2026-07-15 (iter 118): post-routing normalization pass —
   combine_all_traces merges fragmented trace chains at simple joints
   (junction splits and shove cutouts leave stubs); wired into the CLI
