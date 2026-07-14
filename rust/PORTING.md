@@ -243,6 +243,14 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 98): shove wired into the maze rip phase — trace
+  victims in the connection corridor are shoved aside first (staying
+  connected; no victim reroute) and only ripped when the shove is
+  blocked. Fleet: wavefolder 31/31, J2 23/24 (GND still fails — its
+  corridor needs via shoving or recursion depth > 1), interf_u
+  167/173 with 291 connections routed in the cap (vs 145 before —
+  shove removes the reroute churn; time still binds). Next levers:
+  recursive shove (stack levels > 1) and via shoving.
 - 2026-07-15 (iter 97): shove arc piece 4: depth-1 shove_aside ported
   (board/shove_trace_algo.rs) — cuts a single crossing trace at the
   shove shape and inserts the ShapeTraceEntries substitutes, but only

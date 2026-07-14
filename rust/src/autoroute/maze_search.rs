@@ -481,15 +481,38 @@ pub fn maze_route_with_engine(
                 if let Some(shape) =
                     polyline.offset_shape(request.trace_half_width + 1, 0)
                 {
-                    for id in board.overlapping_items(&shape, Some(layer_a)) {
-                        if board.get_item(id).is_some_and(|item| {
-                            crate::autoroute::room_completion::is_rippable(
-                                item,
-                                request.net_no,
+                    let candidates: Vec<ItemId> = board
+                        .overlapping_items(&shape, Some(layer_a))
+                        .into_iter()
+                        .filter(|&id| {
+                            board.get_item(id).is_some_and(|item| {
+                                crate::autoroute::room_completion::is_rippable(
+                                    item,
+                                    request.net_no,
+                                )
+                            })
+                        })
+                        .collect();
+                    for id in candidates {
+                        // prefer shoving trace victims aside (they stay
+                        // connected, no victim reroute needed); rip only
+                        // when the shove is blocked
+                        let is_trace = board.get_item(id).is_some_and(|item| {
+                            matches!(item.kind, crate::board::ItemKind::PolylineTrace(_))
+                        });
+                        if is_trace
+                            && crate::board::shove_aside(
+                                board,
+                                &shape,
+                                layer_a,
+                                &[request.net_no],
+                                request.clearance_class,
+                                id,
                             )
-                        }) {
-                            to_rip.push(id);
+                        {
+                            continue;
                         }
+                        to_rip.push(id);
                     }
                 }
             } else if layer_a != layer_b {
