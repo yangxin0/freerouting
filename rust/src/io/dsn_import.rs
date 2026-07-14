@@ -91,13 +91,13 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
         .child("rule")
         .and_then(|r| r.child("clearance"))
         .and_then(|c| c.arg_f64())
-        .map(|v| scale(v))
+        .map(&scale)
         .unwrap_or(200);
     let default_width = structure
         .child("rule")
         .and_then(|r| r.child("width"))
         .and_then(|w| w.arg_f64())
-        .map(|v| scale(v))
+        .map(&scale)
         .unwrap_or(250);
     let clearance_matrix =
         ClearanceMatrix::get_default_instance(layer_structure.clone(), default_clearance);

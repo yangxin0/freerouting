@@ -447,6 +447,10 @@ impl Simplex {
     ///
     /// Only implemented for 2-dimensional simplices (like Java, which warns
     /// and returns null there; this port returns the outer simplex intact).
+    // The unnecessary_literal_unwrap lint correctly proves that the
+    // merge_prev branches can never fire: they are preserved deliberately
+    // to mirror the Java original's dead prev_division_line code.
+    #[allow(clippy::unnecessary_literal_unwrap)]
     pub fn cutout_from(&self, outer_simplex: &Simplex) -> Vec<Simplex> {
         if self.dimension() < 2 {
             return vec![outer_simplex.clone()];

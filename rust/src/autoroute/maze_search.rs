@@ -175,7 +175,7 @@ pub fn find_connection(
         if expansions > request.max_expansions {
             return None; // budget exhausted
         }
-        if expansions % 1024 == 0 && request.deadline.is_some_and(|t| t.limit_exceeded()) {
+        if expansions.is_multiple_of(1024) && request.deadline.is_some_and(|t| t.limit_exceeded()) {
             return None; // out of time
         }
         // occupy the step

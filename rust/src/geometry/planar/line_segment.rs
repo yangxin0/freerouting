@@ -474,7 +474,7 @@ impl LineSegment {
                             return Vec::new();
                         }
                     }
-                    let already_handled = intersections.iter().any(|p| *p == is);
+                    let already_handled = intersections.contains(&is);
                     if !already_handled && result.len() < 2 {
                         result.push(edge_line_no);
                         intersections.push(is);

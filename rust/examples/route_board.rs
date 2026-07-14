@@ -55,7 +55,7 @@ fn main() {
     // bound the batch to 5 minutes of wall clock
     let time_limit = TimeLimit::new(300_000);
     let result =
-        batch_route_passes_with_time_limit(&mut board, &request, 4, Some(&time_limit));
+        batch_route_passes_with_time_limit(&mut board, &request, 3, Some(&time_limit));
     let mut complete_nets = 0usize;
     let mut incomplete_nets = Vec::new();
     for net_no in 1..=net_count {
