@@ -25,7 +25,6 @@ struct BacktrackNode {
     location: FloatPoint,
     layer: usize,
     parent: Option<usize>,
-    is_via: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -144,7 +143,6 @@ pub fn find_connection(
                 location: start_center,
                 layer: *layer,
                 parent: None,
-                is_via: false,
             });
             seed_room(
                 engine,
@@ -187,7 +185,6 @@ pub fn find_connection(
             location: entry.location,
             layer,
             parent: entry.parent,
-            is_via: entry.step == Step::Drill,
         });
 
         engine.expand_room(board, room);
@@ -368,7 +365,7 @@ pub fn maze_route(board: &mut BasicBoard, request: &MazeRouteRequest) -> Option<
     let mut new_items = Vec::new();
     let mut run: Vec<IntPoint> = Vec::new();
     let mut run_layer = result.corners.first()?.1;
-    let mut flush =
+    let flush =
         |board: &mut BasicBoard, run: &mut Vec<IntPoint>, layer: usize, items: &mut Vec<ItemId>| {
             run.dedup();
             if run.len() > 1 {
