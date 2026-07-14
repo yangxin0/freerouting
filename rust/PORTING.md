@@ -13,10 +13,11 @@ should pick up the first unchecked item below.
   `cargo run --release -- -de input.dsn [-do out.ses] [-mp passes]
   [-tl seconds]`.
 - **Fleet** (from scratch, clearance-honest, 300 s cap):
-  8088sbc 104/104 (78 s), pic_programmer 111/111 (0.9 s),
-  wavefolder 31/31 (1.6 s), ecc83 13/13, rpi_splitter 5/5,
-  interf_u 167/173, coldfire-xilinx (4 layers) 244/278,
-  NormalPuzzle 69/72, display-8-digit 29/30, J2_reference 23/24
+  interf_u 173/173 (250 s), 8088sbc 104/104 (70 s),
+  pic_programmer 111/111, display-8-digit 30/30 (8 s),
+  wavefolder 31/31 (1.3 s), ecc83 13/13, rpi_splitter 5/5,
+  coldfire-xilinx (4 layers) ~244/278,
+  NormalPuzzle 69/72, J2_reference 23/24
   (GND assessed unroutable under the file's own rules: 450 um pad
   gaps < trace 250 + 2 x clearance 200.1; the fixture's wiring
   section is empty — the design was never routed).
@@ -250,6 +251,18 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 107): CLEARANCE HALF-COMPENSATION — THE BREAKTHROUGH.
+  Obstacles now inflate by clearance/2 and the door shrink carries
+  half width + clearance/2 (Java: compensated search tree +
+  compensated_trace_half_width). Same legal separation, but rooms of
+  adjacent pads meet at the band middle and stay door-connected, so
+  the isolated dest slivers gained their bridges. Results (300 s cap,
+  full clearance): interf_u 173/173 in 250 s (0 failed!), display
+  30/30 in 8.4 s, 8088sbc 104/104 in 70 s, wavefolder 31/31 in 1.3 s;
+  NormalPuzzle 69/72 unchanged. The entire arrival investigation
+  (iters 104-107: kills instrumentation → transparency proven → dest
+  room seeding → isolated-sliver analysis → half-compensation) is the
+  reference for future geometric debugging.
 - 2026-07-15 (iter 106): ARRIVAL CONFIRMED as the failure:
   rooms_with_dest_door=0 after 96k expansions — no free room ever
   touched the dest pad (its pin-row neighbours' clearance-inflated

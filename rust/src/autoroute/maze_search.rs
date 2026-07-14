@@ -106,7 +106,15 @@ pub fn find_connection(
     if start_shapes.is_empty() {
         return None;
     }
-    let offset = request.trace_half_width as f64;
+    // the door shrink carries the trace's half of the clearance
+    // compensation (Java: compensated_trace_half_width)
+    let offset = request.trace_half_width as f64
+        + board
+            .rules
+            .clearance_matrix
+            .get_value(request.clearance_class, request.clearance_class, 0, false)
+            .max(0) as f64
+            / 2.0;
     // destination centers for the admissible remaining-distance estimate
     let dest_centers: Vec<FloatPoint> = board
         .get_item(request.dest_item)

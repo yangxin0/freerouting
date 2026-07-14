@@ -91,8 +91,12 @@ pub fn complete_shape_with_ripup(
         );
         for (shape, layer) in item.tile_shapes(&board.padstacks) {
             if *layer == room.layer {
+                // HALF the clearance (Java: clearance compensation) — the
+                // other half is added to the door shrink on the trace
+                // side, so rooms of adjacent pads meet at the band middle
+                // and stay door-connected
                 let shape = if clearance > 0 {
-                    shape.offset(clearance as f64)
+                    shape.offset(clearance as f64 / 2.0)
                 } else {
                     shape.clone()
                 };
