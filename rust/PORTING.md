@@ -44,7 +44,8 @@ should pick up the first unchecked item below.
 
 ## Phase 2 — supporting infrastructure
 
-- [ ] datastructures (ShapeTree / MinAreaTree / UndoableObjects / …)
+- [x] datastructures/ShapeTree.java + MinAreaTree.java → `datastructures/min_area_tree.rs` (arena-indexed generic tree; IntOctagon bounds subsume both ShapeBoundingDirections variants; ArrayStack replaced by Vec)
+- [ ] datastructures remaining: UndoableObjects, TimeLimit/Stoppable, PlanarDelaunayTriangulation (autoroute-time), IdentifierType/IndentFileWriter (specctra I/O time)
 - [ ] rules (nets, clearance matrix, via rules)
 - [ ] board (items, traces, vias, search tree)
 
