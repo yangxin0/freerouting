@@ -243,6 +243,15 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 95): shove arc piece 3b: board-level cutout_trace
+  ported (board/shape_trace_entries.rs) — removes the part of a trace
+  inside a shape (enlarged by half width + clearance + 1, in two steps
+  like Java) and reinserts the outside pieces. NOT yet wired into
+  ripup: dangling stub endpoints would fight the exact-endpoint trace
+  contacts; in shove proper the shoved substitute reconnects the stubs
+  by construction. Remaining for ShapeTraceEntries: the EntryPoint
+  border bookkeeping (store_trace / calculate_stack_levels /
+  pop_piece), needed by ShoveTraceAlgo's check.
 - 2026-07-15 (iter 94): shove arc piece 3a: TileShape::entrance_points
   + cutout_polyline ported (the previously deferred
   Polyline-dependent TileShape methods) — cut the parts of a polyline
