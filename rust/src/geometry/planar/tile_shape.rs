@@ -503,6 +503,119 @@ impl TileShape {
         ))
     }
 
+    /// The minimal distance of `line` to this shape, assuming the line is
+    /// on the left of the shape; -1 if the line is on the right or
+    /// intersects the interior.
+    pub fn distance_to_the_left(&self, line: &Line) -> f64 {
+        let mut result = f64::from(i32::MAX);
+        for i in 0..self.border_line_count() {
+            let curr_corner = self.corner_approx(i);
+            let mut line_side = line.side_of_float(curr_corner, 1.0);
+            if line_side == Side::Collinear {
+                line_side = line.side_of(&self.corner(i));
+            }
+            if line_side == Side::OnTheRight {
+                // the corner would be outside the result shape
+                return -1.0;
+            }
+            result = result.min(line.signed_distance(curr_corner));
+        }
+        result
+    }
+
+    /// `Collinear` if `line` intersects the interior of this shape,
+    /// otherwise on which side of the line the shape lies.
+    pub fn side_of_line(&self, line: &Line) -> Side {
+        let mut on_the_left = false;
+        let mut on_the_right = false;
+        for i in 0..self.border_line_count() {
+            match line.side_of(&self.corner(i)) {
+                Side::OnTheLeft => on_the_right = true,
+                Side::OnTheRight => on_the_left = true,
+                Side::Collinear => {}
+            }
+            if on_the_left && on_the_right {
+                return Side::Collinear;
+            }
+        }
+        if on_the_left {
+            Side::OnTheLeft
+        } else {
+            Side::OnTheRight
+        }
+    }
+
+    /// True if the line segment has a common point with the interior of
+    /// this shape.
+    pub fn is_intersected_interior_by(&self, segment: &crate::geometry::planar::LineSegment) -> bool {
+        let start_point = segment.start_point();
+        let end_point = segment.end_point();
+        let float_start_point = start_point.to_float();
+        let float_end_point = end_point.to_float();
+        let n = self.border_line_count();
+
+        let mut start_sides = Vec::with_capacity(n);
+        let mut end_sides = Vec::with_capacity(n);
+        for i in 0..n {
+            let curr_border_line = self.border_line(i);
+            let mut side_of_start = curr_border_line.side_of_float(float_start_point, 1.0);
+            if side_of_start == Side::Collinear {
+                side_of_start = curr_border_line.side_of(&start_point);
+            }
+            let mut side_of_end = curr_border_line.side_of_float(float_end_point, 1.0);
+            if side_of_end == Side::Collinear {
+                side_of_end = curr_border_line.side_of(&end_point);
+            }
+            if side_of_start != Side::OnTheRight && side_of_end != Side::OnTheRight {
+                // both endpoints outside this border line
+                return false;
+            }
+            start_sides.push(side_of_start);
+            end_sides.push(side_of_end);
+        }
+        if start_sides.iter().all(|s| *s == Side::OnTheRight) {
+            return true; // start point inside
+        }
+        if end_sides.iter().all(|s| *s == Side::OnTheRight) {
+            return true; // end point inside
+        }
+        let segment_line = segment.get_line();
+        // check if the segment crosses a border line
+        for i in 0..n {
+            if start_sides[i] == end_sides[i] {
+                continue;
+            }
+            if (start_sides[i] == Side::Collinear && end_sides[i] == Side::OnTheLeft)
+                || (end_sides[i] == Side::Collinear && start_sides[i] == Side::OnTheLeft)
+            {
+                // the interior is not intersected
+                continue;
+            }
+            let mut prev_corner_side = segment_line.side_of_float(self.corner_approx(i), 1.0);
+            if prev_corner_side == Side::Collinear {
+                prev_corner_side = segment_line.side_of(&self.corner(i));
+            }
+            let next_corner_index = (i + 1) % n;
+            let mut next_corner_side =
+                segment_line.side_of_float(self.corner_approx(next_corner_index), 1.0);
+            if next_corner_side == Side::Collinear {
+                next_corner_side = segment_line.side_of(&self.corner(next_corner_index));
+            }
+            if (prev_corner_side == Side::OnTheLeft && next_corner_side == Side::OnTheRight)
+                || (prev_corner_side == Side::OnTheRight && next_corner_side == Side::OnTheLeft)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The half plane on the point-left of `line` as a tile shape
+    /// (Java: `TileShape.get_instance(Line)`).
+    pub fn half_plane(line: Line) -> TileShape {
+        TileShape::Simplex(Simplex::get_instance(vec![line]))
+    }
+
     // ---- intersection and cutout ----
 
     /// The intersection of this shape with `other`, staying in the most
