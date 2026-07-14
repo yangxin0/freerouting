@@ -45,7 +45,9 @@ should pick up the first unchecked item below.
 ## Phase 2 — supporting infrastructure
 
 - [x] datastructures/ShapeTree.java + MinAreaTree.java → `datastructures/min_area_tree.rs` (arena-indexed generic tree; IntOctagon bounds subsume both ShapeBoundingDirections variants; ArrayStack replaced by Vec)
-- [ ] datastructures remaining: UndoableObjects, TimeLimit/Stoppable, PlanarDelaunayTriangulation (autoroute-time), IdentifierType/IndentFileWriter (specctra I/O time)
+- [x] datastructures/UndoableObjects.java → `undoable_objects.rs` (explicit key/value split, arena version chains; pop_snapshot splices same-level undo versions — documented deviation fixing a Java edge-case that loses objects)
+- [x] datastructures/Stoppable.java + TimeLimit.java → `stoppable.rs`
+- [ ] datastructures remaining: PlanarDelaunayTriangulation (autoroute-time), IdentifierType/IndentFileWriter (specctra I/O time)
 - [ ] rules (nets, clearance matrix, via rules)
 - [ ] board (items, traces, vias, search tree)
 
