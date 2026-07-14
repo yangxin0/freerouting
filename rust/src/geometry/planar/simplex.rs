@@ -12,19 +12,35 @@ use crate::geometry::planar::{
     limits, FloatPoint, IntBox, IntDirection, IntOctagon, IntVector, Line, Point, Side,
 };
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Simplex {
     lines: Vec<Line>,
+    /// Lazily computed bounding box (corner computation is expensive and
+    /// bounding boxes are queried constantly by the restrain pre-filters).
+    cached_bbox: std::cell::OnceCell<IntBox>,
+}
+
+impl PartialEq for Simplex {
+    fn eq(&self, other: &Self) -> bool {
+        // the bbox cache is derived state and excluded
+        self.lines == other.lines
+    }
 }
 
 impl Simplex {
     /// Standard implementation of an empty simplex.
-    pub const EMPTY: Simplex = Simplex { lines: Vec::new() };
+    pub const EMPTY: Simplex = Simplex {
+        lines: Vec::new(),
+        cached_bbox: std::cell::OnceCell::new(),
+    };
 
     /// Constructs a simplex from directed lines without normalizing. Use
     /// [`Simplex::get_instance`] for a normalized simplex.
     pub fn new(lines: Vec<Line>) -> Self {
-        Simplex { lines }
+        Simplex {
+            lines,
+            cached_bbox: std::cell::OnceCell::new(),
+        }
     }
 
     /// Creates a normalized simplex as the intersection of the half planes
@@ -306,6 +322,10 @@ impl Simplex {
     /// The smallest integer box containing all corners; coordinates are
     /// huge if the simplex is unbounded.
     pub fn bounding_box(&self) -> IntBox {
+        *self.cached_bbox.get_or_init(|| self.compute_bounding_box())
+    }
+
+    fn compute_bounding_box(&self) -> IntBox {
         if self.lines.is_empty() {
             return IntBox::EMPTY;
         }

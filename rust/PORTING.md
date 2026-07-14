@@ -248,6 +248,10 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 110): Simplex bounding boxes memoized (OnceCell,
+  excluded from PartialEq like the other derived-state caches): corner
+  computation was reappearing in the profile through the restrain
+  pre-filters. Coldfire 261/278, interf_u 173/173 in 227 s.
 - 2026-07-15 (iter 109): planes moved out of the search tree —
   coldfire's profile showed MinAreaTree::overlaps at ~45%: the
   board-covering plane bounds poison every ancestor bound and degrade
