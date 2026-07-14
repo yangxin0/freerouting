@@ -290,6 +290,9 @@ pub fn batch_route_passes_with_time_limit(
 ) -> BatchResult {
     let mut net_nos: Vec<i32> = (1..=board.rules.nets.max_net_no()).collect();
     net_nos.sort_by_key(|&n| net_extent(board, n));
+    if std::env::var_os("FR_ROUTE_ORDER_DESC").is_some() {
+        net_nos.reverse(); // experiment: largest extent first
+    }
 
     let mut total = BatchResult::default();
     let mut budget = request.max_expansions;
@@ -339,6 +342,61 @@ pub fn batch_route_passes_with_time_limit(
             total.failed_connections += failed_this_pass;
         }
         budget = budget.saturating_mul(2);
+    }
+
+    // Restart fallback: incomplete nets often fail only because earlier
+    // routed nets consumed their corridors. If time remains, rip up all
+    // route items and route the failed nets FIRST; kept only when
+    // strictly more nets complete (transactional via snapshot).
+    let incomplete: Vec<i32> = net_nos
+        .iter()
+        .copied()
+        .filter(|&n| !board.net_is_completely_connected(n))
+        .collect();
+    if !incomplete.is_empty() && !time_limit.is_some_and(|t| t.limit_exceeded()) {
+        let complete_before = net_nos.len() - incomplete.len();
+        board.generate_snapshot();
+        let to_remove: Vec<ItemId> = board
+            .items()
+            .filter(|(_, it)| {
+                it.base.component_no == 0 && it.base.net_count() > 0 && it.is_routable()
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in to_remove {
+            board.remove_item(id);
+        }
+        let order: Vec<i32> = incomplete
+            .iter()
+            .copied()
+            .chain(net_nos.iter().copied().filter(|n| !incomplete.contains(n)))
+            .collect();
+        let restart_request = BatchRequest {
+            max_expansions: budget,
+            deadline: time_limit.copied().or(request.deadline),
+            ..*request
+        };
+        let ripup_penalty = request.via_cost.max(20_000.0);
+        let mut restart = BatchResult::default();
+        for net_no in order {
+            if time_limit.is_some_and(|t| t.limit_exceeded()) {
+                break;
+            }
+            let result = route_net_with_ripup(board, net_no, &restart_request, ripup_penalty);
+            restart.routed_connections += result.routed_connections;
+            restart.failed_connections += result.failed_connections;
+        }
+        let complete_after = net_nos
+            .iter()
+            .filter(|&&n| board.net_is_completely_connected(n))
+            .count();
+        if complete_after > complete_before {
+            board.pop_snapshot();
+            total.routed_connections += restart.routed_connections;
+            total.failed_connections = net_nos.len() - complete_after;
+        } else {
+            board.undo();
+        }
     }
     total
 }

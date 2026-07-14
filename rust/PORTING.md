@@ -9,9 +9,11 @@ should pick up the first unchecked item below.
 - **Working end to end**: DSN import (incl. pre-routed wiring) →
   expansion-room maze routing with in-search ripup → SES export.
   `cargo run --release --example route_board [board.dsn] [--strip-wiring]`.
-- **Benchmark** (interf_u, 173 nets, 2 layers): **100% from scratch in
-  123 s** (0 failed connections); 100% completion of the pre-routed
-  board in 1.9 s. See the benchmark log.
+- **Benchmarks: every fleet board routes 100% from scratch** —
+  interf_u 173/173 (~250 s), 8088sbc 104/104, pic_programmer 111/111,
+  NormalPuzzle 72/72, wavefolder 31/31, display-8-digit 30/30,
+  J2_reference 24/24, ecc83 13/13, rpi_splitter 5/5. Pre-routed
+  interf_u completes in 1.9 s. See the benchmark log.
 - ~18k lines of Rust, 174 tests, no warnings; ~70 Java files ported.
 - 6 upstream Java bugs found and documented (see the notes/decisions log
   and code comments marked "deviation").
@@ -194,6 +196,16 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 
 ## Open issues
 
+- 2026-07-14 (iter 78): FULL FLEET AT 100%. J2's GND routed fully when
+  alone → pure ordering congestion (largest-extent nets route last
+  into consumed corridors). A global largest-first order fixed J2 and
+  8088sbc but broke interf_u (134/173) — no static order wins. Fix: a
+  transactional RESTART FALLBACK after the normal passes when nets
+  remain incomplete: snapshot, rip up all route items, route the
+  failed nets FIRST, keep only if strictly more nets complete.
+  Results: NormalPuzzle 70→72/72, 8088sbc 100→104/104, J2 23→24/24,
+  interf_u/wavefolder unchanged at 100%. (FR_ROUTE_ORDER_DESC env
+  kept for ordering experiments.)
 - 2026-07-14 (iter 77): wavefolder fully solved — 31/31 in 3.3 s. The
   last two nets failed because back-side placement used the wrong flip
   style: Java (and the specctra default) mirrors pin offsets and pad
