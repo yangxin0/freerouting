@@ -250,6 +250,20 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 102): ordered forced insertion ported — the shove
+  now follows Java's insert structure: victims cut first, substitute
+  pieces popped in stack order, and each substitute's segments
+  recursively shove what blocks them WITH the from-side derived from
+  the substitute geometry (CalcShapeAndFromSide) before insertion, so
+  inner shoves push away instead of ping-ponging. Multi-net stacking
+  is now supported; transactional via one top-level snapshot. Fixed en
+  route: entries must cache the victim's trace lines (the victim is
+  cut before the substitutes are built — Java holds the dead object),
+  and conflict checks for fixed items must include clearance. Fleet
+  neutral (167/173, 29/30, 69/72, 31/31): the remaining sealed-pocket
+  nets fail at SEARCH level (pins seal the pocket before shove can
+  act) — the next lever is via shoving during search / ForcedPadAlgo
+  style pad escapes, not more insert-time shoving.
 - 2026-07-15 (iter 101): display-8-digit's failing net identified as
   /P (not VCC) — routes fine alone; on the full board its pads end up
   sealed (final searches exhaust at 12-14 expansions) and the restart

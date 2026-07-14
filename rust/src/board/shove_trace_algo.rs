@@ -19,6 +19,12 @@ use crate::geometry::planar::TileShape;
 /// victims were cut and replaced by substitutes routing around the shape
 /// (recursively shoving what blocks the substitutes, up to 3 levels);
 /// false leaves the board unchanged.
+/// Shoves the foreign routable traces overlapping `shove_shape` on
+/// `layer` aside while routing `own_net_nos` (Java:
+/// `ShoveTraceAlgo.insert`). Substitute pieces recursively shove what
+/// blocks them, directed by the from-side derived from the substitute
+/// geometry, before being inserted. Returns true when the shape is
+/// cleared; false leaves the board unchanged (transactional).
 pub fn shove_aside(
     board: &mut BasicBoard,
     shove_shape: &TileShape,
@@ -26,109 +32,151 @@ pub fn shove_aside(
     own_net_nos: &[i32],
     cl_class: usize,
 ) -> bool {
-    // depth 1: substitutes must be free (recursive pushing attempts
-    // ping-pong between adjacent substitutes and cost more than they won
-    // on the fleet; revisit with Java's ordered forced insertion)
-    shove_shape_recursive(board, shove_shape, layer, own_net_nos, cl_class, 1)
+    board.generate_snapshot();
+    if shove_insert(
+        board,
+        shove_shape,
+        CalcFromSide::NOT_CALCULATED,
+        layer,
+        own_net_nos,
+        cl_class,
+        4,
+    ) {
+        board.pop_snapshot();
+        true
+    } else {
+        board.undo();
+        false
+    }
 }
 
-fn shove_shape_recursive(
+/// The recursive worker (Java: `ShoveTraceAlgo.insert`); on failure the
+/// board may be partially changed — the caller rolls back.
+#[allow(clippy::too_many_arguments)]
+fn shove_insert(
     board: &mut BasicBoard,
-    shove_shape: &TileShape,
+    trace_shape: &TileShape,
+    from_side: CalcFromSide,
     layer: usize,
     own_net_nos: &[i32],
     cl_class: usize,
     depth: usize,
 ) -> bool {
-    // the shove victims: shovable foreign traces of ONE net family (the
-    // first found — multiple distinct-net victims need Java's ordered
-    // forced insertion, not yet ported). Everything else (vias, pins,
-    // keepouts, other families) stays on the board and constrains the
-    // substitutes through the free check; the caller rips what remains.
-    let mut victims: Vec<ItemId> = Vec::new();
-    let mut family: Option<Vec<i32>> = None;
-    for id in board.overlapping_items(shove_shape, Some(layer)) {
+    if trace_shape.is_empty() {
+        return true;
+    }
+    // candidates within clearance of the shape
+    let max_cl = board.rules.clearance_matrix.max_value(layer).max(0) as f64;
+    let query = trace_shape.offset(max_cl);
+    let mut obstacles: Vec<ItemId> = Vec::new();
+    for id in board.overlapping_items(&query, Some(layer)) {
         let Some(item) = board.get_item(id) else {
             continue;
         };
         if own_net_nos.iter().any(|n| item.base.contains_net(*n)) {
             continue;
         }
-        if let ItemKind::PolylineTrace(t) = &item.kind {
-            if t.layer != layer || item.base.is_shove_fixed() || !item.is_routable() {
-                continue;
-            }
-            match &family {
-                None => {
-                    family = Some(item.base.net_nos.clone());
-                    victims.push(id);
+        match &item.kind {
+            ItemKind::ObstacleArea(a) => {
+                if !a.is_conduction
+                    && item
+                        .tile_shapes(&board.padstacks)
+                        .iter()
+                        .any(|(s, l)| *l == layer && s.intersection(&query).dimension() >= 2)
+                {
+                    return false; // keepouts cannot be shoved
                 }
-                Some(f) if *f == item.base.net_nos => victims.push(id),
-                Some(_) => {}
+            }
+            ItemKind::Via(_) => {
+                // via shoving (MoveDrillItemAlgo) not yet ported: fail
+                // only when the via actually conflicts with the shape
+                let conflicts = item
+                    .tile_shapes(&board.padstacks)
+                    .iter()
+                    .any(|(s, l)| *l == layer && s.intersection(&query).dimension() >= 2);
+                if conflicts {
+                    return false;
+                }
+            }
+            ItemKind::PolylineTrace(t) => {
+                if t.layer != layer {
+                    continue;
+                }
+                if item.base.is_shove_fixed() || !item.is_routable() {
+                    // fixed traces block when conflicting incl. clearance
+                    let conflicts = item
+                        .tile_shapes(&board.padstacks)
+                        .iter()
+                        .any(|(s, l)| *l == layer && s.intersection(&query).dimension() >= 2);
+                    if conflicts {
+                        return false;
+                    }
+                    continue;
+                }
+                obstacles.push(id);
             }
         }
     }
-    if victims.is_empty() {
-        return false; // nothing shovable in the way
-    }
-    if depth == 0 {
-        return false;
-    }
-
     let mut entries = ShapeTraceEntries::new(
-        shove_shape.clone(),
+        trace_shape.clone(),
         layer,
         own_net_nos.to_vec(),
         cl_class,
-        CalcFromSide::NOT_CALCULATED,
+        from_side,
     );
-    if !entries.store_items(board, &victims, false, false) {
+    // copper sharing allowed like Java's insert
+    if !entries.store_items(board, &obstacles, false, true) {
         return false;
     }
     if !entries.shove_via_list.is_empty() {
         return false;
     }
-    let mut pieces = Vec::new();
-    while let Some(piece) = entries.next_substitute_trace_piece(board) {
-        pieces.push(piece);
+    if std::env::var_os("FR_DEBUG_SHOVE").is_some() {
+        eprintln!(
+            "SHOVE layer {layer} obstacles {} pieces {} depth {depth}",
+            obstacles.len(),
+            entries.substitute_trace_count()
+        );
     }
-
-    // check every substitute before touching the board: at depth 1 a
-    // blocked substitute simply refuses (no snapshot churn); the victims
-    // themselves are not blockers (they get cut below)
-    for (polyline, piece_layer, half_width, net_nos, piece_cl) in &pieces {
-        let clearance = board
-            .rules
-            .clearance_matrix
-            .get_value(*piece_cl, cl_class, *piece_layer, false)
-            .max(0) as f64;
-        for shape in polyline.offset_shapes(*half_width) {
-            let check = shape.offset(clearance);
-            let blocked = board
-                .overlapping_items(&check, Some(*piece_layer))
-                .into_iter()
-                .any(|id| {
-                    if victims.contains(&id) {
-                        return false;
-                    }
-                    board.get_item(id).is_some_and(|other| {
-                        if let ItemKind::ObstacleArea(a) = &other.kind {
-                            if a.is_conduction {
-                                return false;
-                            }
-                        }
-                        !net_nos.iter().any(|n| other.base.contains_net(*n))
-                    })
-                });
-            if blocked {
+    if entries.substitute_trace_count() == 0 {
+        return true;
+    }
+    if depth == 0 {
+        return false;
+    }
+    // cut all victims now; the substitutes reconnect them
+    entries.cutout_traces(board, &obstacles);
+    while let Some((polyline, piece_layer, half_width, net_nos, piece_cl)) =
+        entries.next_substitute_trace_piece(board)
+    {
+        if polyline.is_empty() || polyline.corner_count() < 2 {
+            continue;
+        }
+        // clear the way for this substitute segment by segment, with the
+        // from side derived from the substitute geometry (directs the
+        // inner shoves away instead of ping-ponging back)
+        let segment_shapes = polyline.offset_shapes(half_width);
+        for (i, segment_shape) in segment_shapes.iter().enumerate() {
+            let calc = crate::board::CalcShapeAndFromSide::new(
+                &polyline,
+                half_width,
+                i,
+                segment_shape,
+                false,
+                false,
+            );
+            if !shove_insert(
+                board,
+                &calc.shape,
+                calc.from_side,
+                piece_layer,
+                &net_nos,
+                piece_cl,
+                depth - 1,
+            ) {
                 return false;
             }
         }
-    }
-    let _ = depth;
-    // commit
-    entries.cutout_traces(board, &victims);
-    for (polyline, piece_layer, half_width, net_nos, piece_cl) in pieces {
         board.insert_trace(polyline, piece_layer, half_width, net_nos, piece_cl);
     }
     true

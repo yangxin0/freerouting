@@ -75,6 +75,9 @@ struct EntryPoint {
     half_width: i32,
     clearance_class: usize,
     trace_line_no: usize,
+    /// The trace's polyline line at `trace_line_no`, cached because the
+    /// substitute is built after the victim was cut off the board.
+    trace_line: crate::geometry::planar::Line,
     entry_approx: crate::geometry::planar::FloatPoint,
     edge_no: usize,
     /// -1 = not yet calculated.
@@ -219,27 +222,17 @@ impl ShapeTraceEntries {
                 .offset(cl_offset);
             let edge_count = self.shape.border_line_count();
             let edge_diff = last.edge_no - first.edge_no;
-            let Some(first_item) = board.get_item(first.trace) else {
-                continue;
-            };
-            let Some(last_item) = board.get_item(last.trace) else {
-                continue;
-            };
-            let (ItemKind::PolylineTrace(first_trace), ItemKind::PolylineTrace(last_trace)) =
-                (&first_item.kind, &last_item.kind)
-            else {
-                continue;
-            };
             // the substitute trace: the intersecting trace lines at both
-            // entries joined by the edge lines of the offset shape
+            // entries (cached; the victims are already cut) joined by the
+            // edge lines of the offset shape
             let mut piece_lines = Vec::with_capacity(edge_diff + 3);
-            piece_lines.push(first_trace.polyline.arr[first.trace_line_no]);
+            piece_lines.push(first.trace_line);
             let mut curr_edge_no = first.edge_no % edge_count;
             for _ in 0..=edge_diff {
                 piece_lines.push(offset_shape.border_line(curr_edge_no));
                 curr_edge_no = (curr_edge_no + 1) % edge_count;
             }
-            piece_lines.push(last_trace.polyline.arr[last.trace_line_no]);
+            piece_lines.push(last.trace_line);
             let piece_polyline = Polyline::from_lines(piece_lines);
             if piece_polyline.is_empty() {
                 continue; // no valid piece: try the next one
@@ -317,6 +310,7 @@ impl ShapeTraceEntries {
                 trace.half_width,
                 item.base.clearance_class,
                 line_no,
+                trace.polyline.arr[line_no],
                 edge_no,
                 entry_approx,
             );
@@ -417,6 +411,7 @@ impl ShapeTraceEntries {
                                 trace.half_width,
                                 item.base.clearance_class,
                                 trace_line_segment_no,
+                                trace.polyline.arr[trace_line_segment_no],
                                 projection_side,
                                 projection.to_float(),
                             );
@@ -671,6 +666,7 @@ impl ShapeTraceEntries {
         half_width: i32,
         clearance_class: usize,
         trace_line_no: usize,
+        trace_line: crate::geometry::planar::Line,
         edge_no: usize,
         entry_approx: crate::geometry::planar::FloatPoint,
     ) {
@@ -680,6 +676,7 @@ impl ShapeTraceEntries {
             half_width,
             clearance_class,
             trace_line_no,
+            trace_line,
             entry_approx,
             edge_no,
             stack_level: -1,
