@@ -81,6 +81,10 @@ pub struct ExpansionDoor {
     pub dimension: i32,
     /// Each section can be expanded separately by the maze search.
     pub sections: Vec<MazeSearchElement>,
+    /// Cache of the computed section segments per offset: the door shape
+    /// simplification dominated the routing profile when recomputed on
+    /// every room seeding.
+    cached_segments: Option<(f64, Vec<FloatLine>)>,
 }
 
 /// Arena of rooms and doors.
@@ -152,6 +156,7 @@ impl RoomGraph {
             second_room,
             dimension,
             sections: Vec::new(),
+            cached_segments: None,
         });
         self.rooms[first_room].doors.push(id);
         self.rooms[second_room].doors.push(id);
@@ -196,6 +201,19 @@ impl RoomGraph {
     /// (Java: `ExpansionDoor.get_section_segments`).
     pub fn door_section_segments(&mut self, door: DoorId, offset: f64) -> Vec<FloatLine> {
         let offset = offset + TRACE_WIDTH_TOLERANCE;
+        if let Some((cached_offset, segments)) = &self.doors[door].cached_segments {
+            if *cached_offset == offset {
+                return segments.clone();
+            }
+        }
+        let segments = self.compute_door_section_segments(door, offset);
+        self.doors[door].cached_segments = Some((offset, segments.clone()));
+        segments
+    }
+
+    /// Uncached worker for [`Self::door_section_segments`]; `offset`
+    /// already includes the tolerance.
+    fn compute_door_section_segments(&mut self, door: DoorId, offset: f64) -> Vec<FloatLine> {
         let door_shape = self.door_shape(door);
         if door_shape.is_empty() {
             return Vec::new();

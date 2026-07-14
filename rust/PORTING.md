@@ -215,6 +215,15 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   (cheap, correct). Future optimization lever: octagon-specialized
   restrain/intersection paths like Java's ShapeSearchTree instead of
   the unconditional Simplex conversion in restrain_shape.
+- 2026-07-14 (iter 76): profiled with /usr/bin/sample —
+  Simplex::remove_redundant_lines + Line::cmp sorting ≈ 55% of
+  runtime. Two behaviour-neutral caches (bit-identical outputs):
+  door section segments cached per (door, offset), and item tile
+  shapes computed once per item (OnceCell; items are immutable once
+  inserted; the shape cache is excluded from Item's PartialEq).
+  interf_u 256 s → 185 s, wavefolder finishes in 53 s. Remaining
+  remove_redundant_lines load comes from offset_shapes at insertion
+  and room-completion intersections.
 - Issue026-J2_reference GND (22 pins) still incomplete after the
   rotation fix.
 - Non-quarter-turn component rotations still only rotate pin offsets,

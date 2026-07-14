@@ -122,10 +122,20 @@ pub enum ItemKind {
 }
 
 /// An item on the board.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Item {
     pub base: ItemBase,
     pub kind: ItemKind,
+    /// Lazily computed tile shapes: items are immutable once inserted,
+    /// and recomputing trace offset shapes dominated the routing profile.
+    cached_tile_shapes: std::cell::OnceCell<Vec<(TileShape, usize)>>,
+}
+
+impl PartialEq for Item {
+    fn eq(&self, other: &Self) -> bool {
+        // the shape cache is derived state and excluded
+        self.base == other.base && self.kind == other.kind
+    }
 }
 
 impl Item {
@@ -142,6 +152,7 @@ impl Item {
                 center,
                 attach_allowed,
             }),
+            cached_tile_shapes: std::cell::OnceCell::new(),
         }
     }
 
@@ -158,6 +169,7 @@ impl Item {
                 layer,
                 polyline,
             }),
+            cached_tile_shapes: std::cell::OnceCell::new(),
         }
     }
 
@@ -260,8 +272,15 @@ impl Item {
         }
     }
 
-    /// All search-tree shapes of this item with their layers.
+    /// All search-tree shapes of this item with their layers. Computed
+    /// once and cached (items are immutable once inserted).
     pub fn tile_shapes(&self, padstacks: &Padstacks) -> Vec<(TileShape, usize)> {
+        self.cached_tile_shapes
+            .get_or_init(|| self.compute_tile_shapes(padstacks))
+            .clone()
+    }
+
+    fn compute_tile_shapes(&self, padstacks: &Padstacks) -> Vec<(TileShape, usize)> {
         match &self.kind {
             ItemKind::Via(_) => (0..self.tile_shape_count(padstacks))
                 .filter_map(|i| self.tile_shape(i, padstacks))
@@ -318,6 +337,7 @@ impl Item {
                 name: name.into(),
                 is_conduction,
             }),
+            cached_tile_shapes: std::cell::OnceCell::new(),
         }
     }
 }
