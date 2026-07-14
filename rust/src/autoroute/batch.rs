@@ -449,6 +449,10 @@ pub fn batch_route_passes_with_time_limit(
             total.failed_connections = net_nos.len() - complete_after;
             dry_rounds = 0;
         } else {
+            // NOTE: accepting ties (failure set rotates) was tried and
+            // won nothing: with a single failure the rotation is a no-op
+            // and the deterministic restart reproduces the same outcome,
+            // burning a full extra round.
             board.undo();
             dry_rounds += 1;
         }

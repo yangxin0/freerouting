@@ -250,6 +250,15 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 101): display-8-digit's failing net identified as
+  /P (not VCC) — routes fine alone; on the full board its pads end up
+  sealed (final searches exhaust at 12-14 expansions) and the restart
+  fallback reproduces a tie deterministically. Tie-accepting restart
+  rounds were tried and REVERTED: with a single failure the rotation
+  is a no-op and the extra rounds burn time for zero gain everywhere.
+  These last-net cases (display /P, NormalPuzzle x3, interf_u x6)
+  share one shape: winnable only by a mechanism that frees a sealed
+  pocket — ordered forced insertion (full shove) or via shoving.
 - 2026-07-15 (iter 100): J2_reference GND VERDICT — unroutable under
   the file's own rules: its class demands 200.1 um clearance and
   250 um width while the fine-pitch pad gaps are 450 um
