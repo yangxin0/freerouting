@@ -440,6 +440,240 @@ impl Simplex {
         Simplex::new(new_lines)
     }
 
+    /// Cuts this simplex out of `outer_simplex`. Divides the resulting
+    /// shape into simplices along the minimal distance lines from the
+    /// vertices of the inner simplex to the outer simplex and returns the
+    /// convex pieces of this division.
+    ///
+    /// Only implemented for 2-dimensional simplices (like Java, which warns
+    /// and returns null there; this port returns the outer simplex intact).
+    pub fn cutout_from(&self, outer_simplex: &Simplex) -> Vec<Simplex> {
+        if self.dimension() < 2 {
+            return vec![outer_simplex.clone()];
+        }
+        let inner_simplex = self.intersection(outer_simplex);
+        if inner_simplex.dimension() < 2 {
+            // nothing to cut out of outer_simplex
+            return vec![outer_simplex.clone()];
+        }
+        let inner_corner_count = inner_simplex.lines.len();
+        let mut division_line_arr: Vec<Vec<Line>> = Vec::with_capacity(inner_corner_count);
+        for inner_corner_no in 0..inner_corner_count {
+            match inner_simplex.calc_division_lines(inner_corner_no, outer_simplex) {
+                Some(lines) => division_line_arr.push(lines),
+                None => return vec![outer_simplex.clone()],
+            }
+        }
+        let mut check_cross_first_line = false;
+        // Note: the Java original declares prev_division_line but only ever
+        // assigns it to a dead local at the end of the loop, so it stays
+        // null; the merge_prev branches below are preserved but never fire.
+        let prev_division_line: Option<Line> = None;
+        let first_division_line = division_line_arr[0][0];
+        let first_direction = first_division_line.direction();
+        let mut result_list: Vec<Simplex> = Vec::new();
+
+        for inner_corner_no in 0..inner_corner_count {
+            let next_division_line = if inner_corner_no == inner_corner_count - 1 {
+                division_line_arr[0][0]
+            } else {
+                division_line_arr[inner_corner_no + 1][0]
+            };
+            let curr_division_lines = &division_line_arr[inner_corner_no];
+            if curr_division_lines.len() == 2 {
+                // 2 division lines are necessary (sharp corner). Construct
+                // an unbounded simplex from curr_division_lines[1] and [0]
+                // and intersect it with the outer simplex.
+                let curr_dir = curr_division_lines[0].direction();
+                let mut merge_prev_division_line = false;
+                let mut merge_first_division_line = false;
+                if let Some(prev_line) = prev_division_line {
+                    if curr_dir.determinant(prev_line.direction()) > 0 {
+                        // the previous division line may intersect
+                        // curr_division_lines[0] inside the divide simplex
+                        merge_prev_division_line = true;
+                    }
+                }
+                if !check_cross_first_line {
+                    check_cross_first_line =
+                        inner_corner_no > 0 && curr_dir.determinant(first_direction) > 0;
+                }
+                if check_cross_first_line {
+                    let curr_dir2 = curr_division_lines[1].direction();
+                    if curr_dir2.determinant(first_direction) < 0 {
+                        // The current piece has an intersection area with
+                        // the first piece; add a line to prevent this.
+                        merge_first_division_line = true;
+                    }
+                }
+                let mut piece_lines = vec![curr_division_lines[1].opposite(), curr_division_lines[0]];
+                if merge_prev_division_line {
+                    piece_lines.push(prev_division_line.unwrap());
+                }
+                if merge_first_division_line {
+                    piece_lines.push(first_division_line.opposite());
+                }
+                result_list.push(Simplex::new(piece_lines).intersection(outer_simplex));
+            }
+            // Construct an unbounded simplex from next_division_line, the
+            // inner border line and the last current division line, and
+            // intersect it with the outer simplex.
+            let merge_next_division_line = next_division_line.b != next_division_line.a;
+            let last_curr_division_line = curr_division_lines[curr_division_lines.len() - 1];
+            let last_curr_dir = last_curr_division_line.direction();
+            let merge_last_curr_division_line =
+                last_curr_division_line.b != last_curr_division_line.a;
+            let mut merge_prev_division_line = false;
+            let mut merge_first_division_line = false;
+            if let Some(prev_line) = prev_division_line {
+                if last_curr_dir.determinant(prev_line.direction()) > 0 {
+                    // the previous division line may intersect the last
+                    // current division line inside the divide simplex
+                    merge_prev_division_line = true;
+                }
+            }
+            if !check_cross_first_line {
+                // scalar_product checked to ignore backcrossing at small
+                // inner_corner_no
+                check_cross_first_line = inner_corner_no > 0
+                    && last_curr_dir.determinant(first_direction) > 0
+                    && last_curr_dir
+                        .get_vector()
+                        .scalar_product(first_direction.get_vector())
+                        < 0;
+            }
+            if check_cross_first_line
+                && next_division_line.direction().determinant(first_direction) < 0
+            {
+                // The current piece has an intersection area with the first
+                // piece; add a line to prevent this.
+                merge_first_division_line = true;
+            }
+            let curr_line = inner_simplex.lines[inner_corner_no];
+            let mut piece_lines = vec![curr_line.opposite()];
+            if merge_next_division_line {
+                piece_lines.push(next_division_line.opposite());
+            }
+            if merge_last_curr_division_line {
+                piece_lines.push(last_curr_division_line);
+            }
+            if merge_prev_division_line {
+                piece_lines.push(prev_division_line.unwrap());
+            }
+            if merge_first_division_line {
+                piece_lines.push(first_division_line.opposite());
+            }
+            result_list.push(Simplex::new(piece_lines).intersection(outer_simplex));
+        }
+        result_list
+    }
+
+    /// For each corner of this inner simplex constructs 1 or 2
+    /// perpendicular projections onto lines of the outer simplex, so that
+    /// the resulting pieces after cutting out the inner simplex are convex.
+    /// 2 projections may be necessary at sharp corners.
+    fn calc_division_lines(
+        &self,
+        inner_corner_no: usize,
+        outer_simplex: &Simplex,
+    ) -> Option<Vec<Line>> {
+        let curr_inner_line = self.lines[inner_corner_no];
+        let prev_inner_line = if inner_corner_no != 0 {
+            self.lines[inner_corner_no - 1]
+        } else {
+            self.lines[self.lines.len() - 1]
+        };
+        let intersection = curr_inner_line.intersection_approx(&prev_inner_line);
+        if intersection.x >= i32::MAX as f64 {
+            // intersection expected
+            return None;
+        }
+        let inner_corner = intersection.round();
+        let c_tolerance = 0.0001;
+        let is_exact = (inner_corner.x as f64 - intersection.x).abs() < c_tolerance
+            && (inner_corner.y as f64 - intersection.y).abs() < c_tolerance;
+        if !is_exact {
+            // Assumed to be a corner from intersecting the inner simplex
+            // with the outer simplex; it lies on the outer border, so no
+            // division is necessary.
+            return Some(vec![prev_inner_line]);
+        }
+        let mut first_projection_dir = IntDirection::NULL;
+        let mut second_projection_dir = IntDirection::NULL;
+        let prev_inner_dir = prev_inner_line.direction().opposite();
+        let next_inner_dir = curr_inner_line.direction();
+        let mut outer_line_no = 0;
+
+        // Search the first outer line so that the perpendicular projection
+        // of the inner corner onto this line is visible from the inner
+        // corner to the left of prev_inner_line.
+        let mut min_distance = f64::from(i32::MAX);
+
+        for _ in 0..outer_simplex.lines.len() {
+            let outer_line = outer_simplex.lines[outer_line_no];
+            let Some(curr_projection_dir) = outer_line.perpendicular_direction(inner_corner)
+            else {
+                // inner corner is on the outer line
+                return Some(vec![Line::new(inner_corner, inner_corner)]);
+            };
+            let projection_visible = prev_inner_dir.determinant(curr_projection_dir) >= 0;
+            if projection_visible {
+                let mut curr_distance =
+                    outer_line.signed_distance(inner_corner.to_float()).abs();
+                // A second division may be necessary at a sharp corner.
+                let second_division_necessary =
+                    curr_projection_dir.determinant(next_inner_dir) < 0;
+                let mut curr_second_projection_dir = curr_projection_dir;
+                if second_division_necessary {
+                    // Search the first projection dir between
+                    // curr_projection_dir and next_inner_dir that is
+                    // visible from the next inner line.
+                    let mut second_projection_visible = false;
+                    let mut tmp_outer_line_no = outer_line_no;
+                    while !second_projection_visible {
+                        tmp_outer_line_no = (tmp_outer_line_no + 1) % outer_simplex.lines.len();
+                        let Some(dir) = outer_simplex.lines[tmp_outer_line_no]
+                            .perpendicular_direction(inner_corner)
+                        else {
+                            // inner corner is on the outer line
+                            return Some(vec![Line::new(inner_corner, inner_corner)]);
+                        };
+                        curr_second_projection_dir = dir;
+                        if curr_projection_dir.determinant(curr_second_projection_dir) < 0 {
+                            // Not found: the angle between the projections
+                            // would already exceed 180 degree.
+                            curr_distance = f64::from(i32::MAX);
+                            break;
+                        }
+                        second_projection_visible =
+                            curr_second_projection_dir.determinant(next_inner_dir) >= 0;
+                    }
+                    curr_distance += outer_simplex.lines[tmp_outer_line_no]
+                        .signed_distance(inner_corner.to_float())
+                        .abs();
+                }
+                if curr_distance < min_distance {
+                    min_distance = curr_distance;
+                    first_projection_dir = curr_projection_dir;
+                    second_projection_dir = curr_second_projection_dir;
+                }
+            }
+            outer_line_no = (outer_line_no + 1) % outer_simplex.lines.len();
+        }
+        if min_distance == f64::from(i32::MAX) {
+            // division not found
+            return None;
+        }
+        if first_projection_dir == second_projection_dir {
+            Some(vec![Line::from_direction(inner_corner, first_projection_dir)])
+        } else {
+            Some(vec![
+                Line::from_direction(inner_corner, first_projection_dir),
+                Line::from_direction(inner_corner, second_projection_dir),
+            ])
+        }
+    }
+
     /// Removes lines which are redundant for the shape of this simplex.
     /// Assumes the lines are sorted in ascending direction. Returns
     /// [`Simplex::EMPTY`] if the half planes have an empty intersection.
@@ -722,6 +956,66 @@ mod tests {
         let c = half.corner_approx(0);
         assert!(c.x >= i32::MAX as f64);
         assert!(half.bounding_octagon().is_none());
+    }
+
+    /// Shoelace area over the float corners of a bounded simplex.
+    fn simplex_area(s: &Simplex) -> f64 {
+        if s.is_empty() || !s.is_bounded() {
+            return 0.0;
+        }
+        let corners = s.corner_approx_arr();
+        let n = corners.len();
+        let mut sum = 0.0;
+        for i in 0..n {
+            let a = corners[i];
+            let b = corners[(i + 1) % n];
+            sum += a.x * b.y - b.x * a.y;
+        }
+        0.5 * sum.abs()
+    }
+
+    #[test]
+    fn cutout_square_hole() {
+        let outer = unit_square(20);
+        let hole = unit_square(4).translate_by(IntVector::new(8, 8));
+        let pieces = hole.cutout_from(&outer);
+        assert!(!pieces.is_empty());
+        let pieces_area: f64 = pieces.iter().map(simplex_area).sum();
+        let expected = simplex_area(&outer) - simplex_area(&hole);
+        assert!(
+            (pieces_area - expected).abs() < 1e-6,
+            "pieces_area {pieces_area} != expected {expected}"
+        );
+        for (i, piece) in pieces.iter().enumerate() {
+            assert!(piece.is_empty() || piece.is_bounded(), "piece {i} unbounded");
+            // No piece may reach the interior of the hole.
+            assert!(
+                !piece.contains_inside(&Point::Int(IntPoint::new(10, 10))),
+                "piece {i} covers the hole"
+            );
+        }
+    }
+
+    #[test]
+    fn cutout_triangle_hole() {
+        let outer = unit_square(20);
+        // Triangle with a sharp corner: (2,2), (10,2), (2,8).
+        let triangle = Simplex::get_instance(vec![
+            Line::from_coords(2, 2, 10, 2),
+            Line::from_coords(10, 2, 2, 8),
+            Line::from_coords(2, 8, 2, 2),
+        ]);
+        assert_eq!(triangle.dimension(), 2);
+        let pieces = triangle.cutout_from(&outer);
+        let pieces_area: f64 = pieces.iter().map(simplex_area).sum();
+        let expected = simplex_area(&outer) - simplex_area(&triangle);
+        assert!(
+            (pieces_area - expected).abs() < 1e-6,
+            "pieces_area {pieces_area} != expected {expected}"
+        );
+        // Non-overlapping hole: outer returned unchanged.
+        let far_hole = unit_square(2).translate_by(IntVector::new(100, 100));
+        assert_eq!(far_hole.cutout_from(&outer), vec![outer]);
     }
 
     #[test]

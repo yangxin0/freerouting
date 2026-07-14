@@ -36,8 +36,8 @@ should pick up the first unchecked item below.
 - [x] IntBox.java → `geometry/planar/int_box.rs` (box/box ops, cutout, divide, compare; also closes Point::surrounding_box / is_contained_in gaps; IntOctagon/Simplex/TileShape interop pending)
 - [x] IntOctagon.java (+ FortyfiveDegreeDirection.java) → `geometry/planar/int_octagon.rs` (normalize, intersection/union/contains, border points/projections, both cutout variants; also adds IntBox::to_int_octagon/enlarge, IntPoint::surrounding_octagon; Simplex/TileShape interop pending)
 - [ ] Polyline.java
-- [x] Simplex.java core → `geometry/planar/simplex.rs` (get_instance/remove_redundant_lines, corners, dimension, containment from TileShape.java, intersection, bounds, offset/enlarge, to/from IntBox+IntOctagon; cutout_from + calc_division_lines pending)
-- [ ] Shape hierarchy: Shape / ConvexShape / TileShape enum / RegularTileShape / Circle / PolygonShape / PolylineShape / PolylineArea / Area / Ellipse; Simplex::cutout_from + calc_division_lines
+- [x] Simplex.java → `geometry/planar/simplex.rs` (complete incl. cutout_from + calc_division_lines; Java's never-assigned prev_division_line preserved as documented dead branch)
+- [ ] Shape hierarchy: Shape / ConvexShape / TileShape enum / RegularTileShape / Circle / PolygonShape / PolylineShape / PolylineArea / Area / Ellipse
 - [ ] Polygon.java
 
 ## Phase 2 — supporting infrastructure
