@@ -106,6 +106,26 @@ impl BasicBoard {
         self.insert_item(item)
     }
 
+    /// Convenience: inserts a keepout or conduction area.
+    pub fn insert_area(
+        &mut self,
+        area: crate::geometry::planar::PolylineArea,
+        layer: usize,
+        name: &str,
+        net_nos: Vec<i32>,
+        clearance_class: usize,
+        is_conduction: bool,
+    ) -> ItemId {
+        let item = Item::new_obstacle_area(
+            ItemBase::new(0, net_nos, clearance_class),
+            area,
+            layer,
+            name,
+            is_conduction,
+        );
+        self.insert_item(item)
+    }
+
     fn insert_into_search_tree(&mut self, id: ItemId, item: &Item) {
         let mut leaves = Vec::new();
         for (index, (shape, layer)) in item.tile_shapes(&self.padstacks).into_iter().enumerate()
@@ -251,6 +271,7 @@ impl BasicBoard {
                     *point == t.first_corner() || *point == t.last_corner()
                 }
                 ItemKind::Via(v) => *point == Point::Int(v.center),
+                ItemKind::ObstacleArea(a) => a.is_conduction && a.area.contains(point),
             };
             if touches {
                 result.push(other_id);
@@ -276,6 +297,38 @@ impl BasicBoard {
             }
             ItemKind::Via(v) => {
                 self.get_normal_contacts_at(id, &Point::Int(v.center), false)
+            }
+            ItemKind::ObstacleArea(a) => {
+                // a conduction area contacts the connectable items whose
+                // connection point lies inside the area
+                if !a.is_conduction {
+                    return Vec::new();
+                }
+                let query = TileShape::Box(a.area.bounding_box());
+                let mut r = Vec::new();
+                for other_id in self.overlapping_items(&query, Some(a.layer)) {
+                    if other_id == id {
+                        continue;
+                    }
+                    let Some(other) = self.get_item(other_id) else {
+                        continue;
+                    };
+                    if !other.base.shares_net(&item.base) {
+                        continue;
+                    }
+                    let touches = match &other.kind {
+                        ItemKind::PolylineTrace(t) => {
+                            a.area.contains(&t.first_corner())
+                                || a.area.contains(&t.last_corner())
+                        }
+                        ItemKind::Via(v) => a.area.contains(&Point::Int(v.center)),
+                        ItemKind::ObstacleArea(_) => false,
+                    };
+                    if touches {
+                        r.push(other_id);
+                    }
+                }
+                r
             }
         };
         result.sort();
@@ -580,6 +633,56 @@ mod tests {
         board.remove_item(trace_1);
         assert!(!board.net_is_completely_connected(1));
         assert_eq!(board.get_connected_set(via_b, 1), vec![via_b, trace_2]);
+    }
+
+    #[test]
+    fn areas_as_keepouts_and_planes() {
+        use crate::geometry::planar::{PolygonShape, PolylineArea};
+        let mut board = test_board();
+        // an L-shaped keepout (no net) on layer 0
+        let keepout_shape = PolylineArea::new(
+            PolygonShape::from_int_points(&[
+                IntPoint::new(1000, 1000),
+                IntPoint::new(3000, 1000),
+                IntPoint::new(3000, 2000),
+                IntPoint::new(2000, 2000),
+                IntPoint::new(2000, 3000),
+                IntPoint::new(1000, 3000),
+            ]),
+            vec![],
+        );
+        let keepout = board.insert_area(keepout_shape, 0, "keepout", vec![], 1, false);
+        // blocks every net inside its shape
+        assert!(board.is_blocked(&query_box(1100, 1100, 1200, 1200), 0, 1));
+        // but not in the concave notch
+        assert!(!board.is_blocked(&query_box(2500, 2500, 2600, 2600), 0, 1));
+        // and not on the other layer
+        assert!(!board.is_blocked(&query_box(1100, 1100, 1200, 1200), 1, 1));
+        assert!(!board.get_item(keepout).unwrap().is_connectable());
+
+        // a conduction plane of net 7 on layer 1
+        let plane_shape = PolylineArea::new(
+            PolygonShape::from_int_points(&[
+                IntPoint::new(0, 0),
+                IntPoint::new(10000, 0),
+                IntPoint::new(10000, 10000),
+                IntPoint::new(0, 10000),
+            ]),
+            vec![],
+        );
+        let plane = board.insert_area(plane_shape, 1, "gnd_plane", vec![7], 1, true);
+        assert!(board.get_item(plane).unwrap().is_connectable());
+        // a trace of net 7 ending inside the plane contacts it
+        let trace = board.insert_trace(
+            trace_polyline(&[(4000, 4000), (6000, 4000)]),
+            1,
+            100,
+            vec![7],
+            1,
+        );
+        assert_eq!(board.get_normal_contacts(trace), vec![plane]);
+        assert!(!board.is_tail(trace));
+        assert!(board.net_is_completely_connected(7));
     }
 
     #[test]

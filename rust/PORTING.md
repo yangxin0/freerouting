@@ -63,7 +63,8 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 - [x] board item model foundation → `board/item.rs` (FixedState, ItemBase, Item enum with Via + PolylineTrace incl. search-tree shape computation; Pin/areas/outline and board-dependent logic pending)
 - [x] BasicBoard core → `board/basic_board.rs` (UndoableObjects item store + MinAreaTree integration, insert/remove trace+via, layer-filtered exact overlap queries, net filtering/blocking, undo/redo with tree resync)
 - [x] connectivity → `board/basic_board.rs` (get_normal_contacts at trace corners / drill centers, start/end contacts, is_tail, connected sets, net completeness)
-- [ ] board remaining: Pin/ConductionArea/ObstacleArea/BoardOutline items, clearance-compensated ShapeSearchTree variants, RoutingBoard, shove/pull-tight algorithms
+- [x] ObstacleArea/ConductionArea items → `board/item.rs` ItemKind::ObstacleArea (resolved PolylineArea + layer + is_conduction; tree shapes via split_to_convex; symmetric conduction contacts in basic_board)
+- [ ] board remaining: Pin item (needs component model), BoardOutline item, clearance-compensated ShapeSearchTree variants, RoutingBoard, shove/pull-tight algorithms
 
 ## Phase 3 — routing engines
 

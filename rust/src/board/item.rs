@@ -8,7 +8,7 @@
 //! item data and the search-tree shape computation.
 
 use crate::core::Padstacks;
-use crate::geometry::planar::{IntBox, IntPoint, Point, Polyline, TileShape};
+use crate::geometry::planar::{IntBox, IntPoint, Point, Polyline, PolylineArea, TileShape};
 
 /// Sorted fixed states of board items; the strongest states come last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -99,10 +99,26 @@ pub struct PolylineTraceItem {
     pub polyline: Polyline,
 }
 
+/// An area item on a single layer: a keepout (obstacle) or, with
+/// `is_conduction`, a conduction area like a power plane
+/// (Java: `ObstacleArea` and its subclass `ConductionArea`).
+///
+/// The port stores the resolved (absolute) area; Java keeps a relative
+/// area plus translation/rotation/side, which follows with the component
+/// model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObstacleAreaItem {
+    pub area: PolylineArea,
+    pub layer: usize,
+    pub name: String,
+    pub is_conduction: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ItemKind {
     Via(ViaItem),
     PolylineTrace(PolylineTraceItem),
+    ObstacleArea(ObstacleAreaItem),
 }
 
 /// An item on the board.
@@ -146,10 +162,11 @@ impl Item {
     }
 
     /// True if this item can be routed to (Java: `Connectable` interface —
-    /// traces and vias are connectable).
+    /// traces, vias and conduction areas are connectable).
     pub fn is_connectable(&self) -> bool {
-        match self.kind {
+        match &self.kind {
             ItemKind::Via(_) | ItemKind::PolylineTrace(_) => true,
+            ItemKind::ObstacleArea(area) => area.is_conduction,
         }
     }
 
@@ -169,6 +186,7 @@ impl Item {
                 .map(|p| p.from_layer())
                 .unwrap_or(0),
             ItemKind::PolylineTrace(trace) => trace.layer,
+            ItemKind::ObstacleArea(area) => area.layer,
         }
     }
 
@@ -180,6 +198,7 @@ impl Item {
                 .map(|p| p.to_layer())
                 .unwrap_or(0),
             ItemKind::PolylineTrace(trace) => trace.layer,
+            ItemKind::ObstacleArea(area) => area.layer,
         }
     }
 
@@ -206,6 +225,11 @@ impl Item {
                 // one shape per polyline line segment
                 trace.polyline.arr.len().saturating_sub(2)
             }
+            ItemKind::ObstacleArea(area) => area
+                .area
+                .split_to_convex()
+                .map(|pieces| pieces.len())
+                .unwrap_or(0),
         }
     }
 
@@ -229,6 +253,10 @@ impl Item {
                 let shape = trace.polyline.offset_shape(trace.half_width, index)?;
                 Some((shape, trace.layer))
             }
+            ItemKind::ObstacleArea(area) => {
+                let pieces = area.area.split_to_convex()?;
+                pieces.into_iter().nth(index).map(|s| (s, area.layer))
+            }
         }
     }
 
@@ -247,6 +275,13 @@ impl Item {
                     .map(|s| (s, trace.layer))
                     .collect()
             }
+            ItemKind::ObstacleArea(area) => area
+                .area
+                .split_to_convex()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| (s, area.layer))
+                .collect(),
         }
     }
 
@@ -264,6 +299,25 @@ impl Item {
                 .polyline
                 .bounding_box()
                 .offset(trace.half_width as f64),
+            ItemKind::ObstacleArea(area) => area.area.bounding_box(),
+        }
+    }
+
+    pub fn new_obstacle_area(
+        base: ItemBase,
+        area: PolylineArea,
+        layer: usize,
+        name: impl Into<String>,
+        is_conduction: bool,
+    ) -> Self {
+        Item {
+            base,
+            kind: ItemKind::ObstacleArea(ObstacleAreaItem {
+                area,
+                layer,
+                name: name.into(),
+                is_conduction,
+            }),
         }
     }
 }
