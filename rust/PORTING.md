@@ -84,7 +84,8 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 - [x] DSN semantic import → `io/dsn_import.rs` (layers by index, resolution scaling, default rules, padstacks — circle/rect/path/polygon as box/octagon approximations, images/placement with rotation + back-side mirroring, network pin binding; wiring/keepout import + faithful pad shapes pending)
 - [x] SES session writer → `io/ses_export.rs` (network_out wires + autoroute vias; validated by re-parsing)
 - [x] end-to-end integration → `tests/route_fixture.rs` (import interf_u fixture → route /ACK → export session with the routed wire)
-- [ ] DSN wiring/keepout import, richer SES fidelity (library_out, session padstack forms)
+- [x] boundary import as outline keepout strips (BoardOutline tree-shape equivalent; routes verified to stay inside the outline bbox)
+- [ ] DSN wiring/keepout-area import, richer SES fidelity (library_out, session padstack forms)
 - [ ] CLI entry point (headless batch routing first; no GUI planned)
 
 ## Notes / decisions log

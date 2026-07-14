@@ -179,6 +179,23 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
 
     let mut board = BasicBoard::new(layer_structure, rules, padstacks);
 
+    // boundary: keepout strips along the outline edges on all layers so
+    // routes stay inside the board (Java: BoardOutline tree shapes)
+    if let Some(boundary) = structure.child("boundary") {
+        if let Some(path) = boundary.child("path") {
+            let coords: Vec<f64> = path
+                .args()
+                .skip(2)
+                .filter_map(|a| a.parse().ok())
+                .collect();
+            let corners: Vec<IntPoint> = coords
+                .chunks_exact(2)
+                .map(|c| IntPoint::new(scale(c[0]), scale(c[1])))
+                .collect();
+            insert_boundary_keepouts(&mut board, &corners, default_clearance / 2);
+        }
+    }
+
     // placement: instantiate the image pins per component place
     for placement in pcb.children("placement") {
         for component in placement.children("component") {
@@ -226,6 +243,46 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
         }
     }
     Ok(board)
+}
+
+/// Inserts thin keepout strips along the closed outline given by
+/// `corners` on every layer, so routes cannot cross the board boundary
+/// (Java: the tree shapes of `BoardOutline`).
+fn insert_boundary_keepouts(board: &mut BasicBoard, corners: &[IntPoint], half_width: i32) {
+    use crate::geometry::planar::{PolygonShape, PolylineArea};
+    if corners.len() < 2 {
+        return;
+    }
+    let half_width = half_width.max(1);
+    let layer_count = board.layer_structure.layer_count();
+    let mut edges: Vec<(IntPoint, IntPoint)> = corners
+        .windows(2)
+        .map(|w| (w[0], w[1]))
+        .filter(|(a, b)| a != b)
+        .collect();
+    // close the outline if the file did not repeat the first corner
+    if corners.first() != corners.last() {
+        edges.push((*corners.last().unwrap(), corners[0]));
+    }
+    for (a, b) in edges {
+        // a thin rectangle strip around the edge
+        let line = crate::geometry::planar::FloatLine::new(a.to_float(), b.to_float());
+        let left = line.translate(half_width as f64);
+        let right = line.translate(-(half_width as f64));
+        let strip = PolygonShape::from_int_points(&[
+            left.a.round(),
+            left.b.round(),
+            right.b.round(),
+            right.a.round(),
+        ]);
+        if strip.dimension() < 2 {
+            continue;
+        }
+        let area = PolylineArea::new(strip, vec![]);
+        for layer in 0..layer_count {
+            board.insert_area(area.clone(), layer, "boundary", vec![], 1, false);
+        }
+    }
 }
 
 /// Reads a single pad shape node (circle / rect / path / polygon),
@@ -315,7 +372,10 @@ mod tests {
         assert!(board.padstacks.count() > 10);
         assert!(board.rules.nets.max_net_no() > 10);
         // every pin landed as an item; the interf_u board has hundreds
-        let pin_count = board.item_count();
+        let pin_count = board
+            .items()
+            .filter(|(_, i)| matches!(i.kind, crate::board::ItemKind::Via(_)))
+            .count();
         assert!(pin_count > 100, "only {pin_count} pins imported");
         // a known net exists and is not yet routed
         let ack = board
@@ -337,7 +397,8 @@ mod tests {
     }
 
     #[test]
-    fn imports_empty_board() {
+    fn imports_empty_board_with_boundary_keepouts() {
+        use crate::board::ItemKind;
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
         let path = format!("{root}/fixtures/empty_board.dsn");
         let Ok(content) = std::fs::read_to_string(&path) else {
@@ -345,7 +406,22 @@ mod tests {
         };
         let board = import_dsn(&content).expect("import failed");
         assert_eq!(board.layer_structure.layer_count(), 2);
-        assert_eq!(board.item_count(), 0);
+        // no pins, but the boundary keepout strips are present
+        assert!(board.item_count() > 0);
+        assert!(board
+            .items()
+            .all(|(_, i)| matches!(i.kind, ItemKind::ObstacleArea(_))));
+        // the boundary blocks any net at the outline (coordinates from the
+        // file, scaled by resolution 10): the left border is x = 1295400
+        let on_border = TileShape::Box(IntBox::from_coords(
+            1295300, -800000, 1295500, -799000,
+        ));
+        assert!(board.is_blocked(&on_border, 0, 1));
+        // but the interior is free
+        let inside = TileShape::Box(IntBox::from_coords(
+            1500000, -800000, 1500200, -799800,
+        ));
+        assert!(!board.is_blocked(&inside, 0, 1));
     }
 
     #[test]

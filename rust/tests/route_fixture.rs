@@ -53,4 +53,18 @@ fn import_route_export_real_board() {
         .find(|n| n.arg() == Some("/ACK"))
         .expect("/ACK not in session");
     assert!(routed_net.child("wire").is_some(), "no wire for /ACK");
+
+    // the routed wires stay inside the board outline (bounding box of the
+    // boundary path in the file, scaled by resolution 10)
+    for wire in routed_net.children("wire") {
+        let path = wire.child("path").expect("path");
+        let coords: Vec<f64> = path.args().skip(2).filter_map(|a| a.parse().ok()).collect();
+        for pair in coords.chunks_exact(2) {
+            let (x, y) = (pair[0], pair[1]);
+            assert!(
+                (793750.0..=1949450.0).contains(&x) && (-1424940.0..=-342900.0).contains(&y),
+                "wire corner ({x}, {y}) outside the board outline bbox"
+            );
+        }
+    }
 }
