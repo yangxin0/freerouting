@@ -258,6 +258,18 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 128): round eight state — full picture of the
+  display case: pin 65 (net 8, imported) carries via 185 (net 8's
+  own via ON its pad, legal) whose 600 um pad POKES BEYOND the pin
+  edge; net 11's trace legally skirts the pin (cl kept) but violates
+  the protruding via. Net 11 routed after the via existed, so its
+  no-ripup rooms should have inflated the via — yet the trace stands.
+  DECISIVE NEXT TOOL: birth-site validation — under FR_DEBUG,
+  insert_connection checks every inserted polyline segment against
+  the pre-insert board (clearance-inflated, minus the just-ripped
+  items) and prints mode + corners + blocking item on the first
+  illegal insert. That turns the remaining mystery into a stack trace
+  at the moment of birth.
 - 2026-07-15 (iter 127): round seven state — display's violating
   net-11 traces trace back through pull-tight reinsert chains
   (identical bboxes each hop) to an ORIGINAL maze trace from an EARLY
