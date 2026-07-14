@@ -47,9 +47,12 @@ pub fn pull_tight_trace(board: &mut BasicBoard, id: ItemId) -> (ItemId, usize) {
                 continue;
             }
             let bypass = Polyline::from_two_points(a, c);
+            // the bypass must keep the clearance, not merely avoid
+            // touching (zero-margin bypasses were a DRC leak)
+            let max_cl = board.rules.clearance_matrix.max_value(layer).max(0);
             let free = !bypass.is_empty()
                 && bypass
-                    .offset_shape(half_width, 0)
+                    .offset_shape(half_width + max_cl, 0)
                     .map(|shape: TileShape| !board.is_blocked(&shape, layer, net_no))
                     .unwrap_or(false);
             if free {

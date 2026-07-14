@@ -106,15 +106,10 @@ pub fn find_connection(
     if start_shapes.is_empty() {
         return None;
     }
-    // the door shrink carries the trace's half of the clearance
-    // compensation (Java: compensated_trace_half_width)
-    let offset = request.trace_half_width as f64
-        + board
-            .rules
-            .clearance_matrix
-            .get_value(request.clearance_class, request.clearance_class, 0, false)
-            .max(0) as f64
-            / 2.0;
+    // the room geometry already carries the full margin (obstacles are
+    // inflated by half width + clearance), so the door shrink only
+    // spaces the sections by the trace width
+    let offset = request.trace_half_width as f64;
     // destination centers (with their layers) for the remaining-distance
     // estimate. NOTE: distance-to-center is inadmissible for large
     // destinations, but empirically it GUIDES far better than the
@@ -536,6 +531,7 @@ pub fn maze_route_with_ripup(
         request.net_no,
         allow_ripup,
         request.clearance_class,
+        request.trace_half_width,
     );
     maze_route_with_engine(board, &mut engine, request)
 }
@@ -565,8 +561,16 @@ pub fn maze_route_with_engine(
             let (pa, pb) = (a.round(), b.round());
             if layer_a == layer_b && pa != pb {
                 let polyline = Polyline::from_two_points(pa, pb);
+                // rip everything within CLEARANCE of the new copper, not
+                // only what touches it (leaving clearance-range items in
+                // place was a DRC leak)
+                let max_cl = board
+                    .rules
+                    .clearance_matrix
+                    .max_value(layer_a)
+                    .max(0);
                 if let Some(shape) =
-                    polyline.offset_shape(request.trace_half_width + 1, 0)
+                    polyline.offset_shape(request.trace_half_width + max_cl + 1, 0)
                 {
                     // prefer shoving the corridor segment's trace victims
                     // aside (they stay connected, no victim reroute
@@ -595,9 +599,16 @@ pub fn maze_route_with_engine(
                 if let Some(padstack) = board.padstacks.get_by_no(request.via_padstack) {
                     for layer in padstack.from_layer()..=padstack.to_layer() {
                         if let Some(shape) = padstack.get_shape(layer) {
-                            let q = shape.translate_by(
-                                crate::geometry::planar::IntVector::new(pa.x, pa.y),
-                            );
+                            let max_cl = board
+                                .rules
+                                .clearance_matrix
+                                .max_value(layer)
+                                .max(0) as f64;
+                            let q = shape
+                                .translate_by(
+                                    crate::geometry::planar::IntVector::new(pa.x, pa.y),
+                                )
+                                .offset(max_cl + 1.0);
                             for id in board.overlapping_items(&q, Some(layer)) {
                                 if board.get_item(id).is_some_and(|item| {
                                     crate::autoroute::room_completion::is_rippable(
@@ -638,8 +649,12 @@ pub fn maze_route_with_engine(
 /// Runs the maze search and inserts the found connection as per-layer
 /// polyline traces joined by vias. Returns the inserted item ids.
 pub fn maze_route(board: &mut BasicBoard, request: &MazeRouteRequest) -> Option<Vec<ItemId>> {
-    let mut engine =
-        AutorouteEngine::new_with_clearance(request.net_no, false, request.clearance_class);
+    let mut engine = AutorouteEngine::new_with_clearance(
+        request.net_no,
+        false,
+        request.clearance_class,
+        request.trace_half_width,
+    );
     let result = find_connection(board, &mut engine, request)?;
     insert_connection(board, request, &result)
 }

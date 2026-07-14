@@ -32,6 +32,8 @@ pub struct AutorouteEngine {
     /// The clearance class of the routed trace (obstacles restrain rooms
     /// inflated by the pairwise clearance to this class).
     pub trace_clearance_class: usize,
+    /// The half width of the routed trace: part of the room margin.
+    pub trace_half_width: i32,
     /// All completed free-space rooms.
     complete_rooms: Vec<RoomId>,
     /// The target doors of each room, indexed by room id.
@@ -48,19 +50,21 @@ impl AutorouteEngine {
     }
 
     pub fn new_with_ripup(net_no: i32, allow_ripup: bool) -> Self {
-        Self::new_with_clearance(net_no, allow_ripup, 1)
+        Self::new_with_clearance(net_no, allow_ripup, 1, 0)
     }
 
     pub fn new_with_clearance(
         net_no: i32,
         allow_ripup: bool,
         trace_clearance_class: usize,
+        trace_half_width: i32,
     ) -> Self {
         AutorouteEngine {
             net_no,
             graph: RoomGraph::new(),
             allow_ripup,
             trace_clearance_class,
+            trace_half_width,
             complete_rooms: Vec::new(),
             target_doors: Vec::new(),
             rippable_items: Vec::new(),
@@ -122,6 +126,7 @@ impl AutorouteEngine {
             None,
             self.allow_ripup,
             self.trace_clearance_class,
+            self.trace_half_width,
         );
         // restrain against the existing complete rooms (they must not
         // overlap); bounding boxes prune the exact overlap tests

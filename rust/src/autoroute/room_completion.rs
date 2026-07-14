@@ -43,6 +43,7 @@ pub fn complete_shape_with_ripup(
     ignore_item: Option<ItemId>,
     ignore_rippable: bool,
     trace_clearance_class: usize,
+    trace_half_width: i32,
 ) -> Vec<IncompleteRoom> {
     let board_box = board.bounding_box().offset(1000.0);
     let start_shape = TileShape::Box(board_box).intersection_with_simplify(&room.shape);
@@ -91,12 +92,14 @@ pub fn complete_shape_with_ripup(
         );
         for (shape, layer) in item.tile_shapes(&board.padstacks) {
             if *layer == room.layer {
-                // HALF the clearance (Java: clearance compensation) — the
-                // other half is added to the door shrink on the trace
-                // side, so rooms of adjacent pads meet at the band middle
-                // and stay door-connected
-                let shape = if clearance > 0 {
-                    shape.offset(clearance as f64 / 2.0)
+                // trace half width + full clearance: the maze may run the
+                // centerline anywhere inside a room (including on its
+                // border), so correctness requires the whole margin in
+                // the room geometry. (cl/2-only inflation left copper
+                // gaps of cl/2 - hw — found by the DRC self-check.)
+                let margin = trace_half_width as f64 + clearance as f64;
+                let shape = if margin > 0.0 {
+                    shape.offset(margin)
                 } else {
                     shape.clone()
                 };
@@ -148,7 +151,7 @@ pub fn complete_shape(
     net_no: i32,
     ignore_item: Option<ItemId>,
 ) -> Vec<IncompleteRoom> {
-    complete_shape_with_ripup(board, room, net_no, ignore_item, false, 1)
+    complete_shape_with_ripup(board, room, net_no, ignore_item, false, 1, 0)
 }
 
 /// Restrains the room shape so it no longer intersects the interior of

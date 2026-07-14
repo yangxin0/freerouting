@@ -258,6 +258,20 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 120): CLEARANCE CORRECTNESS CAMPAIGN, round one —
+  three leaks fixed: (1) room margin now trace half width + FULL
+  clearance (obstacles carry the whole margin; the door shrink is
+  width-only); (2) ripup radius now includes the clearance (items in
+  clearance range of new copper were left in place); (3) pull-tight
+  bypasses now keep the clearance (zero-margin bypasses). Violations:
+  wavefolder 322→21, display 639→93, J2 222→17 (and J2 back to
+  24/24). interf_u dips to ~170/173 under the honest margins.
+  Remaining suspected sources: trace entries into their own pads
+  passing neighbour pins (may be legitimate pad-entry necessity —
+  compare with how KiCad DRC treats pad entries), and shove/via edge
+  cases. Also fixed: request_for_net silently overrode caller widths
+  with the default class width on rule-less boards (test now
+  configures the class like every import does).
 - 2026-07-15 (iter 119): DRC SELF-CHECK BUILT — AND IT FOUND A REAL
   ARCHITECTURE BUG. examples/drc_check.rs routes a board and audits
   every foreign pair against the rule matrix. Results: hundreds of

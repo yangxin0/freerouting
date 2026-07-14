@@ -559,6 +559,10 @@ mod tests {
         let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
         let mut rules = BoardRules::new(stack.clone(), matrix);
         rules.get_default_net_class();
+        // like every import: configure the default class width (otherwise
+        // request_for_net overrides the request width with the class
+        // default)
+        rules.set_default_trace_half_widths(100);
         rules.nets.add("net1", 1, false);
         rules.nets.add("net2", 1, false);
         let mut padstacks = Padstacks::new(1);
@@ -571,7 +575,7 @@ mod tests {
 
         // a wall at x = 5000 with a gap around y = 0 (tall enough for two
         // traces side by side)
-        for (lly, ury) in [(-40000, -2000), (2000, 40000)] {
+        for (lly, ury) in [(-40000, -3000), (3000, 40000)] {
             let wall = PolylineArea::new(
                 PolygonShape::from_int_points(&[
                     IntPoint::new(4800, lly),

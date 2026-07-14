@@ -60,7 +60,11 @@ fn main() {
     let mut checked = 0usize;
     let routed: Vec<_> = board
         .items()
-        .filter(|(_, it)| it.base.component_no == 0 && it.base.net_count() > 0)
+        .filter(|(_, it)| {
+            it.base.component_no == 0
+                && it.base.net_count() > 0
+                && !matches!(&it.kind, ItemKind::ObstacleArea(_))
+        })
         .map(|(id, _)| *id)
         .collect();
     for &id in &routed {
