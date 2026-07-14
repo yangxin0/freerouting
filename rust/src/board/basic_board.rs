@@ -559,6 +559,12 @@ impl BasicBoard {
         self.item_list.generate_snapshot();
     }
 
+    /// Removes the top snapshot without restoring it (commits the changes
+    /// made since the snapshot into the previous level).
+    pub fn pop_snapshot(&mut self) -> bool {
+        self.item_list.pop_snapshot()
+    }
+
     /// Restores the situation before the last snapshot, resynchronizing
     /// the search tree. Returns false if no undo is possible.
     pub fn undo(&mut self) -> bool {

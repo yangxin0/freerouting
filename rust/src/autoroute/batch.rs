@@ -168,13 +168,10 @@ pub fn batch_route(board: &mut BasicBoard, request: &BatchRequest) -> BatchResul
     result
 }
 
-/// Removes up to `max_rips` routable foreign items (autoroute traces and
-/// vias, never component pins or fixed items) blocking the straight
-/// corridor between the two items of the failed connection
-/// (a simplified stand-in for MazeSearchAlgo's per-room ripup: Java pays
-/// a ripup cost to expand through obstacle rooms instead). Returns the
-/// number of items removed; the affected nets become incomplete and are
-/// rerouted by later passes.
+/// Removes up to `max_rips` routable foreign route items (never
+/// component pins or fixed items) blocking the straight corridor between
+/// the two items of the failed connection, returning the affected nets
+/// (a simplified stand-in for MazeSearchAlgo's per-room ripup costs).
 fn rip_blocking_items(
     board: &mut BasicBoard,
     net_no: i32,
@@ -182,7 +179,7 @@ fn rip_blocking_items(
     dest: ItemId,
     corridor_half_width: i32,
     max_rips: usize,
-) -> usize {
+) -> Vec<i32> {
     use crate::geometry::planar::{IntPoint, Polyline, TileShape};
     let center = |id: ItemId| -> Option<IntPoint> {
         board.get_item(id).map(|item| {
@@ -191,15 +188,17 @@ fn rip_blocking_items(
         })
     };
     let (Some(a), Some(b)) = (center(start), center(dest)) else {
-        return 0;
+        return Vec::new();
     };
     let polyline = Polyline::from_two_points(a, b);
     let corridor: TileShape = if polyline.is_empty() {
-        TileShape::Box(crate::geometry::planar::IntBox::new(a, a).offset(corridor_half_width as f64))
+        TileShape::Box(
+            crate::geometry::planar::IntBox::new(a, a).offset(corridor_half_width as f64),
+        )
     } else {
         match polyline.offset_shape(corridor_half_width, 0) {
             Some(s) => s,
-            None => return 0,
+            None => return Vec::new(),
         }
     };
     let mut candidates: Vec<ItemId> = board
@@ -215,11 +214,16 @@ fn rip_blocking_items(
         })
         .collect();
     candidates.truncate(max_rips);
-    let ripped = candidates.len();
+    let mut ripped_nets: Vec<i32> = Vec::new();
     for id in candidates {
+        if let Some(item) = board.get_item(id) {
+            ripped_nets.extend(item.base.net_nos.iter().copied());
+        }
         board.remove_item(id);
     }
-    ripped
+    ripped_nets.sort();
+    ripped_nets.dedup();
+    ripped_nets
 }
 
 /// Like [`route_net`], but on failure rips blocking foreign route items
@@ -251,14 +255,36 @@ pub fn route_net_with_ripup(
     let Some((a, b)) = pair else {
         return result;
     };
+    // Transactional ripup: commit only if this net AND every ripped net
+    // end up completely connected, otherwise restore the previous state
+    // (Java instead proves the benefit inside the maze search by paying
+    // ripup costs).
+    board.generate_snapshot();
     let corridor_half_width = 2 * (request.trace_half_width + 400);
-    if rip_blocking_items(board, net_no, a, b, corridor_half_width, max_rips) == 0 {
+    let ripped_nets = rip_blocking_items(board, net_no, a, b, corridor_half_width, max_rips);
+    if ripped_nets.is_empty() {
+        board.pop_snapshot();
         return result;
     }
     let retry = route_net(board, net_no, request);
-    result.routed_connections += retry.routed_connections;
-    if retry.failed_connections == 0 && board.net_is_completely_connected(net_no) {
+    let mut success =
+        retry.failed_connections == 0 && board.net_is_completely_connected(net_no);
+    if success {
+        // reroute the victims immediately; all must recover
+        for &ripped in &ripped_nets {
+            let r = route_net(board, ripped, request);
+            if r.failed_connections > 0 || !board.net_is_completely_connected(ripped) {
+                success = false;
+                break;
+            }
+        }
+    }
+    if success {
+        result.routed_connections += retry.routed_connections;
         result.failed_connections = 0;
+        board.pop_snapshot();
+    } else {
+        board.undo();
     }
     result
 }
