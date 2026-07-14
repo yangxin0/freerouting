@@ -25,6 +25,8 @@ struct BacktrackNode {
     location: FloatPoint,
     layer: usize,
     parent: Option<usize>,
+    /// The room entered at this step (diagnostics).
+    room: Option<RoomId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -68,6 +70,9 @@ pub struct MazeSearchResult {
     /// to destination. Consecutive corners on different layers are joined
     /// by a via.
     pub corners: Vec<(FloatPoint, usize)>,
+    /// The room entered at each corner (diagnostics; aligned with
+    /// `corners`, `None` for the appended destination point).
+    pub rooms: Vec<Option<RoomId>>,
 }
 
 /// Parameters of a maze routing request.
@@ -196,6 +201,7 @@ pub fn find_connection(
                 );
                 return Some(MazeSearchResult {
                     corners: vec![(start_point, *layer), (dest_point, *layer)],
+                    rooms: vec![Some(room), None],
                 });
             }
             engine.expand_room(board, room);
@@ -204,6 +210,7 @@ pub fn find_connection(
                 location: start_point,
                 layer: *layer,
                 parent: None,
+                room: Some(room),
             });
             seed_room(
                 engine,
@@ -262,6 +269,7 @@ pub fn find_connection(
             location: entry.location,
             layer,
             parent: entry.parent,
+            room: Some(room),
         });
 
         engine.expand_room(board, room);
@@ -273,12 +281,15 @@ pub fn find_connection(
         {
             // backtrack through the node chain
             let mut corners: Vec<(FloatPoint, usize)> = Vec::new();
+            let mut rooms: Vec<Option<RoomId>> = Vec::new();
             let mut curr = Some(node_id);
             while let Some(i) = curr {
                 corners.push((nodes[i].location, nodes[i].layer));
+                rooms.push(nodes[i].room);
                 curr = nodes[i].parent;
             }
             corners.reverse();
+            rooms.reverse();
             let arrival_shape = engine.graph.room(room).shape.clone();
             let dest_point = destination_point(
                 board,
@@ -288,7 +299,8 @@ pub fn find_connection(
                 entry.location,
             );
             corners.push((dest_point, layer));
-            return Some(MazeSearchResult { corners });
+            rooms.push(None);
+            return Some(MazeSearchResult { corners, rooms });
         }
 
         seed_room(
@@ -582,6 +594,33 @@ pub fn maze_route_with_engine(
     // clear the occupation state of the previous search
     engine.graph.reset();
     let result = find_connection(board, engine, request)?;
+    // invariant check (diagnostics): the segment between consecutive
+    // same-layer corners must lie inside the room entered at the FIRST
+    // corner (convex ⇒ checking both endpoints suffices)
+    if std::env::var_os("FR_DEBUG_MAZE").is_some() {
+        for k in 0..result.corners.len().saturating_sub(1) {
+            let (a, la) = result.corners[k];
+            let (b, lb) = result.corners[k + 1];
+            if la != lb {
+                continue;
+            }
+            let Some(room) = result.rooms[k] else { continue };
+            let shape = &engine.graph.room(room).shape;
+            let pa = crate::geometry::planar::Point::Int(a.round());
+            let pb = crate::geometry::planar::Point::Int(b.round());
+            // small tolerance: corners live on borders
+            let ok = |p: &crate::geometry::planar::Point| {
+                shape.contains(p) || shape.to_simplex().offset(2.0).contains(p)
+            };
+            if !ok(&pa) || !ok(&pb) {
+                eprintln!(
+                    "INVARIANT BROKEN at corner {k}: segment ({:?})→({:?}) \
+                     layer {la} room {room} does not contain both endpoints",
+                    a, b
+                );
+            }
+        }
+    }
 
     // with ripup: remove the rippable foreign items intersecting the
     // connection geometry before inserting it

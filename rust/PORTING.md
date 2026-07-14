@@ -258,6 +258,20 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 131): THE INVARIANT HOLDS — room-id-per-corner
+  instrumentation verified every consecutive-corner pair lies in its
+  entered room (0 breaks) while 71 illegal inserts occur. Combined
+  with iter 130's layer-0 completion silence, the contradiction is
+  now fully cornered: the offending layer-0 rooms were completed
+  WITHOUT collecting the nearby items (65/178/185) in their obstacle
+  lists — the overlapping_items query / search-tree state missed them
+  at search time even though the DRC checker finds them later. Since
+  those items went through transactional rip-and-undo churn, the
+  prime suspect is tree-state after undo resync (or overlapping's
+  exact-check path). NEXT: log board.overlapping_items count for item
+  185's bbox at the start of every net-11 search plus item 185's
+  tree_entries length — one run confirms whether the tree lost the
+  layer-0 entries after transactional churn.
 - 2026-07-15 (iter 130): completion-region logging landed. Findings
   on the studied net-11 run: the violating segment is corner4→corner5
   (a 61k-unit hop from a sliver-hop cluster beside the via, passing
