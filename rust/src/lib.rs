@@ -8,4 +8,5 @@ pub mod board;
 pub mod core;
 pub mod datastructures;
 pub mod geometry;
+pub mod io;
 pub mod rules;

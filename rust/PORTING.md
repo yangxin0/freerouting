@@ -80,7 +80,8 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 
 ## Phase 4 — I/O and CLI
 
-- [ ] io/specctra DSN parser + SES writer
+- [x] S-expression reader → `io/dsn.rs` (tokenizer/tree with quoted strings incl. the `(string_quote ")` special case; navigation helpers; verified against real repo fixtures)
+- [ ] DSN semantic import (structure/library/placement/network → BasicBoard), SES writer
 - [ ] CLI entry point (headless batch routing first; no GUI planned)
 
 ## Notes / decisions log
