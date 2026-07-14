@@ -4,6 +4,7 @@
 //! See `rust/PORTING.md` for progress and porting conventions.
 
 pub mod board;
+pub mod core;
 pub mod datastructures;
 pub mod geometry;
 pub mod rules;

@@ -52,7 +52,8 @@ should pick up the first unchecked item below.
 - [x] rules/ClearanceMatrix.java → `rules/clearance_matrix.rs` (even-rounded values, per-row/layer maxima, append/remove class, safety margin)
 - [x] rules/Net.java + Nets.java → `rules/net.rs` (rules data; board item queries follow with the board item model)
 - [x] rules/NetClass.java + NetClasses.java + DefaultItemClearanceClasses.java → `rules/net_class.rs` (object refs → indices)
-- [ ] rules remaining: ViaInfo(s)/ViaRule (needs board Padstacks), BoardRules
+- [x] core/Padstack.java + Padstacks.java → `core/padstack.rs` (Option<TileShape> per layer, drill-radius name parsing with cache, trace exit directions)
+- [ ] rules remaining: ViaInfo(s)/ViaRule, BoardRules
 - [ ] board (items, traces, vias, search tree)
 
 ## Phase 3 — routing engines
