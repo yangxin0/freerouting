@@ -54,7 +54,9 @@ should pick up the first unchecked item below.
 - [x] rules/NetClass.java + NetClasses.java + DefaultItemClearanceClasses.java → `rules/net_class.rs` (object refs → indices)
 - [x] core/Padstack.java + Padstacks.java → `core/padstack.rs` (Option<TileShape> per layer, drill-radius name parsing with cache, trace exit directions)
 - [x] rules/ViaInfo.java + ViaInfos.java + ViaRule.java → `rules/via_rule.rs` (object refs → ViaInfoId/padstack numbers)
-- [ ] rules remaining: BoardRules
+- [x] rules/BoardRules.java (+ board/AngleRestriction.java) → `rules/board_rules.rs` (rules aggregate; item-touching clearance maintenance split into rules-side methods, board handles its items)
+
+rules package complete (except GUI print_info methods, intentionally out of scope).
 - [ ] board (items, traces, vias, search tree)
 
 ## Phase 3 — routing engines
