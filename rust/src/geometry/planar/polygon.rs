@@ -58,6 +58,35 @@ impl Polygon {
         reversed.reverse();
         Polygon::new(reversed)
     }
+
+    /// The winding number of this polygon treated as closed: > 0 if the
+    /// corners are counterclockwise, < 0 if clockwise.
+    pub fn winding_number_after_closing(&self) -> i32 {
+        let corners = &self.corners;
+        if corners.len() < 2 {
+            return 0;
+        }
+        let first_side_vector = corners[1].difference_by(&corners[0]);
+        let mut prev_side_vector = first_side_vector.clone();
+        let mut corner_count = corners.len();
+        // skip the last corner if it equals the first
+        if corners[0] == corners[corner_count - 1] {
+            corner_count -= 1;
+        }
+        let mut angle_sum = 0.0;
+        for i in 1..=corner_count {
+            let next_side_vector = if i == corner_count - 1 {
+                corners[0].difference_by(&corners[i])
+            } else if i == corner_count {
+                first_side_vector.clone()
+            } else {
+                corners[i + 1].difference_by(&corners[i])
+            };
+            angle_sum += prev_side_vector.angle_approx_with(&next_side_vector);
+            prev_side_vector = next_side_vector;
+        }
+        (angle_sum / (2.0 * std::f64::consts::PI)).round() as i32
+    }
 }
 
 #[cfg(test)]
