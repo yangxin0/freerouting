@@ -243,6 +243,17 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 96): shove arc piece 3c: the full ShapeTraceEntries
+  bookkeeping ported — store_items (classify vias/pins/traces/areas,
+  collect shove vias, reject unshovable obstacles), store_trace
+  (entrance points + trace-end-inside-shape handling), from-side
+  search, border resort with duplicate removal, calculate_stack_levels
+  (the stack property check), pop_piece and
+  next_substitute_trace_piece (the substitute polyline around the
+  offset shape). Vec-based entry list replaces Java's linked list.
+  Tested end to end: a foreign crossing trace yields one substitute
+  piece routing around the shove shape. Next: ShoveTraceAlgo
+  (check + insert).
 - 2026-07-15 (iter 95): shove arc piece 3b: board-level cutout_trace
   ported (board/shape_trace_entries.rs) — removes the part of a trace
   inside a shape (enlarged by half width + clearance + 1, in two steps
