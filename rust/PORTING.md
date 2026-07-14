@@ -250,6 +250,22 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 104): sealed-pocket diagnosis data (display /P):
+  under ripup, its failing searches show BOTH profiles — some seal at
+  12-14 expansions (start pocket closed even though rippable items are
+  room-transparent), others explore 70-95k expansions and still never
+  reach the destination (dest pocket sealed). Since /P routes fine
+  alone, the crowded-board seal involves routed items that ripup
+  transparency should bypass — hypotheses to check next session with
+  targeted instrumentation: (a) the 12-14 seals are only the
+  no-ripup first attempts inside route_net_with_ripup (base request
+  penalty 0) and the wide explorations are the real ripup view, in
+  which case the DEST-side pocket geometry (pins + via extents) is
+  the true blocker; (b) some sealing item unexpectedly fails
+  is_rippable (check fixed_state of shoved substitutes); (c) target
+  doors to the dest pad are missing in crowded rooms. Instrument:
+  print is_rippable verdicts for the ROOM KILLED items and the
+  target-door count of rooms adjacent to the dest pad.
 - 2026-07-15 (iter 103): via_free made pairwise-precise — via
   placement now checks each foreign item against the pairwise
   clearance of its class instead of the class maximum (which could
