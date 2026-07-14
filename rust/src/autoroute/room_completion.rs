@@ -21,14 +21,27 @@ pub struct IncompleteRoom {
     pub contained_shape: TileShape,
 }
 
+/// True if the item may be ripped up while routing `net_no`: a foreign
+/// routable route item (never a component pin, fixed item or netless
+/// keepout).
+pub fn is_rippable(item: &crate::board::Item, net_no: i32) -> bool {
+    !item.base.contains_net(net_no)
+        && item.base.component_no == 0
+        && item.base.net_count() > 0
+        && item.is_routable()
+}
+
 /// Completes the shape of `room`: returns maximal obstacle-free rooms
 /// containing (parts of) the contained shape. Items of `net_no` and
-/// `ignore_item` are not obstacles.
-pub fn complete_shape(
+/// `ignore_item` are not obstacles; with `ignore_rippable`, rippable
+/// foreign route items do not restrain either (the maze search pays a
+/// ripup penalty to pass through them instead).
+pub fn complete_shape_with_ripup(
     board: &BasicBoard,
     room: &IncompleteRoom,
     net_no: i32,
     ignore_item: Option<ItemId>,
+    ignore_rippable: bool,
 ) -> Vec<IncompleteRoom> {
     let board_box = board.bounding_box().offset(1000.0);
     let start_shape = TileShape::Box(board_box).intersection_with_simplify(&room.shape);
@@ -54,6 +67,9 @@ pub fn complete_shape(
         if item.base.contains_net(net_no) {
             continue;
         }
+        if ignore_rippable && is_rippable(item, net_no) {
+            continue;
+        }
         for (shape, layer) in item.tile_shapes(&board.padstacks) {
             if layer == room.layer {
                 obstacles.push((item_id, shape));
@@ -74,6 +90,16 @@ pub fn complete_shape(
         result = new_result;
     }
     result
+}
+
+/// [`complete_shape_with_ripup`] without ripup.
+pub fn complete_shape(
+    board: &BasicBoard,
+    room: &IncompleteRoom,
+    net_no: i32,
+    ignore_item: Option<ItemId>,
+) -> Vec<IncompleteRoom> {
+    complete_shape_with_ripup(board, room, net_no, ignore_item, false)
 }
 
 /// Restrains the room shape so it no longer intersects the interior of

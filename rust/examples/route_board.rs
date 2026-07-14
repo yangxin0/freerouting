@@ -38,6 +38,7 @@ fn main() {
         via_padstack,
         via_cost: 50_000.0,
         max_expansions: 100_000,
+        ripup_penalty: 0.0,
     };
 
     let t1 = Instant::now();

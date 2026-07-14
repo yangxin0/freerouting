@@ -84,6 +84,11 @@ pub struct MazeRouteRequest {
     /// Budget for the expansion: the maximum number of queue pops before
     /// the search gives up (Java bounds passes with a TimeLimit instead).
     pub max_expansions: usize,
+    /// If > 0, the search may route through rippable foreign route items,
+    /// paying this penalty per rippable item in an entered room (Java:
+    /// MazeSearchAlgo ripup costs); the items intersecting the inserted
+    /// connection are removed.
+    pub ripup_penalty: f64,
 }
 
 /// Runs the maze expansion from the start item towards the destination
@@ -267,7 +272,9 @@ fn seed_room(
                 continue;
             }
             let midpoint = seg.a.middle_point(seg.b);
-            let cost = base_cost + location.distance(midpoint);
+            let ripup_cost =
+                request.ripup_penalty * engine.rippable_items(other).len() as f64;
+            let cost = base_cost + location.distance(midpoint) + ripup_cost;
             open.push(Reverse(QueueEntry {
                 cost,
                 estimate: cost + estimate_to_dest(midpoint),
@@ -303,7 +310,9 @@ fn seed_room(
         // find or create the room on the target layer containing the point
         let target_rooms = engine.rooms_containing(drill_point, next_layer, board);
         for target_room in target_rooms {
-            let cost = base_cost + request.via_cost;
+            let ripup_cost =
+                request.ripup_penalty * engine.rippable_items(target_room).len() as f64;
+            let cost = base_cost + request.via_cost + ripup_cost;
             open.push(Reverse(QueueEntry {
                 cost,
                 estimate: cost + estimate_to_dest(drill_point.to_float()),
@@ -356,11 +365,107 @@ fn destination_point(
         .unwrap_or(fallback)
 }
 
+/// A successfully inserted connection.
+pub struct RoutedConnection {
+    pub new_items: Vec<ItemId>,
+    /// The nets of the rippable items removed to make room (empty without
+    /// ripup).
+    pub ripped_nets: Vec<i32>,
+}
+
+/// Runs the maze search and inserts the found connection as per-layer
+/// polyline traces joined by vias, ripping the rippable foreign items the
+/// connection passes through when `ripup_penalty` > 0. Returns the
+/// inserted item ids and the ripped nets.
+pub fn maze_route_with_ripup(
+    board: &mut BasicBoard,
+    request: &MazeRouteRequest,
+) -> Option<RoutedConnection> {
+    let allow_ripup = request.ripup_penalty > 0.0;
+    let mut engine = AutorouteEngine::new_with_ripup(request.net_no, allow_ripup);
+    let result = find_connection(board, &mut engine, request)?;
+
+    // with ripup: remove the rippable foreign items intersecting the
+    // connection geometry before inserting it
+    let mut ripped_nets: Vec<i32> = Vec::new();
+    if allow_ripup {
+        let mut to_rip: Vec<ItemId> = Vec::new();
+        for window in result.corners.windows(2) {
+            let ((a, layer_a), (b, layer_b)) = (window[0], window[1]);
+            let (pa, pb) = (a.round(), b.round());
+            if layer_a == layer_b && pa != pb {
+                let polyline = Polyline::from_two_points(pa, pb);
+                if let Some(shape) =
+                    polyline.offset_shape(request.trace_half_width + 1, 0)
+                {
+                    for id in board.overlapping_items(&shape, Some(layer_a)) {
+                        if board.get_item(id).is_some_and(|item| {
+                            crate::autoroute::room_completion::is_rippable(
+                                item,
+                                request.net_no,
+                            )
+                        }) {
+                            to_rip.push(id);
+                        }
+                    }
+                }
+            } else if layer_a != layer_b {
+                // the via footprint at the layer change
+                if let Some(padstack) = board.padstacks.get_by_no(request.via_padstack) {
+                    for layer in padstack.from_layer()..=padstack.to_layer() {
+                        if let Some(shape) = padstack.get_shape(layer) {
+                            let q = shape.translate_by(
+                                crate::geometry::planar::IntVector::new(pa.x, pa.y),
+                            );
+                            for id in board.overlapping_items(&q, Some(layer)) {
+                                if board.get_item(id).is_some_and(|item| {
+                                    crate::autoroute::room_completion::is_rippable(
+                                        item,
+                                        request.net_no,
+                                    )
+                                }) {
+                                    to_rip.push(id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        to_rip.sort();
+        to_rip.dedup();
+        for id in to_rip {
+            if let Some(item) = board.get_item(id) {
+                ripped_nets.extend(item.base.net_nos.iter().copied());
+            }
+            board.remove_item(id);
+        }
+        ripped_nets.sort();
+        ripped_nets.dedup();
+    }
+
+    let new_items = insert_connection(board, request, &result)?;
+    Some(RoutedConnection {
+        new_items,
+        ripped_nets,
+    })
+}
+
 /// Runs the maze search and inserts the found connection as per-layer
 /// polyline traces joined by vias. Returns the inserted item ids.
 pub fn maze_route(board: &mut BasicBoard, request: &MazeRouteRequest) -> Option<Vec<ItemId>> {
     let mut engine = AutorouteEngine::new(request.net_no);
     let result = find_connection(board, &mut engine, request)?;
+    insert_connection(board, request, &result)
+}
+
+/// Inserts the found connection as per-layer polyline traces joined by
+/// vias and normalizes the junctions.
+fn insert_connection(
+    board: &mut BasicBoard,
+    request: &MazeRouteRequest,
+    result: &MazeSearchResult,
+) -> Option<Vec<ItemId>> {
 
     let mut new_items = Vec::new();
     let mut run: Vec<IntPoint> = Vec::new();
@@ -461,6 +566,7 @@ mod tests {
             via_padstack: 1,
             via_cost: 5000.0,
             max_expansions: 100_000,
+            ripup_penalty: 0.0,
         }
     }
 

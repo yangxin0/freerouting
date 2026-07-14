@@ -6,13 +6,15 @@
 //! components of a net's connectable items; the closest pair of items
 //! between two components becomes the next connection to route.
 
-use crate::autoroute::maze_search::{maze_route, MazeRouteRequest};
+use crate::autoroute::maze_search::{maze_route_with_ripup, MazeRouteRequest};
 use crate::board::basic_board::{BasicBoard, ItemId};
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct BatchResult {
     pub routed_connections: usize,
     pub failed_connections: usize,
+    /// The nets of items ripped up while routing (need rerouting).
+    pub ripped_nets: Vec<i32>,
 }
 
 /// Parameters for a batch pass.
@@ -25,6 +27,9 @@ pub struct BatchRequest {
     /// Expansion budget per connection (see
     /// `MazeRouteRequest::max_expansions`).
     pub max_expansions: usize,
+    /// In-search ripup penalty per rippable item (0 = ripup disabled; see
+    /// `MazeRouteRequest::ripup_penalty`).
+    pub ripup_penalty: f64,
 }
 
 /// The connected components of the connectable items of `net_no`.
@@ -144,12 +149,14 @@ pub fn route_net(board: &mut BasicBoard, net_no: i32, request: &BatchRequest) ->
             via_padstack: request.via_padstack,
             via_cost: request.via_cost,
             max_expansions: request.max_expansions,
+            ripup_penalty: request.ripup_penalty,
         };
-        if maze_route(board, &maze_request).is_some() {
+        if let Some(connection) = maze_route_with_ripup(board, &maze_request) {
             result.routed_connections += 1;
+            result.ripped_nets.extend(connection.ripped_nets);
         } else {
             result.failed_connections += 1;
-            break; // no ripup yet: give up on this net
+            break; // give up on this net (the pass may retry with ripup)
         }
     }
     result
@@ -168,111 +175,36 @@ pub fn batch_route(board: &mut BasicBoard, request: &BatchRequest) -> BatchResul
     result
 }
 
-/// Removes up to `max_rips` routable foreign route items (never
-/// component pins or fixed items) blocking the straight corridor between
-/// the two items of the failed connection, returning the affected nets
-/// (a simplified stand-in for MazeSearchAlgo's per-room ripup costs).
-fn rip_blocking_items(
-    board: &mut BasicBoard,
-    net_no: i32,
-    start: ItemId,
-    dest: ItemId,
-    corridor_half_width: i32,
-    max_rips: usize,
-) -> Vec<i32> {
-    use crate::geometry::planar::{IntPoint, Polyline, TileShape};
-    let center = |id: ItemId| -> Option<IntPoint> {
-        board.get_item(id).map(|item| {
-            let bb = item.bounding_box(&board.padstacks);
-            IntPoint::new((bb.ll.x + bb.ur.x) / 2, (bb.ll.y + bb.ur.y) / 2)
-        })
-    };
-    let (Some(a), Some(b)) = (center(start), center(dest)) else {
-        return Vec::new();
-    };
-    let polyline = Polyline::from_two_points(a, b);
-    let corridor: TileShape = if polyline.is_empty() {
-        TileShape::Box(
-            crate::geometry::planar::IntBox::new(a, a).offset(corridor_half_width as f64),
-        )
-    } else {
-        match polyline.offset_shape(corridor_half_width, 0) {
-            Some(s) => s,
-            None => return Vec::new(),
-        }
-    };
-    let mut candidates: Vec<ItemId> = board
-        .overlapping_items(&corridor, None)
-        .into_iter()
-        .filter(|id| {
-            board.get_item(*id).is_some_and(|item| {
-                !item.base.contains_net(net_no)
-                    && item.base.component_no == 0
-                    && item.base.net_count() > 0
-                    && item.is_routable()
-            })
-        })
-        .collect();
-    candidates.truncate(max_rips);
-    let mut ripped_nets: Vec<i32> = Vec::new();
-    for id in candidates {
-        if let Some(item) = board.get_item(id) {
-            ripped_nets.extend(item.base.net_nos.iter().copied());
-        }
-        board.remove_item(id);
-    }
-    ripped_nets.sort();
-    ripped_nets.dedup();
-    ripped_nets
-}
-
-/// Like [`route_net`], but on failure rips blocking foreign route items
-/// along the missing connection and retries once.
+/// Like [`route_net`], but on failure retries with in-search ripup:
+/// the maze may route through rippable foreign items paying
+/// `ripup_penalty` per item, the crossed items are removed, and all
+/// victims are rerouted immediately. Transactional: commits only if the
+/// failed net and every victim end up completely connected, otherwise
+/// the board state is restored.
 pub fn route_net_with_ripup(
     board: &mut BasicBoard,
     net_no: i32,
     request: &BatchRequest,
-    max_rips: usize,
+    ripup_penalty: f64,
 ) -> BatchResult {
     let mut result = route_net(board, net_no, request);
-    if result.failed_connections == 0 || max_rips == 0 {
+    if result.failed_connections == 0 || ripup_penalty <= 0.0 {
         return result;
     }
-    // find the still-missing connection pair and rip its corridor
-    let components = net_components(board, net_no);
-    if components.len() <= 1 {
-        return result;
-    }
-    let first_candidates = endpoint_candidates(board, &components[0]);
-    let mut pair: Option<(ItemId, ItemId)> = None;
-    for other in &components[1..] {
-        let other_candidates = endpoint_candidates(board, other);
-        if let Some(p) = closest_pair(board, &first_candidates, &other_candidates) {
-            pair = Some(p);
-            break;
-        }
-    }
-    let Some((a, b)) = pair else {
-        return result;
-    };
-    // Transactional ripup: commit only if this net AND every ripped net
-    // end up completely connected, otherwise restore the previous state
-    // (Java instead proves the benefit inside the maze search by paying
-    // ripup costs).
     board.generate_snapshot();
-    let corridor_half_width = 2 * (request.trace_half_width + 400);
-    let ripped_nets = rip_blocking_items(board, net_no, a, b, corridor_half_width, max_rips);
-    if ripped_nets.is_empty() {
-        board.pop_snapshot();
-        return result;
-    }
-    let retry = route_net(board, net_no, request);
+    let rip_request = BatchRequest {
+        ripup_penalty,
+        ..*request
+    };
+    let retry = route_net(board, net_no, &rip_request);
+    let mut extra_routed = retry.routed_connections;
     let mut success =
         retry.failed_connections == 0 && board.net_is_completely_connected(net_no);
     if success {
         // reroute the victims immediately; all must recover
-        for &ripped in &ripped_nets {
+        for &ripped in &retry.ripped_nets {
             let r = route_net(board, ripped, request);
+            extra_routed += r.routed_connections;
             if r.failed_connections > 0 || !board.net_is_completely_connected(ripped) {
                 success = false;
                 break;
@@ -280,7 +212,7 @@ pub fn route_net_with_ripup(
         }
     }
     if success {
-        result.routed_connections += retry.routed_connections;
+        result.routed_connections += extra_routed;
         result.failed_connections = 0;
         board.pop_snapshot();
     } else {
@@ -325,13 +257,17 @@ pub fn batch_route_passes(
             ..*request
         };
         let mut failed_this_pass = 0usize;
-        // ripup is allowed from the second pass on, with growing allowance
-        let max_rips = if pass == 0 { 0 } else { 2 * pass };
+        // in-search ripup is allowed from the second pass on
+        let ripup_penalty = if pass == 0 {
+            0.0
+        } else {
+            request.via_cost.max(20_000.0)
+        };
         for &net_no in &net_nos {
             if board.net_is_completely_connected(net_no) {
                 continue;
             }
-            let result = route_net_with_ripup(board, net_no, &pass_request, max_rips);
+            let result = route_net_with_ripup(board, net_no, &pass_request, ripup_penalty);
             total.routed_connections += result.routed_connections;
             failed_this_pass += result.failed_connections;
         }
@@ -381,6 +317,7 @@ mod tests {
             via_padstack: 1,
             via_cost: 5000.0,
             max_expansions: 100_000,
+            ripup_penalty: 0.0,
         }
     }
 
@@ -483,6 +420,7 @@ mod tests {
             via_padstack: 1,
             via_cost: 5000.0,
             max_expansions: 30_000,
+            ripup_penalty: 0.0,
         };
         // route net 1 first: it takes the gap
         let r1 = route_net(&mut board, 1, &request);

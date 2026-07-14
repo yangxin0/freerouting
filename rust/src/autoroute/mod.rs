@@ -18,6 +18,8 @@ pub use engine::{AutorouteEngine, TargetDoor};
 pub use expansion_room::{
     ExpansionDoor, ExpansionRoom, MazeSearchElement, RoomGraph, RoomKind,
 };
-pub use maze_search::{find_connection, maze_route, MazeSearchResult};
+pub use maze_search::{
+    find_connection, maze_route, maze_route_with_ripup, MazeSearchResult, RoutedConnection,
+};
 pub use room_completion::{complete_shape, restrain_shape, IncompleteRoom};
 pub use simple_router::{RouteRequest, RouteResult, SimpleRouter};

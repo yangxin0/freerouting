@@ -11,7 +11,7 @@
 //! restrain away to nothing, so expansion terminates naturally.
 
 use crate::autoroute::expansion_room::{RoomGraph, RoomId, RoomKind};
-use crate::autoroute::room_completion::{complete_shape, restrain_shape, IncompleteRoom};
+use crate::autoroute::room_completion::{restrain_shape, IncompleteRoom};
 use crate::board::basic_board::{BasicBoard, ItemId};
 use crate::geometry::planar::TileShape;
 
@@ -26,23 +26,39 @@ pub struct TargetDoor {
 pub struct AutorouteEngine {
     pub net_no: i32,
     pub graph: RoomGraph,
+    /// If true, rippable foreign route items do not restrain rooms; the
+    /// maze search pays a penalty to pass through them.
+    pub allow_ripup: bool,
     /// All completed free-space rooms.
     complete_rooms: Vec<RoomId>,
     /// The target doors of each room, indexed by room id.
     target_doors: Vec<Vec<TargetDoor>>,
+    /// The rippable foreign items overlapping each room.
+    rippable_items: Vec<Vec<ItemId>>,
     /// Rooms whose frontier was already expanded.
     expanded: Vec<bool>,
 }
 
 impl AutorouteEngine {
     pub fn new(net_no: i32) -> Self {
+        Self::new_with_ripup(net_no, false)
+    }
+
+    pub fn new_with_ripup(net_no: i32, allow_ripup: bool) -> Self {
         AutorouteEngine {
             net_no,
             graph: RoomGraph::new(),
+            allow_ripup,
             complete_rooms: Vec::new(),
             target_doors: Vec::new(),
+            rippable_items: Vec::new(),
             expanded: Vec::new(),
         }
+    }
+
+    /// The rippable foreign items overlapping a room.
+    pub fn rippable_items(&self, room: RoomId) -> &[ItemId] {
+        &self.rippable_items[room]
     }
 
     pub fn complete_rooms(&self) -> &[RoomId] {
@@ -59,7 +75,13 @@ impl AutorouteEngine {
     /// own-net items. Returns the new room ids.
     pub fn complete_room(&mut self, board: &BasicBoard, room: IncompleteRoom) -> Vec<RoomId> {
         // restrain against the board obstacles
-        let mut pieces = complete_shape(board, &room, self.net_no, None);
+        let mut pieces = crate::autoroute::room_completion::complete_shape_with_ripup(
+            board,
+            &room,
+            self.net_no,
+            None,
+            self.allow_ripup,
+        );
         // restrain against the existing complete rooms (they must not
         // overlap)
         for &existing in &self.complete_rooms {
@@ -102,12 +124,19 @@ impl AutorouteEngine {
                     self.graph.add_door_with_dimension(existing, room_id, dim);
                 }
             }
-            // target doors to own-net connectable items intersecting the room
+            // target doors to own-net connectable items intersecting the
+            // room, and the rippable foreign items it overlaps
             let mut targets = Vec::new();
+            let mut rippables = Vec::new();
             for item_id in board.overlapping_items(&piece.shape, Some(piece.layer)) {
                 let Some(item) = board.get_item(item_id) else {
                     continue;
                 };
+                if self.allow_ripup
+                    && crate::autoroute::room_completion::is_rippable(item, self.net_no)
+                {
+                    rippables.push(item_id);
+                }
                 if !item.is_connectable() || !item.base.contains_net(self.net_no) {
                     continue;
                 }
@@ -124,6 +153,7 @@ impl AutorouteEngine {
             }
             self.complete_rooms.push(room_id);
             self.target_doors.push(targets);
+            self.rippable_items.push(rippables);
             self.expanded.push(false);
             debug_assert_eq!(self.target_doors.len(), self.graph.room_count());
             new_rooms.push(room_id);
