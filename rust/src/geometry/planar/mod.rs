@@ -5,6 +5,7 @@
 //! the integer implementations; the rational variants will be added as an
 //! enum layer when the code that needs them (line intersections) is ported.
 
+pub mod area;
 pub mod circle;
 pub mod direction;
 pub mod float_line;
@@ -28,6 +29,7 @@ pub mod simplex;
 pub mod tile_shape;
 pub mod vector;
 
+pub use area::PolylineArea;
 pub use circle::Circle;
 pub use direction::{BigIntDirection, Direction};
 pub use float_line::FloatLine;
