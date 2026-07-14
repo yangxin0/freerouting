@@ -4,6 +4,20 @@ Incremental port of the Java sources (`src/main/java/app/freerouting`, 484 files
 to the `rust/` crate. Updated by each `/loop` iteration; the next iteration
 should pick up the first unchecked item below.
 
+## Status (as of iteration 53)
+
+- **Working end to end**: DSN import (incl. pre-routed wiring) →
+  expansion-room maze routing with in-search ripup → SES export.
+  `cargo run --release --example route_board [board.dsn] [--strip-wiring]`.
+- **Benchmark** (interf_u, 173 nets, 2 layers): 96% from scratch in 142 s;
+  100% completion of the pre-routed board in 1.9 s. See the benchmark log.
+- ~18k lines of Rust, 171 tests, no warnings; ~70 Java files ported.
+- 6 upstream Java bugs found and documented (see the notes/decisions log
+  and code comments marked "deviation").
+- Main gaps vs Java: shove algorithms, pull-tight optimizer, fanout,
+  faithful SortedRoomNeighbours door algorithm, 45°/90° restricted modes,
+  GUI (out of scope), rules/SES fidelity details.
+
 ## Conventions
 
 - Java package → Rust module (`geometry.planar` → `geometry::planar`), one Java
@@ -112,6 +126,9 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   in 150 s. Progression: 84% → 90% → 91% → 94%. Remaining: /PC-A* bus
   tail, /MA12, /OE-, GND, VCC. Batch passes now support a wall-clock
   TimeLimit (demo bounds runs to 5 min).
+- 2026-07-14 (iter 54): grid-sampled drill candidates within rooms
+  (DrillPage-style) → 166/173 (96%) in 142 s; VCC completes. Remaining:
+  6 /PC-A* nets + GND. Progression: 84 → 90 → 91 → 94 → 96%.
 
 ## Notes / decisions log
 
