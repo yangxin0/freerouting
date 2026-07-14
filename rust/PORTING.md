@@ -250,6 +250,14 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 103): via_free made pairwise-precise — via
+  placement now checks each foreign item against the pairwise
+  clearance of its class instead of the class maximum (which could
+  falsely seal tight pockets on boards with heterogeneous clearance
+  rules). Fleet neutral: the remaining sealed pockets are geometric,
+  not check-conservatism. Remaining levers for the last nets:
+  MoveDrillItemAlgo (shove existing vias aside during search) and
+  ForcedPadAlgo / spring_over for pad escapes.
 - 2026-07-15 (iter 102): ordered forced insertion ported — the shove
   now follows Java's insert structure: victims cut first, substitute
   pieces popped in stack order, and each substitute's segments

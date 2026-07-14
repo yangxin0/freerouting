@@ -385,18 +385,38 @@ fn via_free(board: &BasicBoard, request: &MazeRouteRequest, point: IntPoint) -> 
         let Some(shape) = padstack.get_shape(layer) else {
             continue;
         };
-        // the via pad must keep the (conservative: largest for its class)
-        // clearance to foreign copper on every spanned layer
-        let clearance = board
-            .rules
-            .clearance_matrix
-            .max_value_of_class(request.clearance_class, layer)
-            .max(request.trace_half_width);
-        let query = shape
-            .translate_by(crate::geometry::planar::IntVector::new(point.x, point.y))
-            .enlarge(clearance as f64);
-        if board.is_blocked(&query, layer, request.net_no) {
-            return false;
+        // the via pad must keep the pairwise clearance to every foreign
+        // item on every spanned layer (a max-clearance check falsely
+        // seals tight pockets)
+        let via_shape =
+            shape.translate_by(crate::geometry::planar::IntVector::new(point.x, point.y));
+        let max_cl = board.rules.clearance_matrix.max_value(layer).max(0) as f64;
+        let query = via_shape.offset(max_cl);
+        for id in board.overlapping_items(&query, Some(layer)) {
+            let Some(item) = board.get_item(id) else {
+                continue;
+            };
+            if item.base.contains_net(request.net_no) {
+                continue;
+            }
+            if let crate::board::ItemKind::ObstacleArea(a) = &item.kind {
+                if a.is_conduction {
+                    continue; // planes get fabrication cutouts
+                }
+            }
+            let pairwise = board
+                .rules
+                .clearance_matrix
+                .get_value(item.base.clearance_class, request.clearance_class, layer, false)
+                .max(0) as f64;
+            let check = via_shape.offset(pairwise);
+            let conflicts = item
+                .tile_shapes(&board.padstacks)
+                .iter()
+                .any(|(s, l)| *l == layer && s.intersection(&check).dimension() >= 2);
+            if conflicts {
+                return false;
+            }
         }
     }
     true
