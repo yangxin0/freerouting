@@ -126,11 +126,17 @@ pub fn complete_shape_with_ripup(
                 .filter(|(_, s)| s.bounding_box().intersects(region))
                 .map(|(id, _)| *id)
                 .collect();
+            // direct tree view of the same region on this layer
+            let tree_view = board.overlapping_items(
+                &TileShape::Box(region),
+                Some(room.layer),
+            );
             eprintln!(
-                "COMPLETE layer {} contained {:?} region-obstacles {:?}",
+                "COMPLETE layer {} contained {:?} region-obstacles {:?} tree-sees {:?}",
                 room.layer,
                 room.contained_shape.bounding_box(),
-                in_region
+                in_region,
+                tree_view
             );
         }
     }

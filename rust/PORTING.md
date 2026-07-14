@@ -258,6 +258,23 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 132): SMOKING GUN — the tree probe shows
+  `tree-sees []`: during the offending layer-0 completions the search
+  tree returns NOTHING for the region (one drill room is completed AT
+  the via's exact center seeing nothing). The items are legitimately
+  off-board mid-transaction (ripped victims); the contradiction is
+  that the final board contains BOTH the original via (id 185) AND
+  the net-11 trace routed while it was absent — which only an undo
+  that restores the via while LEAKING the post-snapshot trace can
+  produce. The simple nested-snapshot test passed; the real flow
+  nests deeper (restart → route_net_with_ripup → shove snapshots,
+  sequential pops at one level, interleaved undos). NEXT: a FUZZ TEST
+  over random insert/remove/generate/pop/undo sequences against a
+  shadow model — it will find the splice sequence the hand-written
+  test missed; then fix UndoableObjects. This closes the causal
+  chain: tree ✓ rooms ✓ corners ✓ segments ✓ — the leak is
+  transactional, exactly where the mixed-era id evidence first
+  pointed at iter 121.
 - 2026-07-15 (iter 131): THE INVARIANT HOLDS — room-id-per-corner
   instrumentation verified every consecutive-corner pair lies in its
   entered room (0 breaks) while 71 illegal inserts occur. Combined
