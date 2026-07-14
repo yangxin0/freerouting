@@ -243,6 +243,12 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 93): shove arc piece 2: CalcShapeAndFromSide ported
+  (board/calc_shape_and_from_side.rs) — cuts the dog ears off a trace
+  segment shape at the trace ends and derives the from-side for
+  pushing; takes the polyline + compensated half width + the segment's
+  search-tree shape (the Java version reads those from the board).
+  Next: ShapeTraceEntries (the 793-line workhorse).
 - 2026-07-15 (iter 92): SHOVE ARC STARTED. Plan (Java, 2666 lines
   total): CalcFromSide (125) -> CalcShapeAndFromSide (117) ->
   ShapeTraceEntries (793, the shove workhorse: collects and cuts the
