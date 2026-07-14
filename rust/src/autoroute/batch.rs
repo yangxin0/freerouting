@@ -320,11 +320,11 @@ pub fn batch_route_passes_with_time_limit(
                 .count();
             break;
         }
-        if failed_this_pass > 0 {
-            // tighten the routed traces between passes: shorter traces
-            // free space for the retries
-            crate::autoroute::pull_tight::pull_tight_all(board, 1);
-        }
+        // NOTE: pulling all traces tight between passes was tried here and
+        // REVERTED: it regressed the interf_u benchmark from 165/173 in
+        // 139 s to 154/173 in 236 s (tightened traces hug obstacles and
+        // produce degenerate shapes that poison room completion). Tighten
+        // only after routing finishes.
         if failed_this_pass == 0 {
             break;
         }

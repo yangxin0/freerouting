@@ -146,17 +146,24 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   trace connectivity is exact-endpoint-equality, so routed connections
   stopped registering — HYPOTHESIS REFUTED: restricting drops to
   endpoint-safe interior lines (indices 2..=len-3, kept as a safety
-  invariant) reproduced the 154/173 run bit-for-bit, so no
-  endpoint-adjacent drops ever fire on this board. Investigation
-  continues (see open issues).
+  invariant) reproduced the 154/173 run bit-for-bit; a further bisect
+  run with sanitation disabled was ALSO bit-for-bit identical, proving
+  the sanitation never fires on this board at all. The real culprit was
+  the untested commit in between: "Pull traces tight between batch
+  passes" (3001c937) — tightened traces hug obstacles and produce
+  degenerate shapes that poison room completion (also the source of the
+  stack overflow). REVERTED; depth cap kept as defence. Post-revert:
+  165/173 in 141 s, bit-for-bit match of the a891d790 baseline. Lesson:
+  benchmark every routing-behaviour commit individually.
 
 ## Open issues
 
-- From-scratch benchmark regressed 165/173 in 139 s → 154/173 in 236 s
-  somewhere in the polyline-sanitation + restrain_shape-depth-cap pair
-  of commits (27dbe435, 14839b9a). Deterministic reproduction. Next:
-  benchmark with sanitation disabled (depth cap kept) and count
-  depth-cap hits to attribute the regression.
+- Total trace length before the final pull-tight reads ~85e9 board
+  units (~50x geometric expectation); pull-tight reduces it to ~9.4e9.
+  The from_lines sanitation never fires on interf_u, so the oversized
+  corners enter through another path (split/combine or the length
+  accounting itself). Harmless to routing results, but worth
+  root-causing before trusting length-based reports.
 
 ## Notes / decisions log
 
