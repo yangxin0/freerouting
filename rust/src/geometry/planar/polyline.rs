@@ -75,6 +75,23 @@ impl Polyline {
         if lines.len() < 3 {
             return Polyline { arr: Vec::new() };
         }
+        // Sanitize nearly parallel adjacent lines: their intersection can
+        // be quasi infinite, poisoning corners, lengths and exported
+        // geometry. They are dropped like exactly parallel lines.
+        let limit = crate::geometry::planar::limits::CRIT_INT as f64;
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let c = lines[i].intersection_approx(&lines[i + 1]);
+            if c.x.abs() > limit || c.y.abs() > limit {
+                lines.remove(i + 1);
+                if lines.len() < 3 {
+                    return Polyline { arr: Vec::new() };
+                }
+                i = i.saturating_sub(1);
+            } else {
+                i += 1;
+            }
+        }
         // Turn the direction of the lines so they always point from the
         // previous corner to the next corner.
         for i in 1..lines.len() - 1 {

@@ -137,6 +137,15 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   after revert, within run variance of the 166 baseline). Conclusion:
   further completion gains need shove, not more ripup tuning.
 
+## Open issues
+
+- Some routed traces carry quasi-infinite corner coordinates (near
+  parallel adjacent polyline lines from split/combine): total trace
+  length reads ~100x too large even after pull-tight, and such corners
+  would leak into SES output. Needs a polyline sanitation pass on
+  insertion (drop/merge adjacent lines whose intersection leaves the
+  CRIT_INT range).
+
 ## Notes / decisions log
 
 - 2026-07-14: crate scaffolded on branch `rust`; no external deps yet.
