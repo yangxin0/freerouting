@@ -489,6 +489,20 @@ impl TileShape {
         result
     }
 
+    /// A line segment between the approximations of corner 0 and the
+    /// opposite corner (`corner_count / 2`); `None` if the shape is empty.
+    pub fn diagonal_corner_segment(&self) -> Option<crate::geometry::planar::FloatLine> {
+        if self.is_empty() {
+            return None;
+        }
+        let first_corner = self.corner_approx(0);
+        let last_corner = self.corner_approx(self.border_line_count() / 2);
+        Some(crate::geometry::planar::FloatLine::new(
+            first_corner,
+            last_corner,
+        ))
+    }
+
     // ---- intersection and cutout ----
 
     /// The intersection of this shape with `other`, staying in the most

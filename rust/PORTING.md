@@ -69,7 +69,8 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 ## Phase 3 — routing engines
 
 - [x] interim grid A* router → `autoroute/simple_router.rs` (NOT a Java port: stand-in so the pipeline routes end to end; uses exact board obstacle queries, inserts polyline traces + layer-change vias)
-- [ ] faithful autoroute port: AutorouteEngine + expansion rooms + MazeSearchAlgo + Locate/InsertFoundConnectionAlgo, BatchAutorouter, fanout, optimizer
+- [x] expansion-room object model → `autoroute/expansion_room.rs` (ExpansionRoom/Door/MazeSearchElement as arena RoomGraph; door section segmentation incl. 2-dim restraint lines; + TileShape::diagonal_corner_segment)
+- [ ] faithful autoroute port remaining: AutorouteEngine (room completion via search tree), SortedRoomNeighbours, MazeSearchAlgo, Locate/InsertFoundConnectionAlgo, BatchAutorouter, fanout, optimizer
 
 ## Phase 4 — I/O and CLI
 
