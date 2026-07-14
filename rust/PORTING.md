@@ -88,6 +88,14 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 - [ ] DSN wiring/keepout-area import, richer SES fidelity (library_out, session padstack forms)
 - [ ] CLI entry point (headless batch routing first; no GUI planned)
 
+## Benchmark log
+
+- 2026-07-14 (iter 42): first full-board run, interf_u fixture (173 nets,
+  395 pins, 2 layers): import 1.5 ms; single pass, no ripup, A*-guided,
+  100k expansion budget → 131 connections routed, 145/173 nets complete
+  (84%) in 31 s. Incompletes: dense buses (/MA*, /PC-A*) + GND/VCC.
+  Next lever: ripup escalation passes (Java reaches 100% with them).
+
 ## Notes / decisions log
 
 - 2026-07-14: crate scaffolded on branch `rust`; no external deps yet.
