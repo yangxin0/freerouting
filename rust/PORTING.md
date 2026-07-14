@@ -243,6 +243,16 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 91): all remaining interf_u failures route fine
+  ALONE (probe: /PC-A0, /MA11, GND, VCC each complete on the empty
+  board) — pure ordering congestion, not geometry. Iterated restart
+  rounds (failures-first, rotated, monotonic keep-if-better) tried:
+  no additional nets won on interf_u / NormalPuzzle / J2, so rounds
+  now stop after the first non-improving attempt. J2's GND is the
+  one net that fails even failed-first under clearance (pre-clearance
+  the restart won it) — a true shove candidate. Conclusion recorded:
+  ordering tricks are exhausted; the remaining nets need shove or
+  substantially more search throughput.
 - 2026-07-15 (iter 90): restrain_shape converts the obstacle to a
   simplex once and shares it through the recursion (previously it
   cloned the simplex per border line in two loops and re-converted on

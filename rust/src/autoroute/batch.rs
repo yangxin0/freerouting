@@ -387,15 +387,25 @@ pub fn batch_route_passes_with_time_limit(
     }
 
     // Restart fallback: incomplete nets often fail only because earlier
-    // routed nets consumed their corridors. If time remains, rip up all
-    // route items and route the failed nets FIRST; kept only when
-    // strictly more nets complete (transactional via snapshot).
-    let incomplete: Vec<i32> = net_nos
-        .iter()
-        .copied()
-        .filter(|&n| !board.net_is_completely_connected(n))
-        .collect();
-    if !incomplete.is_empty() && !time_limit.is_some_and(|t| t.limit_exceeded()) {
+    // routed nets consumed their corridors (they typically route fine
+    // alone). While time remains, repeatedly rip up all route items and
+    // route the current failures FIRST (rotated per round for
+    // diversity); each round is kept only when strictly more nets
+    // complete (transactional via snapshot), so completion is monotonic.
+    let mut dry_rounds = 0usize;
+    let mut round = 0usize;
+    while dry_rounds < 1 && !time_limit.is_some_and(|t| t.limit_exceeded()) {
+        let mut incomplete: Vec<i32> = net_nos
+            .iter()
+            .copied()
+            .filter(|&n| !board.net_is_completely_connected(n))
+            .collect();
+        if incomplete.is_empty() {
+            break;
+        }
+        round += 1;
+        let rot = round % incomplete.len();
+        incomplete.rotate_left(rot);
         let complete_before = net_nos.len() - incomplete.len();
         board.generate_snapshot();
         let to_remove: Vec<ItemId> = board
@@ -437,8 +447,10 @@ pub fn batch_route_passes_with_time_limit(
             board.pop_snapshot();
             total.routed_connections += restart.routed_connections;
             total.failed_connections = net_nos.len() - complete_after;
+            dry_rounds = 0;
         } else {
             board.undo();
+            dry_rounds += 1;
         }
     }
     total
