@@ -248,6 +248,11 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 117): pre-routed completion mode validated after
+  the session's changes: interf_u (fully pre-routed) verifies and
+  completes 173/173 in 22 MILLISECONDS (was 1.9 s early in the port);
+  wavefolder 31/31 in 0.43 s. smoothieboard / Z80 match their
+  from-scratch numbers (their fixture wiring is absent or partial).
 - 2026-07-15 (iter 116): robustness sweep over eight never-tried
   fixtures — zero crashes or import failures. At only 90 s budgets:
   ch32v 9/9 (1 ms), setonix 9/9, smoothieboard 215/245 (245 nets),
