@@ -68,7 +68,8 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 
 ## Phase 3 — routing engines
 
-- [ ] autoroute (maze expansion, batch autorouter, fanout, optimizer)
+- [x] interim grid A* router → `autoroute/simple_router.rs` (NOT a Java port: stand-in so the pipeline routes end to end; uses exact board obstacle queries, inserts polyline traces + layer-change vias)
+- [ ] faithful autoroute port: AutorouteEngine + expansion rooms + MazeSearchAlgo + Locate/InsertFoundConnectionAlgo, BatchAutorouter, fanout, optimizer
 
 ## Phase 4 — I/O and CLI
 
