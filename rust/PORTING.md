@@ -57,7 +57,8 @@ should pick up the first unchecked item below.
 - [x] rules/BoardRules.java (+ board/AngleRestriction.java) → `rules/board_rules.rs` (rules aggregate; item-touching clearance maintenance split into rules-side methods, board handles its items)
 
 rules package complete (except GUI print_info methods, intentionally out of scope).
-- [ ] board (items, traces, vias, search tree)
+- [x] board item model foundation → `board/item.rs` (FixedState, ItemBase, Item enum with Via + PolylineTrace incl. search-tree shape computation; Pin/areas/outline and board-dependent logic pending)
+- [ ] board remaining: Pin/ConductionArea/ObstacleArea/BoardOutline items, BasicBoard (item arena + search tree integration + connectivity), ShapeSearchTree compensation variants, RoutingBoard, shove/pull-tight algorithms
 
 ## Phase 3 — routing engines
 
