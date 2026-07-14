@@ -10,7 +10,14 @@ fn main() {
     let path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "../fixtures/Issue093-interf_u.dsn".to_string());
-    let content = std::fs::read_to_string(&path).expect("cannot read input file");
+    let strip_wiring = std::env::args().any(|a| a == "--strip-wiring");
+    let mut content = std::fs::read_to_string(&path).expect("cannot read input file");
+    if strip_wiring {
+        if let Some(pos) = content.find("  (wiring") {
+            content = format!("{})", &content[..pos]);
+            println!("pre-routed wiring stripped: routing from scratch");
+        }
+    }
     let t0 = Instant::now();
     let mut board = import_dsn(&content).expect("import failed");
     println!(
