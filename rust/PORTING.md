@@ -258,6 +258,20 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 127): round seven state — display's violating
+  net-11 traces trace back through pull-tight reinsert chains
+  (identical bboxes each hop) to an ORIGINAL maze trace from an EARLY
+  pass (id ~219) violating a PRE-EXISTING via (id 185, net 8): the
+  violation was born in a first-pass (no-ripup) search whose rooms
+  should have inflated that via by hw+cl. Either the room inflation
+  missed the via or the inserted geometry left the rooms somewhere
+  not yet covered by the endpoint fixes (drill corners? multi-corner
+  same-room runs?). NEXT: capture the region event log from the RUN
+  START (head, not tail) correlated with ROUTE lines to identify the
+  inserting search's mode, then dump that connection's corners vs the
+  via's inflated shape — one targeted run pinpoints the geometry.
+  (Instrumentation note: EVENT insert logs the pre-restoration birth
+  tag 3 for pull-tight; the restored tag shows on remove.)
 - 2026-07-15 (iter 126): THE ENDPOINT LEAK FOUND AND FIXED — the
   final approach segment ran from the arrival door to the dest pad's
   CENTRE OF GRAVITY, crossing whatever lay between (foreign via

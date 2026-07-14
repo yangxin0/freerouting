@@ -135,6 +135,7 @@ fn main() {
                             other.base.net_nos,
                             other.base.birth,
                         );
+                        eprintln!("  at {:?}", shape.bounding_box());
                     }
                 }
             }
