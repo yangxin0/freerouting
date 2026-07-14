@@ -4,28 +4,38 @@ Incremental port of the Java sources (`src/main/java/app/freerouting`, 484 files
 to the `rust/` crate. Updated by each `/loop` iteration; the next iteration
 should pick up the first unchecked item below.
 
-## Status (as of iteration 100)
+## Status (as of iteration 118)
 
 - **Working end to end**: DSN import (planes, net classes, back-side /
-  rotated placement, multi-layer) → expansion-room maze routing with
-  clearance compensation, in-search ripup, trace shoving and a
-  transactional restart fallback → pull-tight → SES export. CLI:
+  rotated placement, multi-layer up to 6 layers, 500+ net designs) →
+  expansion-room maze routing with clearance HALF-compensation,
+  layer-aware A*, in-search ripup, trace shoving (ordered forced
+  insertion) and a transactional restart fallback → trace
+  normalization → pull-tight → SES export. CLI:
   `cargo run --release -- -de input.dsn [-do out.ses] [-mp passes]
-  [-tl seconds]`.
+  [-tl seconds]` (Java-compatible flags, exit codes 0/2/1).
 - **Fleet** (from scratch, clearance-honest, 300 s cap): NINE of ten
-  boards at 100% — interf_u 173/173, 8088sbc 104/104, pic_programmer
-  111/111 (0.8 s), display-8-digit 30/30 (8 s), wavefolder 31/31
-  (1.3 s), NormalPuzzle 72/72 (16 s), J2_reference 24/24 (0.4 s),
-  ecc83 13/13, rpi_splitter 5/5. Remaining: coldfire-xilinx
-  (4 layers) 261/278, time-bound.
+  boards at 100% — interf_u 173/173 in 112 s, 8088sbc 104/104,
+  pic_programmer 111/111 (0.8 s), display 30/30 (8 s), wavefolder
+  31/31 (1.2 s), NormalPuzzle 72/72 (16 s), J2 24/24 (0.4 s), ecc83
+  13/13, rpi_splitter 5/5. coldfire-xilinx (4 layers) 263/278 at
+  300 s / 269 at 600 s — purely throughput-bound (all holdouts route
+  alone). Extended sweep: 8 more boards (6-layer CM5, 529-net Z80,
+  DAC2020 benchmark...) import and route without a single crash.
+  Pre-routed interf_u verifies in 22 ms.
 - ~21k lines of Rust, 188 tests, no warnings; ~80 Java files ported.
-- 7+ upstream Java bugs found and documented (notes/decisions log and
-  code comments marked "deviation").
-- Main gaps vs Java: ordered forced insertion (full shove recursion /
-  distinct-net stacking), via shoving (ForcedViaAlgo), fanout, the
-  optimizer beyond pull-tight, SortedRoomNeighbours door algorithm,
-  45/90-degree restricted modes, GUI (out of scope per user
-  directive — the CLI is the deliverable).
+- KEY ARCHITECTURE LESSONS: clearance half-compensation (full
+  inflation preserves separations but destroys room topology); planes
+  outside the search tree (board-covering bounds poison the R-tree);
+  inadmissible distance-to-center A* guides better than admissible
+  variants; passes unlimited under wall clock. Negative-results
+  ledger in the log below — consult before re-attempting reverted
+  ideas.
+- Main gaps vs Java: room reuse + SortedRoomNeighbours (coldfire
+  throughput), via shoving (MoveDrillItemAlgo), distinct-net shove
+  stacking, the optimizer beyond pull-tight, fanout, 45/90-degree
+  modes, GUI (out of scope per user directive — CLI is the
+  deliverable).
 
 ## Conventions
 
