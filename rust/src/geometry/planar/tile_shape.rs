@@ -6,7 +6,7 @@
 //! cutout(Polyline), is_intersected_interior_by) follow with those types.
 
 use crate::geometry::planar::{
-    FloatPoint, IntBox, IntOctagon, IntPoint, Line, Point, Side, Simplex,
+    FloatPoint, IntBox, IntOctagon, IntPoint, Line, LineSegment, Point, Polyline, Side, Simplex,
 };
 
 /// A convex shape whose border lines are directed so the interior is on
@@ -656,6 +656,90 @@ impl TileShape {
 
     /// The half plane on the point-left of `line` as a tile shape
     /// (Java: `TileShape.get_instance(Line)`).
+    /// The intersections of `polyline` with the border of this shape as
+    /// (polyline line number, border edge number) pairs in polyline order
+    /// (Java: `TileShape.entrance_points`).
+    pub fn entrance_points(&self, polyline: &Polyline) -> Vec<(usize, usize)> {
+        let mut result = Vec::new();
+        let mut prev: Option<(usize, usize)> = None;
+        for line_no in 1..polyline.arr.len().saturating_sub(1) {
+            let curr_line_seg = LineSegment::from_polyline(polyline, line_no);
+            for edge_no in curr_line_seg.border_intersections(self) {
+                if prev != Some((line_no, edge_no)) {
+                    result.push((line_no, edge_no));
+                    prev = Some((line_no, edge_no));
+                }
+            }
+        }
+        result
+    }
+
+    /// Cuts out the parts of `polyline` in the interior of this shape and
+    /// returns the remaining pieces; pieces completely contained in the
+    /// border are dropped (Java: `TileShape.cutout(Polyline)`).
+    pub fn cutout_polyline(&self, polyline: &Polyline) -> Vec<Polyline> {
+        let intersections = self.entrance_points(polyline);
+        let first_corner = polyline.first_corner();
+        let first_corner_is_inside = self.contains_inside(&first_corner);
+        if intersections.is_empty() {
+            if first_corner_is_inside {
+                // completely contained in this shape
+                return Vec::new();
+            }
+            return vec![polyline.clone()];
+        }
+        let mut pieces = Vec::new();
+        let mut curr_no = 0usize;
+        let (first_line_no, first_edge_no) = intersections[0];
+        if !first_corner_is_inside {
+            // the outside piece at the start
+            let first_intersection =
+                polyline.arr[first_line_no].intersection(&self.border_line(first_edge_no));
+            if first_corner != first_intersection {
+                let mut curr_lines: Vec<Line> =
+                    polyline.arr[..=first_line_no].to_vec();
+                // close the piece with the intersected edge line
+                curr_lines.push(self.border_line(first_edge_no));
+                let piece = Polyline::from_lines(curr_lines);
+                if !piece.is_empty() {
+                    pieces.push(piece);
+                }
+            }
+            curr_no += 1;
+        }
+        while curr_no + 1 < intersections.len() {
+            // the next outside piece between two entrances
+            let (curr_line_no, curr_edge_no) = intersections[curr_no];
+            let (next_line_no, next_edge_no) = intersections[curr_no + 1];
+            // skip parts running completely inside the border
+            let insert_piece = (curr_line_no + 1..next_line_no)
+                .any(|i| self.is_outside(&polyline.corner(i)));
+            if insert_piece {
+                let mut curr_lines = Vec::with_capacity(next_line_no - curr_line_no + 3);
+                curr_lines.push(self.border_line(curr_edge_no));
+                curr_lines.extend_from_slice(&polyline.arr[curr_line_no..=next_line_no]);
+                curr_lines.push(self.border_line(next_edge_no));
+                let piece = Polyline::from_lines(curr_lines);
+                if !piece.is_empty() {
+                    pieces.push(piece);
+                }
+            }
+            curr_no += 2;
+        }
+        if curr_no < intersections.len() {
+            // the outside piece at the end
+            let (curr_line_no, curr_edge_no) = intersections[curr_no];
+            let mut curr_lines = Vec::with_capacity(polyline.arr.len() - curr_line_no + 1);
+            curr_lines.push(self.border_line(curr_edge_no));
+            curr_lines.extend_from_slice(&polyline.arr[curr_line_no..]);
+            let piece = Polyline::from_lines(curr_lines);
+            if !piece.is_empty() {
+                pieces.push(piece);
+            }
+        }
+        pieces
+    }
+
     pub fn half_plane(line: Line) -> TileShape {
         TileShape::Simplex(Simplex::get_instance(vec![line]))
     }
@@ -770,6 +854,43 @@ impl From<Simplex> for TileShape {
 mod tests {
     use super::*;
     use crate::geometry::planar::{IntDirection, IntVector};
+
+    #[test]
+    fn cutout_polyline_crossing() {
+        // a horizontal polyline crossing a square: two outside pieces
+        let square = TileShape::Box(IntBox::from_coords(-100, -100, 100, 100));
+        let polyline = Polyline::from_int_points(&[
+            IntPoint::new(-300, 0),
+            IntPoint::new(300, 0),
+        ]);
+        let pieces = square.cutout_polyline(&polyline);
+        assert_eq!(pieces.len(), 2);
+        for piece in &pieces {
+            // each piece keeps one original endpoint and ends at the border
+            let first = piece.corner_approx(0);
+            let last = piece.corner_approx(piece.corner_count() - 1);
+            let xs = [first.x, last.x];
+            assert!(xs.contains(&-300.0) || xs.contains(&300.0));
+            assert!(xs.contains(&-100.0) || xs.contains(&100.0));
+        }
+    }
+
+    #[test]
+    fn cutout_polyline_outside_and_inside() {
+        let square = TileShape::Box(IntBox::from_coords(-100, -100, 100, 100));
+        // completely outside: returned unchanged
+        let outside = Polyline::from_int_points(&[
+            IntPoint::new(200, 200),
+            IntPoint::new(400, 200),
+        ]);
+        assert_eq!(square.cutout_polyline(&outside).len(), 1);
+        // completely inside: nothing remains
+        let inside = Polyline::from_int_points(&[
+            IntPoint::new(-50, 0),
+            IntPoint::new(50, 0),
+        ]);
+        assert!(square.cutout_polyline(&inside).is_empty());
+    }
 
     #[test]
     fn get_instance_simplifies() {
