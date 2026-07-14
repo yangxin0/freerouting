@@ -8,6 +8,7 @@ pub mod batch;
 pub mod engine;
 pub mod expansion_room;
 pub mod maze_search;
+pub mod pull_tight;
 pub mod room_completion;
 pub mod simple_router;
 
@@ -22,5 +23,6 @@ pub use expansion_room::{
 pub use maze_search::{
     find_connection, maze_route, maze_route_with_ripup, MazeSearchResult, RoutedConnection,
 };
+pub use pull_tight::{pull_tight_all, pull_tight_trace, total_trace_length};
 pub use room_completion::{complete_shape, restrain_shape, IncompleteRoom};
 pub use simple_router::{RouteRequest, RouteResult, SimpleRouter};

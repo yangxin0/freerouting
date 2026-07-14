@@ -82,6 +82,20 @@ fn main() {
     if !incomplete_nets.is_empty() {
         println!("incomplete nets: {}", incomplete_nets.join(", "));
     }
+    // pull the routed traces tight
+    let len_before = freerouting::autoroute::total_trace_length(&board);
+    let t2 = Instant::now();
+    let removed = freerouting::autoroute::pull_tight_all(&mut board, 3);
+    let len_after = freerouting::autoroute::total_trace_length(&board);
+    println!(
+        "pull tight in {:?}: {} corners removed, trace length {:.0} -> {:.0} ({:.1}% shorter)",
+        t2.elapsed(),
+        removed,
+        len_before,
+        len_after,
+        (1.0 - len_after / len_before.max(1.0)) * 100.0
+    );
+
     let ses = export_ses(&board, "routed_board", 10);
     let out = "routed_board.ses";
     std::fs::write(out, &ses).expect("cannot write session");
