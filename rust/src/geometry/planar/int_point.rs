@@ -53,6 +53,31 @@ impl IntPoint {
         let dy = (self.y - other.y) as i64;
         dx * dx + dy * dy
     }
+
+    /// The determinant of the vectors (x, y) and (other.x, other.y).
+    pub fn determinant(self, other: IntPoint) -> i64 {
+        self.x as i64 * other.y as i64 - self.y as i64 * other.x as i64
+    }
+
+    /// The signed area of the parallelogram spanned by the vectors
+    /// `p2 - p1` and `self - p1`.
+    pub fn signed_area(self, p1: IntPoint, p2: IntPoint) -> i64 {
+        p2.difference_by(p1).determinant(self.difference_by(p1))
+    }
+
+    /// The nearest point to this point on the horizontal or vertical line
+    /// through `other` (snaps this point onto an orthogonal line).
+    pub fn orthogonal_projection(self, other: IntPoint) -> IntPoint {
+        let horizontal_distance = (self.x - other.x).abs();
+        let vertical_distance = (self.y - other.y).abs();
+        if horizontal_distance <= vertical_distance {
+            // projection onto the vertical line through other
+            IntPoint::new(other.x, self.y)
+        } else {
+            // projection onto the horizontal line through other
+            IntPoint::new(self.x, other.y)
+        }
+    }
 }
 
 #[cfg(test)]
