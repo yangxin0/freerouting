@@ -81,7 +81,8 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 ## Phase 4 — I/O and CLI
 
 - [x] S-expression reader → `io/dsn.rs` (tokenizer/tree with quoted strings incl. the `(string_quote ")` special case; navigation helpers; verified against real repo fixtures)
-- [ ] DSN semantic import (structure/library/placement/network → BasicBoard), SES writer
+- [x] DSN semantic import → `io/dsn_import.rs` (layers by index, resolution scaling, default rules, padstacks — circle/rect/path/polygon as box/octagon approximations, images/placement with rotation + back-side mirroring, network pin binding; wiring/keepout import + faithful pad shapes pending)
+- [ ] DSN wiring/keepout import, SES writer
 - [ ] CLI entry point (headless batch routing first; no GUI planned)
 
 ## Notes / decisions log
