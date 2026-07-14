@@ -107,7 +107,22 @@ pub fn complete_shape(
 /// return several rooms if the contained shape lies on both sides of the
 /// cut.
 pub fn restrain_shape(room: &IncompleteRoom, obstacle_shape: &TileShape) -> Vec<IncompleteRoom> {
+    restrain_shape_bounded(room, obstacle_shape, 64)
+}
+
+/// Depth-bounded worker for [`restrain_shape`]. The recursion on the rest
+/// piece is only guaranteed to terminate when every cut reduces the
+/// overlap; degenerate obstacle slivers can defeat that, so the depth is
+/// capped and the remaining rest piece is dropped (a conservative room).
+fn restrain_shape_bounded(
+    room: &IncompleteRoom,
+    obstacle_shape: &TileShape,
+    depth: usize,
+) -> Vec<IncompleteRoom> {
     let mut result = Vec::new();
+    if depth == 0 {
+        return result;
+    }
     // Convert to Simplex: border lines of length 0 of octagons may not be
     // handled correctly otherwise (Java comment).
     let obstacle_simplex = obstacle_shape.to_simplex();
@@ -189,7 +204,7 @@ pub fn restrain_shape(room: &IncompleteRoom, obstacle_shape: &TileShape) -> Vec<
             layer: room.layer,
             contained_shape: shape_to_be_contained.intersection(&opposite_half_plane),
         };
-        result.extend(restrain_shape(&rest_room, obstacle_shape));
+        result.extend(restrain_shape_bounded(&rest_room, obstacle_shape, depth - 1));
     }
     result
 }

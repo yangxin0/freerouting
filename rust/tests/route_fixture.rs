@@ -62,6 +62,22 @@ fn import_route_export_real_board() {
         .expect("/ACK not in session");
     assert!(routed_net.child("wire").is_some(), "no wire for /ACK");
 
+    // every routed trace on the board keeps sane corner coordinates
+    // (guards against the quasi-infinite corners from nearly parallel
+    // polyline lines, fixed at iteration 63)
+    for (_, item) in board.items() {
+        if let freerouting::board::ItemKind::PolylineTrace(t) = &item.kind {
+            for c in t.polyline.corner_approx_arr() {
+                assert!(
+                    c.x.abs() <= 33_554_432.0 && c.y.abs() <= 33_554_432.0,
+                    "trace corner out of coordinate range: ({}, {})",
+                    c.x,
+                    c.y
+                );
+            }
+        }
+    }
+
     // the routed wires stay inside the board outline (bounding box of the
     // boundary path in the file, scaled by resolution 10)
     for wire in routed_net.children("wire") {
