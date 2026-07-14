@@ -243,6 +243,13 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 84): wall-clock budget split — the normal passes
+  now get 70% of the time limit, reserving the rest for the restart
+  fallback (previously the passes consumed everything and the fallback
+  often never ran under pressure). Completion unchanged everywhere;
+  8088sbc 172 s → 107 s and NormalPuzzle 23 s → 11 s (the fallback
+  resolves stragglers more efficiently than late high-budget passes);
+  interf_u neutral at 165/173.
 - 2026-07-14 (iter 78): FULL FLEET AT 100%. J2's GND routed fully when
   alone → pure ordering congestion (largest-extent nets route last
   into consumed corridors). A global largest-first order fixed J2 and

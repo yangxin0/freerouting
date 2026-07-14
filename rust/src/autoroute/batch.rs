@@ -302,10 +302,17 @@ pub fn batch_route_passes_with_time_limit(
 
     let mut total = BatchResult::default();
     let mut budget = request.max_expansions;
+    // reserve part of the wall clock for the restart fallback below: the
+    // passes otherwise consume the entire limit and the fallback (which
+    // wins the hard nets) never gets to run
+    let pass_limit = time_limit.copied().map(|mut t| {
+        t.multiply(0.7);
+        t
+    });
     for pass in 0..passes.max(1) {
         let pass_request = BatchRequest {
             max_expansions: budget,
-            deadline: time_limit.copied().or(request.deadline),
+            deadline: pass_limit.or(request.deadline),
             ..*request
         };
         let mut failed_this_pass = 0usize;
@@ -317,7 +324,7 @@ pub fn batch_route_passes_with_time_limit(
         };
         let mut out_of_time = false;
         for &net_no in &net_nos {
-            if time_limit.is_some_and(|t| t.limit_exceeded()) {
+            if pass_limit.is_some_and(|t| t.limit_exceeded()) {
                 out_of_time = true;
                 break;
             }
