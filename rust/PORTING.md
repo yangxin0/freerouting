@@ -37,7 +37,8 @@ should pick up the first unchecked item below.
 - [x] IntOctagon.java (+ FortyfiveDegreeDirection.java) → `geometry/planar/int_octagon.rs` (normalize, intersection/union/contains, border points/projections, both cutout variants; also adds IntBox::to_int_octagon/enlarge, IntPoint::surrounding_octagon; Simplex/TileShape interop pending)
 - [ ] Polyline.java
 - [x] Simplex.java → `geometry/planar/simplex.rs` (complete incl. cutout_from + calc_division_lines; Java's never-assigned prev_division_line preserved as documented dead branch)
-- [ ] Shape hierarchy: Shape / ConvexShape / TileShape enum / RegularTileShape / Circle / PolygonShape / PolylineShape / PolylineArea / Area / Ellipse
+- [x] TileShape.java / RegularTileShape.java dispatch + generic algorithms → `geometry/planar/tile_shape.rs` (enum Box/Octagon/Simplex; get_instance+simplify, containment family, nearest points/borders, intersection kind-promotion, 3x3 cutout dispatch; index_of_nearest_corner fixes Java's Double.MIN_VALUE init bug; Polyline/LineSegment-dependent methods pending)
+- [ ] Remaining shapes: Circle / PolygonShape / PolylineShape / PolylineArea / Area / Ellipse; TileShape methods needing Polyline/LineSegment (entrance_points, cutout(Polyline), is_intersected_interior_by, touching_sides, …)
 - [ ] Polygon.java
 
 ## Phase 2 — supporting infrastructure

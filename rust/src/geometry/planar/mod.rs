@@ -20,6 +20,7 @@ pub mod rational_point;
 pub mod rational_vector;
 pub mod side;
 pub mod simplex;
+pub mod tile_shape;
 pub mod vector;
 
 pub use direction::{BigIntDirection, Direction};
@@ -36,4 +37,5 @@ pub use rational_point::RationalPoint;
 pub use rational_vector::RationalVector;
 pub use side::Side;
 pub use simplex::Simplex;
+pub use tile_shape::TileShape;
 pub use vector::Vector;
