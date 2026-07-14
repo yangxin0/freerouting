@@ -243,6 +243,17 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 92): SHOVE ARC STARTED. Plan (Java, 2666 lines
+  total): CalcFromSide (125) -> CalcShapeAndFromSide (117) ->
+  ShapeTraceEntries (793, the shove workhorse: collects and cuts the
+  traces/vias in a shove shape) -> ShoveTraceAlgo (830,
+  check + insert with recursive pushing) -> ForcedViaAlgo (306);
+  integrate as a fallback when a maze connection fails: try inserting
+  the blocked segment with shoving before giving up. This iteration:
+  board/calc_from_side.rs ported with tests (entry side of a polyline
+  / nearest side of a point / shove sides of a segment; note; on
+  4-sided shapes both shove directions coincide, like Java's +-2 mod
+  border count).
 - 2026-07-15 (iter 91): all remaining interf_u failures route fine
   ALONE (probe: /PC-A0, /MA11, GND, VCC each complete on the empty
   board) — pure ordering congestion, not geometry. Iterated restart
