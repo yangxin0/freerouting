@@ -30,6 +30,8 @@ pub struct BatchRequest {
     /// In-search ripup penalty per rippable item (0 = ripup disabled; see
     /// `MazeRouteRequest::ripup_penalty`).
     pub ripup_penalty: f64,
+    /// Optional wall-clock deadline honored inside searches and cascades.
+    pub deadline: Option<crate::datastructures::TimeLimit>,
 }
 
 /// The connected components of the connectable items of `net_no`.
@@ -109,6 +111,10 @@ pub fn route_net(board: &mut BasicBoard, net_no: i32, request: &BatchRequest) ->
     let mut result = BatchResult::default();
     let mut prev_component_count = usize::MAX;
     loop {
+        if request.deadline.is_some_and(|t| t.limit_exceeded()) {
+            result.failed_connections += 1;
+            break;
+        }
         let components = net_components(board, net_no);
         if components.len() <= 1 {
             break;
@@ -156,6 +162,7 @@ pub fn route_net(board: &mut BasicBoard, net_no: i32, request: &BatchRequest) ->
             via_cost: request.via_cost,
             max_expansions: request.max_expansions,
             ripup_penalty: request.ripup_penalty,
+            deadline: request.deadline,
         };
         if let Some(connection) = maze_route_with_ripup(board, &maze_request) {
             result.routed_connections += 1;
@@ -214,6 +221,10 @@ pub fn route_net_with_ripup(
         let mut reroutes = 0usize;
         const MAX_CASCADE_REROUTES: usize = 20;
         while let Some(ripped) = worklist.pop() {
+            if request.deadline.is_some_and(|t| t.limit_exceeded()) {
+                success = false;
+                break;
+            }
             if board.net_is_completely_connected(ripped) {
                 continue;
             }
@@ -286,6 +297,7 @@ pub fn batch_route_passes_with_time_limit(
     for pass in 0..passes.max(1) {
         let pass_request = BatchRequest {
             max_expansions: budget,
+            deadline: time_limit.copied().or(request.deadline),
             ..*request
         };
         let mut failed_this_pass = 0usize;
@@ -363,6 +375,7 @@ mod tests {
             via_cost: 5000.0,
             max_expansions: 100_000,
             ripup_penalty: 0.0,
+            deadline: None,
         }
     }
 
@@ -466,6 +479,7 @@ mod tests {
             via_cost: 5000.0,
             max_expansions: 30_000,
             ripup_penalty: 0.0,
+            deadline: None,
         };
         // route net 1 first: it takes the gap
         let r1 = route_net(&mut board, 1, &request);

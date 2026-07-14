@@ -9,7 +9,7 @@ pub trait Stoppable {
 }
 
 /// A time limit for interrupting long-running algorithms.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct TimeLimit {
     start: Instant,
     limit: Duration,

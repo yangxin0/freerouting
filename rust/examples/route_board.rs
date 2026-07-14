@@ -47,6 +47,7 @@ fn main() {
         via_cost: 50_000.0,
         max_expansions: 100_000,
         ripup_penalty: 0.0,
+        deadline: None,
     };
 
     let t1 = Instant::now();

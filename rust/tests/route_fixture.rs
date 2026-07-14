@@ -41,6 +41,7 @@ fn import_route_export_real_board() {
         via_cost: 50_000.0,
         max_expansions: 100_000,
         ripup_penalty: 0.0,
+        deadline: None,
     };
     let result = route_net(&mut board, ack, &request);
     assert_eq!(result.failed_connections, 0, "routing /ACK failed");

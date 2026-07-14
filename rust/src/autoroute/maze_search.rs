@@ -89,6 +89,9 @@ pub struct MazeRouteRequest {
     /// MazeSearchAlgo ripup costs); the items intersecting the inserted
     /// connection are removed.
     pub ripup_penalty: f64,
+    /// Optional wall-clock deadline checked periodically during the
+    /// expansion.
+    pub deadline: Option<crate::datastructures::TimeLimit>,
 }
 
 /// Runs the maze expansion from the start item towards the destination
@@ -171,6 +174,9 @@ pub fn find_connection(
         expansions += 1;
         if expansions > request.max_expansions {
             return None; // budget exhausted
+        }
+        if expansions % 1024 == 0 && request.deadline.is_some_and(|t| t.limit_exceeded()) {
+            return None; // out of time
         }
         // occupy the step
         match entry.step {
@@ -594,6 +600,7 @@ mod tests {
             via_cost: 5000.0,
             max_expansions: 100_000,
             ripup_penalty: 0.0,
+            deadline: None,
         }
     }
 

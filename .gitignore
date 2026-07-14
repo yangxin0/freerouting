@@ -45,3 +45,4 @@ gha-creds-*.json
 
 # Rust build output
 rust/target/
+rust/routed_board.ses
