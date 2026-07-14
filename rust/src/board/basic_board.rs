@@ -410,6 +410,63 @@ impl BasicBoard {
         net_items.iter().all(|id| connected.contains(id))
     }
 
+    /// Splits a trace of `net_no` on `layer` whose center line passes
+    /// through `point` (not at an endpoint) into two traces meeting there,
+    /// so that contacts at the junction register
+    /// (Java: part of `PolylineTrace` normalization). Returns true if a
+    /// trace was split.
+    pub fn split_traces_at(&mut self, point: IntPoint, layer: usize, net_no: i32) -> bool {
+        use crate::geometry::planar::{Line, LineSegment};
+        // find a splittable trace
+        let mut candidate: Option<(ItemId, usize)> = None;
+        for (id, item) in self.items() {
+            let ItemKind::PolylineTrace(t) = &item.kind else {
+                continue;
+            };
+            if t.layer != layer || !item.base.contains_net(net_no) {
+                continue;
+            }
+            let p = Point::Int(point);
+            if t.first_corner() == p || t.last_corner() == p {
+                continue;
+            }
+            if !t.contains_on_center_line(point) {
+                continue;
+            }
+            // the polyline line index containing the point
+            for i in 1..t.polyline.arr.len() - 1 {
+                if LineSegment::from_polyline(&t.polyline, i).contains(point) {
+                    candidate = Some((*id, i));
+                    break;
+                }
+            }
+            if candidate.is_some() {
+                break;
+            }
+        }
+        let Some((id, line_no)) = candidate else {
+            return false;
+        };
+        let item = self.get_item(id).unwrap().clone();
+        let ItemKind::PolylineTrace(t) = &item.kind else {
+            unreachable!();
+        };
+        // cut with the perpendicular line through the point
+        let cut_direction = t.polyline.arr[line_no].direction().turn_45_degree(2);
+        let cut_line = Line::from_direction(point, cut_direction);
+        let Some([first, second]) = t.polyline.split(line_no, cut_line) else {
+            return false;
+        };
+        let half_width = t.half_width;
+        let layer = t.layer;
+        let net_nos = item.base.net_nos.clone();
+        let clearance_class = item.base.clearance_class;
+        self.remove_item(id);
+        self.insert_trace(first, layer, half_width, net_nos.clone(), clearance_class);
+        self.insert_trace(second, layer, half_width, net_nos, clearance_class);
+        true
+    }
+
     /// The smallest box containing all items of the board.
     pub fn bounding_box(&self) -> IntBox {
         let mut result = IntBox::EMPTY;
@@ -683,6 +740,40 @@ mod tests {
         assert_eq!(board.get_normal_contacts(trace), vec![plane]);
         assert!(!board.is_tail(trace));
         assert!(board.net_is_completely_connected(7));
+    }
+
+    #[test]
+    fn split_trace_makes_t_junction_connect() {
+        let mut board = test_board();
+        // trace A along the x axis, trace B ending in the middle of A
+        let a = board.insert_trace(
+            trace_polyline(&[(0, 0), (10000, 0)]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        let b = board.insert_trace(
+            trace_polyline(&[(5000, 5000), (5000, 0)]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        // without splitting the T-junction does not register
+        assert!(board.get_normal_contacts(b).is_empty());
+        assert!(!board.net_is_completely_connected(1));
+
+        assert!(board.split_traces_at(IntPoint::new(5000, 0), 0, 1));
+        assert!(board.get_item(a).is_none(), "original trace replaced");
+        assert_eq!(board.item_count(), 3);
+        // now B contacts both halves of A and the net is connected
+        assert_eq!(board.get_normal_contacts(b).len(), 2);
+        assert!(board.net_is_completely_connected(1));
+
+        // splitting at an endpoint or off the trace does nothing
+        assert!(!board.split_traces_at(IntPoint::new(0, 0), 0, 1));
+        assert!(!board.split_traces_at(IntPoint::new(4000, 100), 0, 1));
     }
 
     #[test]

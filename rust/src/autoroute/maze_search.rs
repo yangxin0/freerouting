@@ -356,6 +356,27 @@ pub fn maze_route(board: &mut BasicBoard, request: &MazeRouteRequest) -> Option<
         }
     }
     flush(board, &mut run, run_layer, &mut new_items);
+
+    // normalize junctions: if an inserted trace endpoint lands in the
+    // middle of an existing trace of the net, split that trace so the
+    // contact registers (Java: PolylineTrace normalization on insert)
+    let endpoints: Vec<(IntPoint, usize)> = new_items
+        .iter()
+        .filter_map(|id| board.get_item(*id).cloned())
+        .filter_map(|item| match item.kind {
+            crate::board::ItemKind::PolylineTrace(t) => Some(t),
+            _ => None,
+        })
+        .flat_map(|t| {
+            [
+                (t.first_corner().to_float().round(), t.layer),
+                (t.last_corner().to_float().round(), t.layer),
+            ]
+        })
+        .collect();
+    for (point, layer) in endpoints {
+        board.split_traces_at(point, layer, request.net_no);
+    }
     Some(new_items)
 }
 
