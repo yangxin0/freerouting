@@ -42,3 +42,6 @@ gha-creds-*.json
 /.secrets
 /scripts/benchmark/logs
 /scripts/benchmark/outputs
+
+# Rust build output
+rust/target/

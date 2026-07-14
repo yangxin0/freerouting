@@ -1,0 +1,8 @@
+[package]
+name = "freerouting"
+version = "0.1.0"
+edition = "2021"
+description = "Rust reimplementation of the freerouting PCB auto-router"
+license = "GPL-3.0-only"
+
+[dependencies]
