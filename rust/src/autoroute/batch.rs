@@ -120,20 +120,26 @@ pub fn route_net(board: &mut BasicBoard, net_no: i32, request: &BatchRequest) ->
             break;
         }
         prev_component_count = components.len();
-        // route between the first component and the component closest
-        // to it
-        let first_candidates = endpoint_candidates(board, &components[0]);
+        // route between the two closest components overall (minimum
+        // spanning behavior, important for many-pin nets like power)
+        let candidate_sets: Vec<Vec<ItemId>> = components
+            .iter()
+            .map(|c| endpoint_candidates(board, c))
+            .collect();
+        let dist_of = |p: &(ItemId, ItemId)| {
+            let bb_a = board.get_item(p.0).unwrap().bounding_box(&board.padstacks);
+            let bb_b = board.get_item(p.1).unwrap().bounding_box(&board.padstacks);
+            bb_a.weighted_distance(bb_b, 1.0, 1.0)
+        };
         let mut best: Option<(ItemId, ItemId)> = None;
-        for other in &components[1..] {
-            let other_candidates = endpoint_candidates(board, other);
-            if let Some(pair) = closest_pair(board, &first_candidates, &other_candidates) {
-                let dist_of = |p: &(ItemId, ItemId)| {
-                    let bb_a = board.get_item(p.0).unwrap().bounding_box(&board.padstacks);
-                    let bb_b = board.get_item(p.1).unwrap().bounding_box(&board.padstacks);
-                    bb_a.weighted_distance(bb_b, 1.0, 1.0)
-                };
-                if best.is_none() || dist_of(&pair) < dist_of(best.as_ref().unwrap()) {
-                    best = Some(pair);
+        for i in 0..candidate_sets.len() {
+            for j in i + 1..candidate_sets.len() {
+                if let Some(pair) =
+                    closest_pair(board, &candidate_sets[i], &candidate_sets[j])
+                {
+                    if best.is_none() || dist_of(&pair) < dist_of(best.as_ref().unwrap()) {
+                        best = Some(pair);
+                    }
                 }
             }
         }
