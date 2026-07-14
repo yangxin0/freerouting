@@ -50,7 +50,9 @@ should pick up the first unchecked item below.
 - [ ] datastructures remaining: PlanarDelaunayTriangulation (autoroute-time), IdentifierType/IndentFileWriter (specctra I/O time)
 - [x] board/Layer.java + LayerStructure.java → `board/layer.rs`
 - [x] rules/ClearanceMatrix.java → `rules/clearance_matrix.rs` (even-rounded values, per-row/layer maxima, append/remove class, safety margin)
-- [ ] rules remaining: Net/Nets, NetClass/NetClasses, ViaInfo(s)/ViaRule, BoardRules, DefaultItemClearanceClasses
+- [x] rules/Net.java + Nets.java → `rules/net.rs` (rules data; board item queries follow with the board item model)
+- [x] rules/NetClass.java + NetClasses.java + DefaultItemClearanceClasses.java → `rules/net_class.rs` (object refs → indices)
+- [ ] rules remaining: ViaInfo(s)/ViaRule (needs board Padstacks), BoardRules
 - [ ] board (items, traces, vias, search tree)
 
 ## Phase 3 — routing engines
