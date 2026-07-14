@@ -184,6 +184,19 @@ pub fn find_connection(
         }
     }
 
+    // pre-create rooms around the destination shapes too: in dense pin
+    // rows the neighbours' clearance-inflated shapes can kill every free
+    // room touching the dest pad, leaving no room with a target door to
+    // arrive at. Like start rooms, these keep (a sliver of) the dest
+    // shape by the contained-shape privilege and carry its target door.
+    if let Some(dest) = board.get_item(request.dest_item) {
+        let dest_shapes: Vec<(TileShape, usize)> =
+            dest.tile_shapes(&board.padstacks).to_vec();
+        for (dest_shape, layer) in dest_shapes {
+            engine.create_start_rooms(board, dest_shape, layer);
+        }
+    }
+
     let mut expansions = 0usize;
     while let Some(Reverse(entry)) = open.pop() {
         expansions += 1;
@@ -253,7 +266,26 @@ pub fn find_connection(
         );
     }
     if std::env::var_os("FR_DEBUG_MAZE").is_some() {
-        eprintln!("MAZE exhausted after {expansions} expansions");
+        let rooms_with_dest_door = (0..engine.graph.room_count())
+            .filter(|&r| {
+                engine
+                    .target_doors(r)
+                    .iter()
+                    .any(|t| t.item == request.dest_item)
+            })
+            .count();
+        let dest_kind = board
+            .get_item(request.dest_item)
+            .map(|i| match i.kind {
+                crate::board::ItemKind::Via(_) => "via/pad",
+                crate::board::ItemKind::PolylineTrace(_) => "trace",
+                crate::board::ItemKind::ObstacleArea(_) => "area",
+            })
+            .unwrap_or("missing");
+        eprintln!(
+            "MAZE exhausted after {expansions} expansions \
+             (dest {dest_kind}, rooms_with_dest_door={rooms_with_dest_door})"
+        );
     }
     None
 }

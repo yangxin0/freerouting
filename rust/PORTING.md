@@ -250,6 +250,20 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 106): ARRIVAL CONFIRMED as the failure:
+  rooms_with_dest_door=0 after 96k expansions — no free room ever
+  touched the dest pad (its pin-row neighbours' clearance-inflated
+  shapes kill every piece). Fix shipped: dest-side rooms are now
+  pre-created like start rooms (contained-shape privilege keeps a
+  sliver of the pad; its target door forms). Display improves 94→104
+  routed connections; /P still fails: the dest sliver lies INSIDE the
+  pin-clearance band and no room exists between it and open space, so
+  it has no doors (rooms_with_dest_door now 1-4 but unreachable).
+  Next: bridge the band — either Java-style half-compensation
+  (obstacles inflated by cl/2, trace half width + cl/2 in the door
+  check, which lets rooms overlap the band halfway) or explicit
+  target doors on rooms within (clearance + half width) of the dest
+  shape with a final legality check on the entering segment.
 - 2026-07-15 (iter 105): instrumentation verdict — ZERO room kills
   with ripup_mode=true on rippable items (transparency is flawless;
   the 12-14-expansion seals are the no-ripup first attempts, as
