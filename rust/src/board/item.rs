@@ -274,10 +274,9 @@ impl Item {
 
     /// All search-tree shapes of this item with their layers. Computed
     /// once and cached (items are immutable once inserted).
-    pub fn tile_shapes(&self, padstacks: &Padstacks) -> Vec<(TileShape, usize)> {
+    pub fn tile_shapes(&self, padstacks: &Padstacks) -> &[(TileShape, usize)] {
         self.cached_tile_shapes
             .get_or_init(|| self.compute_tile_shapes(padstacks))
-            .clone()
     }
 
     fn compute_tile_shapes(&self, padstacks: &Padstacks) -> Vec<(TileShape, usize)> {
@@ -459,7 +458,7 @@ mod tests {
         assert_eq!(trace.tile_shape_count(&padstacks), 2);
         let shapes = trace.tile_shapes(&padstacks);
         assert_eq!(shapes.len(), 2);
-        for (shape, layer) in &shapes {
+        for (shape, layer) in shapes {
             assert_eq!(*layer, 1);
             assert!(!shape.is_empty());
         }

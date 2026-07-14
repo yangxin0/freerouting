@@ -413,10 +413,28 @@ impl Simplex {
         if self.is_empty() || other.is_empty() {
             return Simplex::EMPTY;
         }
+        let sorted =
+            |lines: &[Line]| lines.windows(2).all(|w| w[0] <= w[1]);
         let mut new_lines = Vec::with_capacity(self.lines.len() + other.lines.len());
-        new_lines.extend_from_slice(&self.lines);
-        new_lines.extend_from_slice(&other.lines);
-        new_lines.sort();
+        if sorted(&self.lines) && sorted(&other.lines) {
+            // both line arrays are angular-sorted: merge instead of sort
+            let (mut i, mut j) = (0, 0);
+            while i < self.lines.len() && j < other.lines.len() {
+                if self.lines[i] <= other.lines[j] {
+                    new_lines.push(self.lines[i]);
+                    i += 1;
+                } else {
+                    new_lines.push(other.lines[j]);
+                    j += 1;
+                }
+            }
+            new_lines.extend_from_slice(&self.lines[i..]);
+            new_lines.extend_from_slice(&other.lines[j..]);
+        } else {
+            new_lines.extend_from_slice(&self.lines);
+            new_lines.extend_from_slice(&other.lines);
+            new_lines.sort();
+        }
         Simplex::new(new_lines).remove_redundant_lines()
     }
 

@@ -98,6 +98,7 @@ fn main() {
                     item.base.component_no
                 );
                 for (shape, layer) in item.tile_shapes(&board.padstacks) {
+                    let layer = *layer;
                     println!(
                         "  layer {layer}: dim {} bbox {:?}",
                         shape.dimension(),
@@ -122,7 +123,7 @@ fn main() {
                             continue;
                         }
                         for (oshape, olayer) in obst.tile_shapes(&board.padstacks) {
-                            if olayer != layer {
+                            if *olayer != layer {
                                 continue;
                             }
                             let before = pieces.len();

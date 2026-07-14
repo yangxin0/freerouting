@@ -102,7 +102,7 @@ pub fn find_connection(
     request: &MazeRouteRequest,
 ) -> Option<MazeSearchResult> {
     let start = board.get_item(request.start_item)?;
-    let start_shapes: Vec<(TileShape, usize)> = start.tile_shapes(&board.padstacks);
+    let start_shapes: Vec<(TileShape, usize)> = start.tile_shapes(&board.padstacks).to_vec();
     if start_shapes.is_empty() {
         return None;
     }

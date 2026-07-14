@@ -132,8 +132,8 @@ impl BasicBoard {
 
     fn insert_into_search_tree(&mut self, id: ItemId, item: &Item) {
         let mut leaves = Vec::new();
-        for (index, (shape, layer)) in item.tile_shapes(&self.padstacks).into_iter().enumerate()
-        {
+        for (index, (shape, layer)) in item.tile_shapes(&self.padstacks).iter().enumerate() {
+            let layer = *layer;
             let Some(bound) = shape.bounding_octagon() else {
                 continue;
             };
@@ -327,7 +327,8 @@ impl BasicBoard {
                 let mut r = self.get_normal_contacts_at(id, &Point::Int(v.center), false);
                 // traces may also end anywhere inside the pad shapes
                 for (shape, layer) in item.tile_shapes(&self.padstacks) {
-                    for other_id in self.overlapping_items(&shape, Some(layer)) {
+                    let layer = *layer;
+                    for other_id in self.overlapping_items(shape, Some(layer)) {
                         if other_id == id {
                             continue;
                         }

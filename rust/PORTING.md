@@ -223,6 +223,16 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   sign instead of building IntDirections. Wavefolder 6.8 s → 2.8 s;
   interf_u 165/173 @ 300 s (still time-saturated — the restart
   fallback consumes remaining budget).
+- 2026-07-14 (iter 82): allocation/merge micro-optimizations —
+  Simplex::intersection merges the two (already sorted) line arrays
+  instead of re-sorting, and item.tile_shapes returns the cached slice
+  instead of cloning a Vec of shapes per call. Wavefolder 2.7 s;
+  interf_u unchanged (165/173 @ 300 s). Micro-optimization is now
+  exhausted; the remaining levers are algorithmic: reuse expansion
+  rooms across connections with incremental invalidation (Java keeps
+  the room graph and only removes rooms touching changed items — ours
+  rebuilds from scratch per connection), octagon-specialized restrain,
+  and shove.
 - 2026-07-14 (iter 78): FULL FLEET AT 100%. J2's GND routed fully when
   alone → pure ordering congestion (largest-extent nets route last
   into consumed corridors). A global largest-first order fixed J2 and

@@ -83,11 +83,11 @@ pub fn complete_shape_with_ripup(
             false,
         );
         for (shape, layer) in item.tile_shapes(&board.padstacks) {
-            if layer == room.layer {
+            if *layer == room.layer {
                 let shape = if clearance > 0 {
                     shape.offset(clearance as f64)
                 } else {
-                    shape
+                    shape.clone()
                 };
                 obstacles.push((item_id, shape));
             }

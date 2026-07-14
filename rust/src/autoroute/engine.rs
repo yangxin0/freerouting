@@ -154,9 +154,9 @@ impl AutorouteEngine {
                     continue;
                 }
                 for (index, (shape, layer)) in
-                    item.tile_shapes(&board.padstacks).into_iter().enumerate()
+                    item.tile_shapes(&board.padstacks).iter().enumerate()
                 {
-                    if layer == piece.layer && shape.intersects(&piece.shape) {
+                    if *layer == piece.layer && shape.intersects(&piece.shape) {
                         targets.push(TargetDoor {
                             item: item_id,
                             shape_index: index,
@@ -348,8 +348,8 @@ mod tests {
             .get_item(wall)
             .unwrap()
             .tile_shapes(&board.padstacks)
-            .into_iter()
-            .map(|(s, _)| s)
+            .iter()
+            .map(|(s, _)| s.clone())
             .collect();
         for &room in &rooms {
             for ws in &wall_shapes {
