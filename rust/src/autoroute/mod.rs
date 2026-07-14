@@ -23,6 +23,6 @@ pub use expansion_room::{
 pub use maze_search::{
     find_connection, maze_route, maze_route_with_ripup, MazeSearchResult, RoutedConnection,
 };
-pub use pull_tight::{pull_tight_all, pull_tight_trace, total_trace_length};
+pub use pull_tight::{combine_all_traces, pull_tight_all, pull_tight_trace, total_trace_length};
 pub use room_completion::{complete_shape, restrain_shape, IncompleteRoom};
 pub use simple_router::{RouteRequest, RouteResult, SimpleRouter};

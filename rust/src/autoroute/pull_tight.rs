@@ -98,6 +98,24 @@ pub fn pull_tight_all(board: &mut BasicBoard, max_rounds: usize) -> usize {
     total_removed
 }
 
+/// Combines every trace of the board with its simple-joint neighbours
+/// (same net family, layer, width, exactly one trace contact at the
+/// corner). Reduces the fragmentation left by junction splitting and
+/// shove cutouts. Returns the number of removed items.
+pub fn combine_all_traces(board: &mut BasicBoard) -> usize {
+    let before = board.items().count();
+    let ids: Vec<crate::board::ItemId> = board
+        .items()
+        .filter(|(_, it)| matches!(it.kind, ItemKind::PolylineTrace(_)))
+        .map(|(id, _)| *id)
+        .collect();
+    for id in ids {
+        // ids removed by earlier combines are skipped inside
+        board.combine_trace(id);
+    }
+    before.saturating_sub(board.items().count())
+}
+
 /// The cumulative length of all traces of the board.
 pub fn total_trace_length(board: &BasicBoard) -> f64 {
     board

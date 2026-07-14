@@ -248,6 +248,11 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 118): post-routing normalization pass —
+  combine_all_traces merges fragmented trace chains at simple joints
+  (junction splits and shove cutouts leave stubs); wired into the CLI
+  and the demo before pull-tight. interf_u: 7 fragments combined,
+  leaner session output; behaviour otherwise unchanged.
 - 2026-07-15 (iter 117): pre-routed completion mode validated after
   the session's changes: interf_u (fully pre-routed) verifies and
   completes 173/173 in 22 MILLISECONDS (was 1.9 s early in the port);

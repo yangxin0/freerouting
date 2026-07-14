@@ -123,6 +123,10 @@ fn main() -> ExitCode {
         result.failed_connections
     );
 
+    let combined = freerouting::autoroute::combine_all_traces(&mut board);
+    if combined > 0 {
+        println!("normalized: {combined} trace fragments combined");
+    }
     let len_before = total_trace_length(&board);
     let removed = pull_tight_all(&mut board, 3);
     let len_after = total_trace_length(&board);
