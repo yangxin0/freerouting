@@ -410,6 +410,14 @@ impl BasicBoard {
         net_items.iter().all(|id| connected.contains(id))
     }
 
+    /// Marks an item as belonging to a component (pins are not ripped up
+    /// and not written to session files).
+    pub fn set_component_no(&mut self, id: ItemId, component_no: i32) {
+        if let Some(item) = self.item_list.get_mut(&id) {
+            item.base.component_no = component_no;
+        }
+    }
+
     /// Splits a trace of `net_no` on `layer` whose center line passes
     /// through `point` (not at an endpoint) into two traces meeting there,
     /// so that contacts at the junction register

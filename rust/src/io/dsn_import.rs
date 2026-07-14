@@ -237,7 +237,10 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
                         .padstacks
                         .get_by_no(padstack_no)
                         .is_some_and(|p| p.attach_allowed);
-                    board.insert_via(padstack_no, center, net_nos, 1, attach_allowed);
+                    let id = board.insert_via(padstack_no, center, net_nos, 1, attach_allowed);
+                    // pins belong to their component: protected from ripup
+                    // and not written to session files
+                    board.set_component_no(id, 1);
                 }
             }
         }

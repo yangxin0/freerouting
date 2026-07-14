@@ -168,6 +168,101 @@ pub fn batch_route(board: &mut BasicBoard, request: &BatchRequest) -> BatchResul
     result
 }
 
+/// Removes up to `max_rips` routable foreign items (autoroute traces and
+/// vias, never component pins or fixed items) blocking the straight
+/// corridor between the two items of the failed connection
+/// (a simplified stand-in for MazeSearchAlgo's per-room ripup: Java pays
+/// a ripup cost to expand through obstacle rooms instead). Returns the
+/// number of items removed; the affected nets become incomplete and are
+/// rerouted by later passes.
+fn rip_blocking_items(
+    board: &mut BasicBoard,
+    net_no: i32,
+    start: ItemId,
+    dest: ItemId,
+    corridor_half_width: i32,
+    max_rips: usize,
+) -> usize {
+    use crate::geometry::planar::{IntPoint, Polyline, TileShape};
+    let center = |id: ItemId| -> Option<IntPoint> {
+        board.get_item(id).map(|item| {
+            let bb = item.bounding_box(&board.padstacks);
+            IntPoint::new((bb.ll.x + bb.ur.x) / 2, (bb.ll.y + bb.ur.y) / 2)
+        })
+    };
+    let (Some(a), Some(b)) = (center(start), center(dest)) else {
+        return 0;
+    };
+    let polyline = Polyline::from_two_points(a, b);
+    let corridor: TileShape = if polyline.is_empty() {
+        TileShape::Box(crate::geometry::planar::IntBox::new(a, a).offset(corridor_half_width as f64))
+    } else {
+        match polyline.offset_shape(corridor_half_width, 0) {
+            Some(s) => s,
+            None => return 0,
+        }
+    };
+    let mut candidates: Vec<ItemId> = board
+        .overlapping_items(&corridor, None)
+        .into_iter()
+        .filter(|id| {
+            board.get_item(*id).is_some_and(|item| {
+                !item.base.contains_net(net_no)
+                    && item.base.component_no == 0
+                    && item.base.net_count() > 0
+                    && item.is_routable()
+            })
+        })
+        .collect();
+    candidates.truncate(max_rips);
+    let ripped = candidates.len();
+    for id in candidates {
+        board.remove_item(id);
+    }
+    ripped
+}
+
+/// Like [`route_net`], but on failure rips blocking foreign route items
+/// along the missing connection and retries once.
+pub fn route_net_with_ripup(
+    board: &mut BasicBoard,
+    net_no: i32,
+    request: &BatchRequest,
+    max_rips: usize,
+) -> BatchResult {
+    let mut result = route_net(board, net_no, request);
+    if result.failed_connections == 0 || max_rips == 0 {
+        return result;
+    }
+    // find the still-missing connection pair and rip its corridor
+    let components = net_components(board, net_no);
+    if components.len() <= 1 {
+        return result;
+    }
+    let first_candidates = endpoint_candidates(board, &components[0]);
+    let mut pair: Option<(ItemId, ItemId)> = None;
+    for other in &components[1..] {
+        let other_candidates = endpoint_candidates(board, other);
+        if let Some(p) = closest_pair(board, &first_candidates, &other_candidates) {
+            pair = Some(p);
+            break;
+        }
+    }
+    let Some((a, b)) = pair else {
+        return result;
+    };
+    let corridor_half_width = 2 * (request.trace_half_width + 400);
+    if rip_blocking_items(board, net_no, a, b, corridor_half_width, max_rips) == 0 {
+        return result;
+    }
+    let retry = route_net(board, net_no, request);
+    result.routed_connections += retry.routed_connections;
+    if retry.failed_connections == 0 && board.net_is_completely_connected(net_no) {
+        result.failed_connections = 0;
+    }
+    result
+}
+
 /// The half perimeter of the bounding box of a net's connectable items,
 /// used to order nets shortest-first.
 fn net_extent(board: &BasicBoard, net_no: i32) -> i64 {
@@ -204,11 +299,13 @@ pub fn batch_route_passes(
             ..*request
         };
         let mut failed_this_pass = 0usize;
+        // ripup is allowed from the second pass on, with growing allowance
+        let max_rips = if pass == 0 { 0 } else { 2 * pass };
         for &net_no in &net_nos {
             if board.net_is_completely_connected(net_no) {
                 continue;
             }
-            let result = route_net(board, net_no, &pass_request);
+            let result = route_net_with_ripup(board, net_no, &pass_request, max_rips);
             total.routed_connections += result.routed_connections;
             failed_this_pass += result.failed_connections;
         }
@@ -310,6 +407,70 @@ mod tests {
         for (_, item) in board.items() {
             assert!(item.base.net_nos.len() <= 1);
         }
+    }
+
+    #[test]
+    fn ripup_frees_a_contended_gap() {
+        use crate::geometry::planar::{PolygonShape, PolylineArea};
+        // single signal layer: no via escape
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true)]);
+        let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
+        let mut rules = BoardRules::new(stack.clone(), matrix);
+        rules.get_default_net_class();
+        rules.nets.add("net1", 1, false);
+        rules.nets.add("net2", 1, false);
+        let mut padstacks = Padstacks::new(1);
+        padstacks.add_shape_on_layers(
+            TileShape::Box(IntBox::from_coords(-300, -300, 300, 300)),
+            0,
+            0,
+        );
+        let mut board = BasicBoard::new(stack, rules, padstacks);
+
+        // a wall at x = 5000 with a gap around y = 0 (tall enough for two
+        // traces side by side)
+        for (lly, ury) in [(-40000, -2000), (2000, 40000)] {
+            let wall = PolylineArea::new(
+                PolygonShape::from_int_points(&[
+                    IntPoint::new(4800, lly),
+                    IntPoint::new(5200, lly),
+                    IntPoint::new(5200, ury),
+                    IntPoint::new(4800, ury),
+                ]),
+                vec![],
+            );
+            board.insert_area(wall, 0, "wall", vec![], 1, false);
+        }
+        // net 1 spans the gap; its pads are protected component pins
+        let n1a = board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        let n1b = board.insert_via(1, IntPoint::new(10000, 0), vec![1], 1, false);
+        // net 2 also must pass the gap
+        let n2a = board.insert_via(1, IntPoint::new(1000, -1200), vec![2], 1, false);
+        let n2b = board.insert_via(1, IntPoint::new(9000, -1200), vec![2], 1, false);
+        for id in [n1a, n1b, n2a, n2b] {
+            board.set_component_no(id, 1);
+        }
+
+        let request = BatchRequest {
+            trace_half_width: 100,
+            clearance_class: 1,
+            via_padstack: 1,
+            via_cost: 5000.0,
+            max_expansions: 30_000,
+        };
+        // route net 1 first: it takes the gap
+        let r1 = route_net(&mut board, 1, &request);
+        assert_eq!(r1.failed_connections, 0);
+        assert!(board.net_is_completely_connected(1));
+
+        // multi-pass with ripup completes both nets
+        let result = batch_route_passes(&mut board, &request, 4);
+        assert_eq!(
+            result.failed_connections, 0,
+            "ripup passes did not complete the board"
+        );
+        assert!(board.net_is_completely_connected(1));
+        assert!(board.net_is_completely_connected(2));
     }
 
     #[test]
