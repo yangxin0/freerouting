@@ -215,6 +215,14 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   TIME-limited (each search costs more under clearance). Priority for
   completion is therefore performance (octagon-specialized restrain,
   fewer redundant-line simplifications) and then shove.
+- 2026-07-14 (iter 81): removed the gcd normalization from the two
+  hottest exact-arithmetic paths (profile: Line::cmp 1310 +
+  remove_redundant_lines 1728 samples): Line's angular Ord now
+  compares raw i64 difference vectors (scale-invariant, identical
+  order), and remove_redundant_lines uses a raw-vector determinant
+  sign instead of building IntDirections. Wavefolder 6.8 s → 2.8 s;
+  interf_u 165/173 @ 300 s (still time-saturated — the restart
+  fallback consumes remaining budget).
 - 2026-07-14 (iter 78): FULL FLEET AT 100%. J2's GND routed fully when
   alone → pure ordering congestion (largest-extent nets route last
   into consumed corridors). A global largest-first order fixed J2 and

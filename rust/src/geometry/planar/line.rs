@@ -46,6 +46,18 @@ impl Line {
         IntDirection::from_vector(self.b.difference_by(self.a))
     }
 
+    /// The sign of the determinant of the raw direction vectors of `self`
+    /// and `other` (positive if `other` is counterclockwise from this
+    /// line). Scale-invariant, so the gcd normalization of
+    /// [`Line::direction`] is skipped.
+    pub fn direction_determinant_sign(&self, other: &Line) -> i32 {
+        let dx1 = i64::from(self.b.x) - i64::from(self.a.x);
+        let dy1 = i64::from(self.b.y) - i64::from(self.a.y);
+        let dx2 = i64::from(other.b.x) - i64::from(other.a.x);
+        let dy2 = i64::from(other.b.y) - i64::from(other.a.y);
+        (dx1 as i128 * dy2 as i128 - dy1 as i128 * dx2 as i128).signum() as i32
+    }
+
     /// Returns `OnTheLeft` if this line is on the left of `point`,
     /// `OnTheRight` if on the right, `Collinear` if the line contains it.
     pub fn side_of(&self, point: &Point) -> Side {
@@ -466,7 +478,49 @@ impl PartialEq for Line {
 /// Lines are ordered by their direction angle, like [`IntDirection`].
 impl Ord for Line {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.direction().cmp(&other.direction())
+        // Same angular order as IntDirection::cmp, but on the raw
+        // difference vectors: the order is scale-invariant, so the gcd
+        // normalization of direction() is skipped (this comparison
+        // dominated the routing profile via Simplex sorting).
+        let dx1 = i64::from(self.b.x) - i64::from(self.a.x);
+        let dy1 = i64::from(self.b.y) - i64::from(self.a.y);
+        let dx2 = i64::from(other.b.x) - i64::from(other.a.x);
+        let dy2 = i64::from(other.b.y) - i64::from(other.a.y);
+        if dy1 > 0 {
+            if dy2 < 0 {
+                return Ordering::Less;
+            }
+            if dy2 == 0 {
+                return if dx2 > 0 {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                };
+            }
+        } else if dy1 < 0 {
+            if dy2 >= 0 {
+                return Ordering::Greater;
+            }
+        } else {
+            // dy1 == 0
+            if dx1 > 0 {
+                return if dy2 != 0 || dx2 < 0 {
+                    Ordering::Less
+                } else {
+                    Ordering::Equal
+                };
+            }
+            // dx1 <= 0 (a null vector sorts with LEFT)
+            if dy2 > 0 || (dy2 == 0 && dx2 > 0) {
+                return Ordering::Greater;
+            }
+            if dy2 < 0 {
+                return Ordering::Less;
+            }
+            return Ordering::Equal;
+        }
+        // both in the same open horizontal half plane: determinant order
+        (dx2 as i128 * dy1 as i128 - dy2 as i128 * dx1 as i128).cmp(&0)
     }
 }
 

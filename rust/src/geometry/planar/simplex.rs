@@ -712,9 +712,7 @@ impl Simplex {
                 let next_line = line_arr[next_ind];
 
                 let mut remove_line = false;
-                let prev_dir = prev_line.direction();
-                let next_dir = next_line.direction();
-                let det = prev_dir.determinant(next_dir);
+                let det = prev_line.direction_determinant_sign(&next_line);
                 if det != 0 {
                     // prev_line and next_line are not parallel
                     if intersection_sides[uind].is_none() {
@@ -727,8 +725,7 @@ impl Simplex {
                         // contribute to the shape of the simplex.
                         remove_line = intersection_sides[uind] != Some(Side::OnTheLeft);
                     } else if intersection_sides[uind] == Some(Side::OnTheLeft) {
-                        let curr_dir = curr_line.direction();
-                        if prev_dir.determinant(curr_dir) > 0 {
+                        if prev_line.direction_determinant_sign(&curr_line) > 0 {
                             // The half plane of curr_line does not intersect
                             // the simplex of prev_line and next_line: empty.
                             new_length = 0;
