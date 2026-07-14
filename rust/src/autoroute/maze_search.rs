@@ -139,10 +139,16 @@ pub fn find_connection(
             .map(|(d, _)| p.distance(*d))
             .fold(f64::MAX, f64::min)
             .min(1e12);
+        // explicit weighting on top (the center distance already behaves
+        // like weighted A*; FR_ASTAR_WEIGHT tunes the trade-off)
+        let weight = std::env::var("FR_ASTAR_WEIGHT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(1.0);
         if dest_centers.iter().any(|(_, l)| *l == layer) {
-            dist
+            dist * weight
         } else {
-            dist + via_cost_for_estimate
+            dist * weight + via_cost_for_estimate
         }
     };
 

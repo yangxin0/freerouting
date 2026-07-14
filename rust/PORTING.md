@@ -248,6 +248,11 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 115): explicit A* weighting tried (FR_ASTAR_WEIGHT
+  env knob, kept for experiments, default 1.0): weight 1.5 regressed
+  interf_u to 189 s and coldfire to 261; weight 2.0 lost completion
+  on both. The center estimate's natural inflation already sits at
+  the guidance/quality optimum — leave the weight at 1.0.
 - 2026-07-15 (iter 114): admissible bbox-based A* estimate tried and
   REVERTED — distance-to-nearest-bbox-point (theoretically correct)
   regressed interf_u 112 s/173 → 247 s/172 and coldfire by 2 nets:
