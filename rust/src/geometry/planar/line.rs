@@ -90,9 +90,42 @@ impl Line {
         let intersection_approx = l1.intersection_approx(l2);
         let result = self.side_of_float(intersection_approx, 1.0);
         if result == Side::Collinear {
-            self.side_of(&l1.intersection(l2))
+            self.side_of_intersection_exact(l1, l2)
         } else {
             result
+        }
+    }
+
+    /// The exact version of [`Line::side_of_intersection`]: the
+    /// intersection of two integer lines is rational with numerators
+    /// ~2^82 and the side determinant stays under 2^111, so i128
+    /// arithmetic replaces the BigInt rational path (which dominated the
+    /// routing profile on touching geometry).
+    fn side_of_intersection_exact(&self, l1: &Line, l2: &Line) -> Side {
+        let d1x = i128::from(l1.b.x) - i128::from(l1.a.x);
+        let d1y = i128::from(l1.b.y) - i128::from(l1.a.y);
+        let d2x = i128::from(l2.b.x) - i128::from(l2.a.x);
+        let d2y = i128::from(l2.b.y) - i128::from(l2.a.y);
+        // p = l1.a + t * d1 with t = t_num / det in homogeneous form
+        let det = d1x * d2y - d1y * d2x;
+        if det == 0 {
+            // parallel lines; callers exclude this case
+            return Side::Collinear;
+        }
+        let wx = i128::from(l2.a.x) - i128::from(l1.a.x);
+        let wy = i128::from(l2.a.y) - i128::from(l1.a.y);
+        let t_num = wx * d2y - wy * d2x;
+        let nx = i128::from(l1.a.x) * det + t_num * d1x;
+        let ny = i128::from(l1.a.y) * det + t_num * d1y;
+        // same determinant as side_of_float, scaled by det
+        let sdx = i128::from(self.b.x) - i128::from(self.a.x);
+        let sdy = i128::from(self.b.y) - i128::from(self.a.y);
+        let scaled = sdy * (nx - i128::from(self.a.x) * det)
+            - sdx * (ny - i128::from(self.a.y) * det);
+        match (scaled.signum() * det.signum()) as i32 {
+            1 => Side::OnTheLeft,
+            -1 => Side::OnTheRight,
+            _ => Side::Collinear,
         }
     }
 

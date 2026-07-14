@@ -243,6 +243,10 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 88): Line::side_of_intersection's exact fallback
+  now computes in i128 instead of BigInt rationals (intersection
+  numerators < 2^82, side determinant < 2^111 for i32 coordinates);
+  bit-identical results on interf_u and coldfire.
 - 2026-07-15 (iter 87): asymmetric-contact bug fixed — the
   pad-containment contact (iter 74) was one-directional (A contacts B
   when A's center lies in B's shape, but B's scan never checked A's
