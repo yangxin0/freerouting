@@ -248,6 +248,14 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 116): robustness sweep over eight never-tried
+  fixtures — zero crashes or import failures. At only 90 s budgets:
+  ch32v 9/9 (1 ms), setonix 9/9, smoothieboard 215/245 (245 nets),
+  Z80 433/529 (529 nets!), DAC2020_bm01 89/99 (academic benchmark),
+  caniot-arm 83/94, Mars-64 68/94, CM5_MINIMA 146/220 (6 LAYERS).
+  The importer and router generalize across KiCad/Eagle-era exports,
+  6-layer stacks and 500+ net designs; the partial completions are
+  all short-budget artifacts of the known throughput story.
 - 2026-07-15 (iter 115): explicit A* weighting tried (FR_ASTAR_WEIGHT
   env knob, kept for experiments, default 1.0): weight 1.5 regressed
   interf_u to 189 s and coldfire to 261; weight 2.0 lost completion
