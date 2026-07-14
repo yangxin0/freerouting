@@ -264,16 +264,18 @@ impl IntOctagon {
         if width == 0 {
             return *self;
         }
+        // Saturating arithmetic: octagons derived from nearly parallel
+        // line intersections can carry quasi-infinite coordinates.
         let dia_width = (limits::SQRT2 * distance).round() as i32;
         IntOctagon::new(
-            self.left_x - width,
-            self.bottom_y - width,
-            self.right_x + width,
-            self.top_y + width,
-            self.upper_left_diagonal_x - dia_width,
-            self.lower_right_diagonal_x + dia_width,
-            self.lower_left_diagonal_x - dia_width,
-            self.upper_right_diagonal_x + dia_width,
+            self.left_x.saturating_sub(width),
+            self.bottom_y.saturating_sub(width),
+            self.right_x.saturating_add(width),
+            self.top_y.saturating_add(width),
+            self.upper_left_diagonal_x.saturating_sub(dia_width),
+            self.lower_right_diagonal_x.saturating_add(dia_width),
+            self.lower_left_diagonal_x.saturating_sub(dia_width),
+            self.upper_right_diagonal_x.saturating_add(dia_width),
         )
         .normalize()
     }

@@ -38,7 +38,11 @@ enum Step {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct QueueEntry {
+    /// The accumulated path cost (g).
     cost: f64,
+    /// g plus the estimated remaining distance to the destination
+    /// (Java: sorting by cost + DestinationDistance).
+    estimate: f64,
     step: Step,
     room_to_enter: RoomId,
     parent: Option<usize>,
@@ -53,8 +57,8 @@ impl PartialOrd for QueueEntry {
 }
 impl Ord for QueueEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.cost
-            .partial_cmp(&other.cost)
+        self.estimate
+            .partial_cmp(&other.estimate)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| self.room_to_enter.cmp(&other.room_to_enter))
     }
@@ -96,6 +100,23 @@ pub fn find_connection(
         return None;
     }
     let offset = request.trace_half_width as f64;
+    // destination centers for the admissible remaining-distance estimate
+    let dest_centers: Vec<FloatPoint> = board
+        .get_item(request.dest_item)
+        .map(|item| {
+            item.tile_shapes(&board.padstacks)
+                .into_iter()
+                .map(|(s, _)| s.centre_of_gravity())
+                .collect()
+        })
+        .unwrap_or_default();
+    let estimate_to_dest = move |p: FloatPoint| -> f64 {
+        dest_centers
+            .iter()
+            .map(|d| p.distance(*d))
+            .fold(f64::MAX, f64::min)
+            .min(1e12)
+    };
 
     let mut nodes: Vec<BacktrackNode> = Vec::new();
     let mut open: BinaryHeap<Reverse<QueueEntry>> = BinaryHeap::new();
@@ -126,8 +147,18 @@ pub fn find_connection(
                 is_via: false,
             });
             seed_room(
-                engine, board, request, room, start_center, 0.0, root, None, offset, &mut open,
+                engine,
+                board,
+                request,
+                room,
+                start_center,
+                0.0,
+                root,
+                None,
+                offset,
+                &mut open,
                 &mut drilled,
+                &estimate_to_dest,
             );
         }
     }
@@ -195,6 +226,7 @@ pub fn find_connection(
             offset,
             &mut open,
             &mut drilled,
+            &estimate_to_dest,
         );
     }
     None
@@ -214,6 +246,7 @@ fn seed_room(
     offset: f64,
     open: &mut BinaryHeap<Reverse<QueueEntry>>,
     drilled: &mut HashSet<(i32, i32, usize)>,
+    estimate_to_dest: &dyn Fn(FloatPoint) -> f64,
 ) {
     let layer = engine.graph.room(room).layer;
     // door expansions
@@ -237,8 +270,10 @@ fn seed_room(
                 continue;
             }
             let midpoint = seg.a.middle_point(seg.b);
+            let cost = base_cost + location.distance(midpoint);
             open.push(Reverse(QueueEntry {
-                cost: base_cost + location.distance(midpoint),
+                cost,
+                estimate: cost + estimate_to_dest(midpoint),
                 step: Step::Door { door, section },
                 room_to_enter: other,
                 parent: Some(parent),
@@ -271,8 +306,10 @@ fn seed_room(
         // find or create the room on the target layer containing the point
         let target_rooms = engine.rooms_containing(drill_point, next_layer, board);
         for target_room in target_rooms {
+            let cost = base_cost + request.via_cost;
             open.push(Reverse(QueueEntry {
-                cost: base_cost + request.via_cost,
+                cost,
+                estimate: cost + estimate_to_dest(drill_point.to_float()),
                 step: Step::Drill,
                 room_to_enter: target_room,
                 parent: Some(parent),

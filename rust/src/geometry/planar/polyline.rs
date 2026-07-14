@@ -406,7 +406,7 @@ impl Polyline {
         let (mut llx, mut lly) = (f64::MAX, f64::MAX);
         let (mut urx, mut ury) = (f64::MIN, f64::MIN);
         for i in from_corner_no..=to_corner_no {
-            let c = self.corner_approx(i);
+            let c = clamp_corner(self.corner_approx(i));
             llx = llx.min(c.x);
             lly = lly.min(c.y);
             urx = urx.max(c.x);
@@ -437,7 +437,7 @@ impl Polyline {
         let (mut ulx, mut llx) = (f64::MAX, f64::MAX);
         let (mut lrx, mut urx) = (f64::MIN, f64::MIN);
         for i in from_corner_no..=to_corner_no {
-            let c = self.corner_approx(i);
+            let c = clamp_corner(self.corner_approx(i));
             lx = lx.min(c.x);
             ly = ly.min(c.y);
             rx = rx.max(c.x);
@@ -633,6 +633,15 @@ impl Polyline {
         ));
         Polyline { arr: new_lines }
     }
+}
+
+/// Clamps a corner approximation into the legal coordinate range:
+/// intersections of nearly parallel consecutive lines can be quasi
+/// infinite and must not poison bounding shapes (Java wraps silently
+/// there).
+fn clamp_corner(c: FloatPoint) -> FloatPoint {
+    let limit = crate::geometry::planar::limits::CRIT_INT as f64;
+    FloatPoint::new(c.x.clamp(-limit, limit), c.y.clamp(-limit, limit))
 }
 
 /// The normalized direction from `from` to `to` (must differ).
