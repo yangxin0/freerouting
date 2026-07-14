@@ -185,6 +185,12 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   turned simplex border lines) and per-(padstack, quadrant) rotated
   padstack variants at import. J2_reference 13/24 → 23/24 in 0.7 s
   (GND still open); interf_u regression-clean at 173/173 in 112 s.
+- 2026-07-14 (iter 72): CLI binary added per user directive (no GUI):
+  `cargo run --release -- -de input.dsn [-do out.ses] [-mp passes]
+  [-tl seconds] [--strip-wiring]`, Java-jar-compatible -de/-do flags,
+  exit code 0 = all nets complete / 2 = incomplete / 1 = error. The
+  DSN `resolution` is now stored on the board and used by the SES
+  export (was hardcoded to 10 in the examples).
 
 ## Open issues
 
@@ -196,9 +202,6 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 - Non-quarter-turn component rotations still only rotate pin offsets,
   not pad shapes; back-side placement still mirrors offsets without
   mirroring pad shapes or flipping their layers.
-- User directive: no GUI port — deliver a proper CLI binary instead
-  (like the Java jar's `-de input.dsn -do output.ses`); currently only
-  examples exist.
 
 ## Notes / decisions log
 

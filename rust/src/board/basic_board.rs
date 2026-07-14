@@ -33,6 +33,9 @@ pub struct BasicBoard {
     pub layer_structure: LayerStructure,
     pub rules: BoardRules,
     pub padstacks: Padstacks,
+    /// Board units per file coordinate unit of the imported design
+    /// (DSN `resolution`); session exports must use the same factor.
+    pub resolution: i32,
     /// The undoable item database.
     item_list: UndoableObjects<ItemId, Item>,
     /// The spatial index over all item shapes.
@@ -49,6 +52,7 @@ impl BasicBoard {
             layer_structure,
             rules,
             padstacks,
+            resolution: 10,
             item_list: UndoableObjects::new(),
             search_tree: MinAreaTree::new(),
             tree_entries: BTreeMap::new(),

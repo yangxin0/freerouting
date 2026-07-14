@@ -178,6 +178,7 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
     }
 
     let mut board = BasicBoard::new(layer_structure, rules, padstacks);
+    board.resolution = resolution.round() as i32;
 
     // boundary: keepout strips along the outline edges on all layers so
     // routes stay inside the board (Java: BoardOutline tree shapes)
