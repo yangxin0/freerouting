@@ -34,7 +34,7 @@ should pick up the first unchecked item below.
 - [x] Line.java → `geometry/planar/line.rs` (IntPoint endpoints — Java warns+casts to IntPoint everywhere anyway; includes IntPoint/RationalPoint perpendicular_projection, side_of_line; TileShape-based is_on_the_left/right pending)
 - [ ] LineSegment.java
 - [x] IntBox.java → `geometry/planar/int_box.rs` (box/box ops, cutout, divide, compare; also closes Point::surrounding_box / is_contained_in gaps; IntOctagon/Simplex/TileShape interop pending)
-- [ ] IntOctagon.java
+- [x] IntOctagon.java (+ FortyfiveDegreeDirection.java) → `geometry/planar/int_octagon.rs` (normalize, intersection/union/contains, border points/projections, both cutout variants; also adds IntBox::to_int_octagon/enlarge, IntPoint::surrounding_octagon; Simplex/TileShape interop pending)
 - [ ] Polyline.java
 - [ ] Shape hierarchy: Shape / ConvexShape / TileShape / RegularTileShape / Simplex / Circle / PolygonShape / PolylineShape / PolylineArea / Area / Ellipse
 - [ ] Polygon.java
