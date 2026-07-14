@@ -33,7 +33,7 @@ should pick up the first unchecked item below.
 - [x] FloatLine.java → `geometry/planar/float_line.rs` (+ FloatPoint helpers: side_of, 3-point scalar_product, rotate, turn_90_degree(_around), is_contained_in_box)
 - [x] Line.java → `geometry/planar/line.rs` (IntPoint endpoints — Java warns+casts to IntPoint everywhere anyway; includes IntPoint/RationalPoint perpendicular_projection, side_of_line; TileShape-based is_on_the_left/right pending)
 - [ ] LineSegment.java
-- [ ] IntBox.java
+- [x] IntBox.java → `geometry/planar/int_box.rs` (box/box ops, cutout, divide, compare; also closes Point::surrounding_box / is_contained_in gaps; IntOctagon/Simplex/TileShape interop pending)
 - [ ] IntOctagon.java
 - [ ] Polyline.java
 - [ ] Shape hierarchy: Shape / ConvexShape / TileShape / RegularTileShape / Simplex / Circle / PolygonShape / PolylineShape / PolylineArea / Area / Ellipse

@@ -8,6 +8,7 @@
 pub mod direction;
 pub mod float_line;
 pub mod float_point;
+pub mod int_box;
 pub mod int_direction;
 pub mod int_point;
 pub mod int_vector;
@@ -22,6 +23,7 @@ pub mod vector;
 pub use direction::{BigIntDirection, Direction};
 pub use float_line::FloatLine;
 pub use float_point::FloatPoint;
+pub use int_box::IntBox;
 pub use int_direction::IntDirection;
 pub use int_point::IntPoint;
 pub use int_vector::IntVector;
