@@ -13,7 +13,7 @@ use crate::board::item::{Item, ItemBase, ItemKind};
 use crate::board::LayerStructure;
 use crate::core::Padstacks;
 use crate::datastructures::{LeafId, MinAreaTree, UndoableObjects};
-use crate::geometry::planar::{IntBox, IntPoint, Polyline, TileShape};
+use crate::geometry::planar::{IntBox, IntPoint, Point, Polyline, TileShape};
 use crate::rules::BoardRules;
 
 /// Unique id of an item on the board.
@@ -210,6 +210,153 @@ impl BasicBoard {
             })
     }
 
+    // ---- connectivity (Java: Item/Trace/DrillItem contact methods) ----
+
+    /// The contacts of the item `id` at `point` (for traces: only at their
+    /// end corners). An item is a contact if it overlaps at the point,
+    /// shares a layer and (unless `ignore_net`) a net, and touches
+    /// according to its kind: traces by an end corner, drill items by
+    /// their center.
+    pub fn get_normal_contacts_at(
+        &self,
+        id: ItemId,
+        point: &Point,
+        ignore_net: bool,
+    ) -> Vec<ItemId> {
+        let Some(item) = self.get_item(id) else {
+            return Vec::new();
+        };
+        let search_shape = TileShape::Box(point.surrounding_box());
+        let first_layer = item.first_layer(&self.padstacks);
+        let last_layer = item.last_layer(&self.padstacks);
+        let mut result = Vec::new();
+        for other_id in self.overlapping_items(&search_shape, None) {
+            if other_id == id {
+                continue;
+            }
+            let Some(other) = self.get_item(other_id) else {
+                continue;
+            };
+            // shares a layer?
+            if other.last_layer(&self.padstacks) < first_layer
+                || other.first_layer(&self.padstacks) > last_layer
+            {
+                continue;
+            }
+            if !ignore_net && !other.base.shares_net(&item.base) {
+                continue;
+            }
+            let touches = match &other.kind {
+                ItemKind::PolylineTrace(t) => {
+                    *point == t.first_corner() || *point == t.last_corner()
+                }
+                ItemKind::Via(v) => *point == Point::Int(v.center),
+            };
+            if touches {
+                result.push(other_id);
+            }
+        }
+        result.sort();
+        result.dedup();
+        result
+    }
+
+    /// All contacts of the item `id` (Java: `get_normal_contacts`): for a
+    /// trace the contacts at its two end corners, for a via the contacts
+    /// at its center.
+    pub fn get_normal_contacts(&self, id: ItemId) -> Vec<ItemId> {
+        let Some(item) = self.get_item(id) else {
+            return Vec::new();
+        };
+        let mut result = match &item.kind {
+            ItemKind::PolylineTrace(t) => {
+                let mut r = self.get_normal_contacts_at(id, &t.first_corner(), false);
+                r.extend(self.get_normal_contacts_at(id, &t.last_corner(), false));
+                r
+            }
+            ItemKind::Via(v) => {
+                self.get_normal_contacts_at(id, &Point::Int(v.center), false)
+            }
+        };
+        result.sort();
+        result.dedup();
+        result
+    }
+
+    /// The contacts of a trace at its start corner.
+    pub fn get_start_contacts(&self, id: ItemId) -> Vec<ItemId> {
+        match self.get_item(id).map(|i| &i.kind) {
+            Some(ItemKind::PolylineTrace(t)) => {
+                self.get_normal_contacts_at(id, &t.first_corner(), false)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The contacts of a trace at its end corner.
+    pub fn get_end_contacts(&self, id: ItemId) -> Vec<ItemId> {
+        match self.get_item(id).map(|i| &i.kind) {
+            Some(ItemKind::PolylineTrace(t)) => {
+                self.get_normal_contacts_at(id, &t.last_corner(), false)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// True if the trace is not contacted at its first or its last corner
+    /// (Java: `Trace.is_tail`).
+    pub fn is_tail(&self, id: ItemId) -> bool {
+        match self.get_item(id).map(|i| &i.kind) {
+            Some(ItemKind::PolylineTrace(_)) => {
+                self.get_start_contacts(id).is_empty() || self.get_end_contacts(id).is_empty()
+            }
+            _ => false,
+        }
+    }
+
+    /// The set of items connected to `id` (including itself) by contacts
+    /// of the net `net_no` (Java: `Item.get_connected_set`).
+    pub fn get_connected_set(&self, id: ItemId, net_no: i32) -> Vec<ItemId> {
+        let Some(item) = self.get_item(id) else {
+            return Vec::new();
+        };
+        if !item.base.contains_net(net_no) {
+            return Vec::new();
+        }
+        let mut visited = vec![id];
+        let mut queue = vec![id];
+        while let Some(curr) = queue.pop() {
+            for contact in self.get_normal_contacts(curr) {
+                if visited.contains(&contact) {
+                    continue;
+                }
+                if self
+                    .get_item(contact)
+                    .is_some_and(|i| i.base.contains_net(net_no))
+                {
+                    visited.push(contact);
+                    queue.push(contact);
+                }
+            }
+        }
+        visited.sort();
+        visited
+    }
+
+    /// True if all connectable items of `net_no` form one connected set.
+    pub fn net_is_completely_connected(&self, net_no: i32) -> bool {
+        let net_items: Vec<ItemId> = self
+            .items()
+            .filter(|(_, item)| item.base.contains_net(net_no) && item.is_connectable())
+            .map(|(id, _)| *id)
+            .collect();
+        let Some(&first) = net_items.first() else {
+            return true;
+        };
+        let connected = self.get_connected_set(first, net_no);
+        net_items.iter().all(|id| connected.contains(id))
+    }
+
     /// The smallest box containing all items of the board.
     pub fn bounding_box(&self) -> IntBox {
         let mut result = IntBox::EMPTY;
@@ -368,6 +515,71 @@ mod tests {
         // a box crossing the diagonal
         let on_diag = query_box(1900, 1900, 2100, 2100);
         assert_eq!(board.overlapping_items(&on_diag, Some(0)).len(), 1);
+    }
+
+    #[test]
+    fn connectivity_contacts_and_connected_sets() {
+        let mut board = test_board();
+        // net 1: pin-like via at (0,0), trace to (5000,0), via there,
+        // trace on layer 1 onwards
+        let via_a = board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        let trace_1 = board.insert_trace(
+            trace_polyline(&[(0, 0), (5000, 0)]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        let via_b = board.insert_via(1, IntPoint::new(5000, 0), vec![1], 1, false);
+        let trace_2 = board.insert_trace(
+            trace_polyline(&[(5000, 0), (5000, 4000)]),
+            1,
+            100,
+            vec![1],
+            1,
+        );
+        // an unrelated trace of another net crossing nearby
+        let foreign = board.insert_trace(
+            trace_polyline(&[(2000, -3000), (2000, 3000)]),
+            1,
+            100,
+            vec![2],
+            1,
+        );
+
+        // trace_1 contacts both vias
+        assert_eq!(board.get_normal_contacts(trace_1), vec![via_a, via_b]);
+        assert_eq!(board.get_start_contacts(trace_1), vec![via_a]);
+        assert_eq!(board.get_end_contacts(trace_1), vec![via_b]);
+        assert!(!board.is_tail(trace_1));
+        // trace_2 ends in the air
+        assert_eq!(board.get_normal_contacts(trace_2), vec![via_b]);
+        assert!(board.is_tail(trace_2));
+        // via_b joins layers: contacts on both layers
+        assert_eq!(board.get_normal_contacts(via_b), vec![trace_1, trace_2]);
+        // foreign net crossing shares no contact
+        assert!(board.get_normal_contacts(foreign).is_empty());
+
+        // the whole net 1 is one connected set
+        let connected = board.get_connected_set(via_a, 1);
+        assert_eq!(connected, vec![via_a, trace_1, via_b, trace_2]);
+        assert!(board.net_is_completely_connected(1));
+
+        // an isolated stub of net 1 breaks completeness
+        let stub = board.insert_trace(
+            trace_polyline(&[(9000, 9000), (9500, 9000)]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        assert!(!board.net_is_completely_connected(1));
+        board.remove_item(stub);
+        assert!(board.net_is_completely_connected(1));
+        // removing the middle trace splits the net
+        board.remove_item(trace_1);
+        assert!(!board.net_is_completely_connected(1));
+        assert_eq!(board.get_connected_set(via_b, 1), vec![via_b, trace_2]);
     }
 
     #[test]

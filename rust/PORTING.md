@@ -59,7 +59,8 @@ should pick up the first unchecked item below.
 rules package complete (except GUI print_info methods, intentionally out of scope).
 - [x] board item model foundation → `board/item.rs` (FixedState, ItemBase, Item enum with Via + PolylineTrace incl. search-tree shape computation; Pin/areas/outline and board-dependent logic pending)
 - [x] BasicBoard core → `board/basic_board.rs` (UndoableObjects item store + MinAreaTree integration, insert/remove trace+via, layer-filtered exact overlap queries, net filtering/blocking, undo/redo with tree resync)
-- [ ] board remaining: Pin/ConductionArea/ObstacleArea/BoardOutline items, connectivity (contacts/connected sets), clearance-compensated ShapeSearchTree variants, RoutingBoard, shove/pull-tight algorithms
+- [x] connectivity → `board/basic_board.rs` (get_normal_contacts at trace corners / drill centers, start/end contacts, is_tail, connected sets, net completeness)
+- [ ] board remaining: Pin/ConductionArea/ObstacleArea/BoardOutline items, clearance-compensated ShapeSearchTree variants, RoutingBoard, shove/pull-tight algorithms
 
 ## Phase 3 — routing engines
 
