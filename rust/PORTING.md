@@ -27,7 +27,7 @@ should pick up the first unchecked item below.
 - [x] FloatPoint.java → `geometry/planar/float_point.rs` (core subset)
 - [x] Direction.java / IntDirection.java → `geometry/planar/int_direction.rs` (coords gcd-normalized at construction so derived Eq matches Java's equivalence-class equals; BigIntDirection deferred to the rational layer)
 - [ ] RationalVector.java / RationalPoint.java (needs a big-integer or i128 rational type) + `Vector`/`Point` enum wrappers
-- [ ] FloatLine.java
+- [x] FloatLine.java → `geometry/planar/float_line.rs` (+ FloatPoint helpers: side_of, 3-point scalar_product, rotate, turn_90_degree(_around), is_contained_in_box)
 - [ ] Line.java
 - [ ] LineSegment.java
 - [ ] IntBox.java

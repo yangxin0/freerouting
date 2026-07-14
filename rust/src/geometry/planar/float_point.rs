@@ -3,7 +3,7 @@
 //! `FloatPoint` is used for fast approximate geometry; exact results are
 //! computed on the integer/rational types.
 
-use crate::geometry::planar::IntPoint;
+use crate::geometry::planar::{IntPoint, Side};
 
 /// A point in the plane with `f64` coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -65,8 +65,74 @@ impl FloatPoint {
         self.x * other.y - self.y * other.x
     }
 
-    pub fn scalar_product(self, other: FloatPoint) -> f64 {
-        self.x * other.x + self.y * other.y
+    pub fn add(self, other: FloatPoint) -> Self {
+        FloatPoint::new(self.x + other.x, self.y + other.y)
+    }
+
+    pub fn substract(self, other: FloatPoint) -> Self {
+        FloatPoint::new(self.x - other.x, self.y - other.y)
+    }
+
+    /// The scalar product of the vectors from this point to `p1` and from
+    /// this point to `p2`.
+    pub fn scalar_product(self, p1: FloatPoint, p2: FloatPoint) -> f64 {
+        let dx_1 = p1.x - self.x;
+        let dx_2 = p2.x - self.x;
+        let dy_1 = p1.y - self.y;
+        let dy_2 = p2.y - self.y;
+        dx_1 * dx_2 + dy_1 * dy_2
+    }
+
+    /// Which side of the directed line from `p1` to `p2` this point is on.
+    /// Note: unlike `IntVector::side_of`, the Java original computes this
+    /// determinant without negation.
+    pub fn side_of(self, p1: FloatPoint, p2: FloatPoint) -> Side {
+        let d21_x = p2.x - p1.x;
+        let d21_y = p2.y - p1.y;
+        let d01_x = self.x - p1.x;
+        let d01_y = self.y - p1.y;
+        Side::of(d21_x * d01_y - d21_y * d01_x)
+    }
+
+    /// Rotates this point by `angle` (radians) around `pole`.
+    pub fn rotate(self, angle: f64, pole: FloatPoint) -> Self {
+        if angle == 0.0 {
+            return self;
+        }
+        let dx = self.x - pole.x;
+        let dy = self.y - pole.y;
+        let (sin_angle, cos_angle) = angle.sin_cos();
+        FloatPoint::new(
+            pole.x + dx * cos_angle - dy * sin_angle,
+            pole.y + dx * sin_angle + dy * cos_angle,
+        )
+    }
+
+    /// Turns this point by `factor` times 90 degree around zero.
+    pub fn turn_90_degree(self, factor: i32) -> Self {
+        match factor.rem_euclid(4) {
+            0 => self,
+            1 => FloatPoint::new(-self.y, self.x),
+            2 => FloatPoint::new(-self.x, -self.y),
+            3 => FloatPoint::new(self.y, -self.x),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Turns this point by `factor` times 90 degree around `pole`.
+    pub fn turn_90_degree_around(self, factor: i32, pole: FloatPoint) -> Self {
+        pole.add(self.substract(pole).turn_90_degree(factor))
+    }
+
+    /// Checks if this point is contained in the box spanned by `p1` and `p2`
+    /// with the given tolerance.
+    pub fn is_contained_in_box(self, p1: FloatPoint, p2: FloatPoint, tolerance: f64) -> bool {
+        let (min_x, max_x) = if p1.x < p2.x { (p1.x, p2.x) } else { (p2.x, p1.x) };
+        if self.x < min_x - tolerance || self.x > max_x + tolerance {
+            return false;
+        }
+        let (min_y, max_y) = if p1.y < p2.y { (p1.y, p2.y) } else { (p2.y, p1.y) };
+        self.y >= min_y - tolerance && self.y <= max_y + tolerance
     }
 }
 
