@@ -129,6 +129,13 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 - 2026-07-14 (iter 54): grid-sampled drill candidates within rooms
   (DrillPage-style) → 166/173 (96%) in 142 s; VCC completes. Remaining:
   6 /PC-A* nets + GND. Progression: 84 → 90 → 91 → 94 → 96%.
+- 2026-07-14 (iters 55–59): cascading-ripup experiment — bounded victim
+  cascades consistently regressed to 161/173 by time starvation even
+  with deadline discipline; REVERTED to simple victim reroute. Deadline
+  checks kept (inside searches, between connections, per victim).
+  MST-style closest-component merging kept (benign: 165/173 in 140 s
+  after revert, within run variance of the 166 baseline). Conclusion:
+  further completion gains need shove, not more ripup tuning.
 
 ## Notes / decisions log
 
