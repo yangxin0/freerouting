@@ -197,6 +197,8 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
     }
 
     // placement: instantiate the image pins per component place
+    // cache of 90-degree-rotated padstack variants per (padstack, quadrant)
+    let mut rotated_padstacks: HashMap<(usize, i32), usize> = HashMap::new();
     for placement in pcb.children("placement") {
         for component in placement.children("component") {
             let image_name = component.arg().unwrap_or_default();
@@ -215,9 +217,49 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
                 let rotation_deg: f64 = args.get(4).and_then(|a| a.parse().ok()).unwrap_or(0.0);
                 let rotation = rotation_deg.to_radians();
                 let (sin, cos) = rotation.sin_cos();
+                // component rotations in quarter turns rotate the pad
+                // shapes too (a shared padstack gets a rotated variant);
+                // other angles only rotate the pin offsets, like before
+                let quarter = {
+                    let r = rotation_deg.rem_euclid(360.0) / 90.0;
+                    if (r - r.round()).abs() < 1e-9 {
+                        (r.round() as i32).rem_euclid(4)
+                    } else {
+                        0
+                    }
+                };
                 for pin in image_pins {
                     let Some(&padstack_no) = padstack_nos.get(&pin.padstack_name) else {
                         continue;
+                    };
+                    let padstack_no = if quarter != 0 {
+                        match rotated_padstacks.get(&(padstack_no, quarter)) {
+                            Some(&no) => no,
+                            None => {
+                                let (name, shapes, attach) = {
+                                    let p = board.padstacks.get_by_no(padstack_no).unwrap();
+                                    (
+                                        format!("{}::rot{}", p.name, quarter * 90),
+                                        (0..p.board_layer_count())
+                                            .map(|l| {
+                                                p.get_shape(l).map(|s| {
+                                                    s.turn_90_degree(
+                                                        quarter,
+                                                        IntPoint::new(0, 0),
+                                                    )
+                                                })
+                                            })
+                                            .collect::<Vec<_>>(),
+                                        p.attach_allowed,
+                                    )
+                                };
+                                let no = board.padstacks.add(name, shapes, attach, false);
+                                rotated_padstacks.insert((padstack_no, quarter), no);
+                                no
+                            }
+                        }
+                    } else {
+                        padstack_no
                     };
                     // rotate the offset, mirror for back side
                     let (mut dx, dy) = (

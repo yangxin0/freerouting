@@ -177,14 +177,28 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   (1.2 s); 8088sbc 98/104; interf_u 173/173 —
   but wavefolder 17/31 and J2_reference 13/24 (see open issues).
 
+- 2026-07-14 (iter 71): J2_reference instant failures root-caused with
+  FR_DEBUG_MAZE + `examples/net_debug.rs`: pads imported UNROTATED, so
+  the 350x1800 um fine-pitch pads of the 90-degree-rotated connector
+  overlapped each other and every start-room completion came back
+  empty. Fix: `TileShape::turn_90_degree` (box direct, otherwise via
+  turned simplex border lines) and per-(padstack, quadrant) rotated
+  padstack variants at import. J2_reference 13/24 → 23/24 in 0.7 s
+  (GND still open); interf_u regression-clean at 173/173 in 112 s.
+
 ## Open issues
 
 - Issue153-wavefolder routes only 17/31 in 60 s: 14 failures on
-  transistor pin nets (Q1–Q6) and power. Congestion or a pad-shape
-  import gap; needs investigation.
-- Issue026-J2_reference fails 11/24 nets instantly (3.4 ms total):
-  failures with no search time smell like missing start/target rooms —
-  likely an import gap (padstack shapes or pin-net binding).
+  transistor pin nets (Q1–Q6) and power. Not the pad-rotation bug
+  (unchanged after the fix); needs its own investigation.
+- Issue026-J2_reference GND (22 pins) still incomplete after the
+  rotation fix.
+- Non-quarter-turn component rotations still only rotate pin offsets,
+  not pad shapes; back-side placement still mirrors offsets without
+  mirroring pad shapes or flipping their layers.
+- User directive: no GUI port — deliver a proper CLI binary instead
+  (like the Java jar's `-de input.dsn -do output.ses`); currently only
+  examples exist.
 
 ## Notes / decisions log
 

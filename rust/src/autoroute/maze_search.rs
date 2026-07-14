@@ -133,6 +133,14 @@ pub fn find_connection(
     for (start_shape, layer) in &start_shapes {
         let start_center = start_shape.centre_of_gravity();
         let start_rooms = engine.create_start_rooms(board, start_shape.clone(), *layer);
+        // set FR_DEBUG_MAZE=1 to diagnose instantly failing connections
+        if std::env::var_os("FR_DEBUG_MAZE").is_some() {
+            eprintln!(
+                "MAZE start item {:?} layer {layer}: {} start rooms",
+                request.start_item,
+                start_rooms.len()
+            );
+        }
         for &room in &start_rooms {
             if engine
                 .target_doors(room)
@@ -236,6 +244,9 @@ pub fn find_connection(
             &mut drilled,
             &estimate_to_dest,
         );
+    }
+    if std::env::var_os("FR_DEBUG_MAZE").is_some() {
+        eprintln!("MAZE exhausted after {expansions} expansions");
     }
     None
 }

@@ -210,6 +210,28 @@ impl TileShape {
         }
     }
 
+    /// Turns this shape by `factor` times 90 degree around `pole`
+    /// (Java: `TileShape.turn_90_degree`).
+    pub fn turn_90_degree(&self, factor: i32, pole: IntPoint) -> TileShape {
+        if factor.rem_euclid(4) == 0 {
+            return self.clone();
+        }
+        match self {
+            TileShape::Box(b) => TileShape::Box(b.turn_90_degree(factor, pole)),
+            other => {
+                // rotation preserves the interior-on-the-left invariant of
+                // the border lines
+                let lines: Vec<Line> = other
+                    .to_simplex()
+                    .border_lines()
+                    .iter()
+                    .map(|l| l.turn_90_degree(factor, pole))
+                    .collect();
+                TileShape::Simplex(Simplex::new(lines))
+            }
+        }
+    }
+
     pub fn is_int_box(&self) -> bool {
         match self {
             TileShape::Box(_) => true,
