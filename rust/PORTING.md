@@ -4,14 +4,15 @@ Incremental port of the Java sources (`src/main/java/app/freerouting`, 484 files
 to the `rust/` crate. Updated by each `/loop` iteration; the next iteration
 should pick up the first unchecked item below.
 
-## Status (as of iteration 53)
+## Status (as of iteration 69)
 
 - **Working end to end**: DSN import (incl. pre-routed wiring) →
   expansion-room maze routing with in-search ripup → SES export.
   `cargo run --release --example route_board [board.dsn] [--strip-wiring]`.
-- **Benchmark** (interf_u, 173 nets, 2 layers): 96% from scratch in 142 s;
-  100% completion of the pre-routed board in 1.9 s. See the benchmark log.
-- ~18k lines of Rust, 171 tests, no warnings; ~70 Java files ported.
+- **Benchmark** (interf_u, 173 nets, 2 layers): **100% from scratch in
+  123 s** (0 failed connections); 100% completion of the pre-routed
+  board in 1.9 s. See the benchmark log.
+- ~18k lines of Rust, 174 tests, no warnings; ~70 Java files ported.
 - 6 upstream Java bugs found and documented (see the notes/decisions log
   and code comments marked "deviation").
 - Main gaps vs Java: shove algorithms, pull-tight optimizer, fanout,
@@ -156,14 +157,22 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   165/173 in 141 s, bit-for-bit match of the a891d790 baseline. Lesson:
   benchmark every routing-behaviour commit individually.
 
+- 2026-07-14 (iters 67–69): oversized-length root cause found with a
+  per-trace stats dump (`examples/trace_stats.rs`): corners at exactly
+  i32::MAX. Door-section midpoints along a straight corridor are
+  collinear, `from_int_points` built consecutive PARALLEL lines from
+  them, and the undefined corner intersection saturated on rounding.
+  Fix: `from_int_points` drops equal and collinear-middle points (Java
+  guarantees direction changes in `LocateFoundConnectionAlgo` instead);
+  `door_shape` also simplifies its intersection like Java's
+  `Simplex.intersection` (inert on this benchmark). Result: the
+  saturated corners had been actively blocking free space, and the
+  from-scratch benchmark jumped 165/173 → **173/173 (100%) in 123 s,
+  0 failed**; total length now 4.85e7 (sane), SES 68.6 kB.
+
 ## Open issues
 
-- Total trace length before the final pull-tight reads ~85e9 board
-  units (~50x geometric expectation); pull-tight reduces it to ~9.4e9.
-  The from_lines sanitation never fires on interf_u, so the oversized
-  corners enter through another path (split/combine or the length
-  accounting itself). Harmless to routing results, but worth
-  root-causing before trusting length-based reports.
+- (none currently)
 
 ## Notes / decisions log
 

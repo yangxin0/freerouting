@@ -161,9 +161,13 @@ impl RoomGraph {
     /// The shape of a door: the intersection of its rooms' shapes.
     pub fn door_shape(&self, door: DoorId) -> TileShape {
         let d = &self.doors[door];
+        // simplified like Java's Simplex.intersection: redundant border
+        // lines survive a plain intersection, and consecutive nearly
+        // parallel redundant lines make corner approximations quasi
+        // infinite, poisoning the door sections and the routed corners
         self.rooms[d.first_room]
             .shape
-            .intersection(&self.rooms[d.second_room].shape)
+            .intersection_with_simplify(&self.rooms[d.second_room].shape)
     }
 
     /// The other room of the door, if `room` is one of its rooms.

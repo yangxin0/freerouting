@@ -40,21 +40,57 @@ impl Polyline {
     }
 
     /// Creates a polyline through the given corner points.
+    ///
+    /// Equal consecutive points and middle points collinear with their
+    /// neighbours are dropped first: a collinear middle point would create
+    /// two consecutive parallel lines, whose corner intersection is
+    /// undefined (Java guarantees direction changes between corners in the
+    /// callers instead, e.g. `LocateFoundConnectionAlgo`).
     pub fn from_int_points(point_arr: &[IntPoint]) -> Self {
-        if point_arr.len() < 2 {
+        let mut pts: Vec<IntPoint> = Vec::with_capacity(point_arr.len());
+        for &p in point_arr {
+            if pts.last() == Some(&p) {
+                continue;
+            }
+            pts.push(p);
+        }
+        loop {
+            let before = pts.len();
+            let mut i = 1;
+            while i + 1 < pts.len() {
+                let (a, b, c) = (pts[i - 1], pts[i], pts[i + 1]);
+                let cross = (i64::from(b.x) - i64::from(a.x))
+                    * (i64::from(c.y) - i64::from(b.y))
+                    - (i64::from(b.y) - i64::from(a.y)) * (i64::from(c.x) - i64::from(b.x));
+                if cross == 0 {
+                    // spikes may leave equal neighbours behind
+                    pts.remove(i);
+                    if pts[i - 1] == pts[i] {
+                        pts.remove(i);
+                    }
+                    i = i.max(2) - 1;
+                } else {
+                    i += 1;
+                }
+            }
+            if pts.len() == before {
+                break;
+            }
+        }
+        if pts.len() < 2 {
             return Polyline { arr: Vec::new() };
         }
-        let n = point_arr.len();
+        let n = pts.len();
         let mut arr = Vec::with_capacity(n + 1);
         // perpendicular line at the start
-        let start_dir = direction_between(point_arr[0], point_arr[1]).turn_45_degree(2);
-        arr.push(Line::from_direction(point_arr[0], start_dir));
+        let start_dir = direction_between(pts[0], pts[1]).turn_45_degree(2);
+        arr.push(Line::from_direction(pts[0], start_dir));
         for i in 1..n {
-            arr.push(Line::new(point_arr[i - 1], point_arr[i]));
+            arr.push(Line::new(pts[i - 1], pts[i]));
         }
         // perpendicular line at the end
-        let end_dir = direction_between(point_arr[n - 1], point_arr[n - 2]).turn_45_degree(2);
-        arr.push(Line::from_direction(point_arr[n - 1], end_dir));
+        let end_dir = direction_between(pts[n - 1], pts[n - 2]).turn_45_degree(2);
+        arr.push(Line::from_direction(pts[n - 1], end_dir));
         Polyline { arr }
     }
 
