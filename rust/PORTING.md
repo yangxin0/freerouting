@@ -248,6 +248,15 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 109): planes moved out of the search tree —
+  coldfire's profile showed MinAreaTree::overlaps at ~45%: the
+  board-covering plane bounds poison every ancestor bound and degrade
+  the R-tree to near-full scans. Conduction areas now live in a small
+  side list checked linearly by overlapping_items (insert/remove/undo
+  all route through the same two functions, so resync stays correct).
+  Coldfire 246 → 260/278 @ 300 s; interf_u 173/173 in 236 s (was
+  250 s); wavefolder 1.25 s. Coldfire remains time-bound (267/278 at
+  600 s before this change — retest pending).
 - 2026-07-15 (iter 108): J2 VERDICT CORRECTED — 24/24 in 0.4 s under
   half-compensation. The iter-100 "unroutable" analysis was itself an
   artifact of full-inflation sealing: the pairwise separations are

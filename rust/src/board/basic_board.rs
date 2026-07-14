@@ -42,6 +42,10 @@ pub struct BasicBoard {
     search_tree: MinAreaTree<TreeShapeEntry>,
     /// The tree leaves of each item, for removal.
     tree_entries: BTreeMap<ItemId, Vec<LeafId>>,
+    /// Conduction areas (power planes) are kept out of the search tree:
+    /// their board-covering bounds would poison every ancestor bound and
+    /// degrade the tree queries to full scans. Checked linearly instead.
+    plane_items: Vec<ItemId>,
     /// Generator for unique item ids.
     next_id_no: ItemId,
 }
@@ -56,6 +60,7 @@ impl BasicBoard {
             item_list: UndoableObjects::new(),
             search_tree: MinAreaTree::new(),
             tree_entries: BTreeMap::new(),
+            plane_items: Vec::new(),
             next_id_no: 0,
         }
     }
@@ -131,6 +136,14 @@ impl BasicBoard {
     }
 
     fn insert_into_search_tree(&mut self, id: ItemId, item: &Item) {
+        if let ItemKind::ObstacleArea(a) = &item.kind {
+            if a.is_conduction {
+                if !self.plane_items.contains(&id) {
+                    self.plane_items.push(id);
+                }
+                return;
+            }
+        }
         let mut leaves = Vec::new();
         for (index, (shape, layer)) in item.tile_shapes(&self.padstacks).iter().enumerate() {
             let layer = *layer;
@@ -154,6 +167,7 @@ impl BasicBoard {
         if let Some(leaves) = self.tree_entries.remove(&id) {
             self.search_tree.remove(&leaves);
         }
+        self.plane_items.retain(|&p| p != id);
     }
 
     /// Removes an item from the board. Returns false if no such item is
@@ -201,6 +215,18 @@ impl BasicBoard {
             })
             .map(|entry| entry.item_id)
             .collect();
+        // planes live outside the tree; the few of them check linearly
+        for &plane_id in &self.plane_items {
+            let Some(item) = self.get_item(plane_id) else {
+                continue;
+            };
+            let matches = item.tile_shapes(&self.padstacks).iter().any(|(s, l)| {
+                layer.is_none_or(|want| *l == want) && s.intersects(shape)
+            });
+            if matches {
+                result.push(plane_id);
+            }
+        }
         result.sort();
         result.dedup();
         result
