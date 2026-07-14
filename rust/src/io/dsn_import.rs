@@ -245,6 +245,91 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
             }
         }
     }
+    // wiring: pre-routed wires and vias (KiCad exports mark existing
+    // routes with (type protect))
+    for wiring in pcb.children("wiring") {
+        for wire_node in wiring.children("wire") {
+            let Some(path) = wire_node.child("path") else {
+                continue;
+            };
+            let Some(layer) = path.arg().and_then(|n| board.layer_structure.get_no(n)) else {
+                continue;
+            };
+            let nums: Vec<f64> = path.args().skip(1).filter_map(|a| a.parse().ok()).collect();
+            if nums.len() < 5 {
+                continue;
+            }
+            let half_width = (scale(nums[0]) / 2).max(1);
+            let corners: Vec<IntPoint> = nums[1..]
+                .chunks_exact(2)
+                .map(|c| IntPoint::new(scale(c[0]), scale(c[1])))
+                .collect();
+            let net_nos = wire_node
+                .child("net")
+                .and_then(|n| n.arg())
+                .and_then(|name| {
+                    board
+                        .rules
+                        .nets
+                        .get_by_name(name)
+                        .first()
+                        .map(|n| n.net_number)
+                })
+                .map(|n| vec![n])
+                .unwrap_or_default();
+            let protected = wire_node
+                .child("type")
+                .and_then(|t| t.arg())
+                .is_some_and(|t| t.eq_ignore_ascii_case("protect") || t.eq_ignore_ascii_case("fix"));
+            let polyline = crate::geometry::planar::Polyline::from_int_points(&corners);
+            if polyline.is_empty() {
+                continue;
+            }
+            let id = board.insert_trace(polyline, layer, half_width, net_nos, 1);
+            if protected {
+                board.set_fixed_state(id, crate::board::FixedState::UserFixed);
+            }
+        }
+        for via_node in wiring.children("via") {
+            let args: Vec<&str> = via_node.args().collect();
+            if args.len() < 3 {
+                continue;
+            }
+            let Some(&padstack_no) = padstack_nos.get(args[0]) else {
+                continue;
+            };
+            let (Ok(x), Ok(y)) = (args[1].parse::<f64>(), args[2].parse::<f64>()) else {
+                continue;
+            };
+            let net_nos = via_node
+                .child("net")
+                .and_then(|n| n.arg())
+                .and_then(|name| {
+                    board
+                        .rules
+                        .nets
+                        .get_by_name(name)
+                        .first()
+                        .map(|n| n.net_number)
+                })
+                .map(|n| vec![n])
+                .unwrap_or_default();
+            let protected = via_node
+                .child("type")
+                .and_then(|t| t.arg())
+                .is_some_and(|t| t.eq_ignore_ascii_case("protect") || t.eq_ignore_ascii_case("fix"));
+            let id = board.insert_via(
+                padstack_no,
+                IntPoint::new(scale(x), scale(y)),
+                net_nos,
+                1,
+                false,
+            );
+            if protected {
+                board.set_fixed_state(id, crate::board::FixedState::UserFixed);
+            }
+        }
+    }
     Ok(board)
 }
 
@@ -388,14 +473,19 @@ mod tests {
             .first()
             .map(|n| n.net_number)
             .expect("/ACK net missing");
-        let ack_pins: Vec<_> = board
+        let ack_items: Vec<_> = board
             .items()
             .filter(|(_, item)| item.base.contains_net(ack))
             .collect();
-        assert_eq!(ack_pins.len(), 2);
-        assert!(!board.net_is_completely_connected(ack));
+        // 2 component pins plus the fixture's 4 pre-routed wires
+        let pins = ack_items
+            .iter()
+            .filter(|(_, i)| i.base.component_no != 0)
+            .count();
+        assert_eq!(pins, 2);
+        assert!(ack_items.len() >= 6, "wiring not imported");
         // pins carry shapes usable by the search tree
-        let (_, item) = ack_pins[0];
+        let (_, item) = ack_items[0];
         assert!(item.tile_shape_count(&board.padstacks) >= 1);
     }
 
@@ -425,6 +515,36 @@ mod tests {
             1500000, -800000, 1500200, -799800,
         ));
         assert!(!board.is_blocked(&inside, 0, 1));
+    }
+
+    #[test]
+    fn imports_prerouted_wiring() {
+        use crate::board::{FixedState, ItemKind};
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let path = format!("{root}/fixtures/Issue027-zMRETestFixture.dsn");
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let board = import_dsn(&content).expect("import failed");
+        // the fixture's protected pre-routed wires became fixed traces
+        let protected_traces: Vec<_> = board
+            .items()
+            .filter(|(_, i)| {
+                matches!(i.kind, ItemKind::PolylineTrace(_))
+                    && i.base.fixed_state == FixedState::UserFixed
+            })
+            .collect();
+        assert!(
+            protected_traces.len() > 10,
+            "only {} protected traces imported",
+            protected_traces.len()
+        );
+        // they carry their nets
+        assert!(protected_traces.iter().all(|(_, i)| i.base.net_count() > 0));
+        // fixed traces are not routable (protected from ripup)
+        assert!(protected_traces
+            .iter()
+            .all(|(_, i)| !i.is_routable()));
     }
 
     #[test]

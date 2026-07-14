@@ -12,6 +12,11 @@ fn import_route_export_real_board() {
         eprintln!("fixture not present; skipping");
         return;
     };
+    // strip the pre-routed wiring so the test exercises actual routing
+    let content = match content.find("  (wiring") {
+        Some(pos) => format!("{})", &content[..pos]),
+        None => content,
+    };
     let mut board = import_dsn(&content).expect("import failed");
 
     // route the two-pin net /ACK

@@ -418,6 +418,13 @@ impl BasicBoard {
         }
     }
 
+    /// Sets the fixed state of an item.
+    pub fn set_fixed_state(&mut self, id: ItemId, state: crate::board::FixedState) {
+        if let Some(item) = self.item_list.get_mut(&id) {
+            item.base.fixed_state = state;
+        }
+    }
+
     /// Splits a trace of `net_no` on `layer` whose center line passes
     /// through `point` (not at an endpoint) into two traces meeting there,
     /// so that contacts at the junction register

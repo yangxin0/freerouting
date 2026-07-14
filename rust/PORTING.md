@@ -98,6 +98,12 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 - 2026-07-14 (iter 44): 3 passes, shortest-extent-first ordering, budget
   doubling per pass → 156/173 nets complete (90%) in 93 s. The remaining
   17 incompletes are congestion cases needing real ripup.
+- 2026-07-14 (iter 46): naive corridor ripup REGRESSED to 117/173 —
+  destructive rips without proof of benefit. Lesson recorded.
+- 2026-07-14 (iter 48): transactional ripup (snapshot; commit only if the
+  failed net and all victims recover) → 158/173 (91%) in 140 s;
+  monotonicity guarantee held. Remaining: bus/power congestion needing
+  in-search ripup costs (Java's approach) or shove.
 
 ## Notes / decisions log
 
