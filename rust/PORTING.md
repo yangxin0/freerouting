@@ -258,6 +258,18 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 123): round three — transactional DRC repair pass:
+  after routing, nets with routed-vs-routed clearance violations are
+  ripped and rerouted against the completed board; the round is kept
+  only when every rerouted net completes again (a non-transactional
+  version traded display down to 14/30 for 3 violations — rejected;
+  completion is never sacrificed silently). Campaign scoreboard
+  (violations, from the original audit): wavefolder 322→13, display
+  639→53 (repair rolls back there — its reroutes fail), J2 222→2.
+  Remaining: display's 53 (repair-resistant — needs the leak fixed at
+  the source, likely the same pre-insert blindness in the RIP path's
+  shove interplay), wavefolder's 13, and the honest fleet
+  re-benchmark.
 - 2026-07-15 (iter 122): round two landed — (a) nested-snapshot
   leakage RULED OUT by a new unit test (generate/pop/undo at shove
   nesting depth restores exactly, search tree in sync; the suspicious

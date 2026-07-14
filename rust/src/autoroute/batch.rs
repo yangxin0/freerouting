@@ -313,6 +313,122 @@ fn request_for_net(board: &BasicBoard, net_no: i32, base: &BatchRequest) -> Batc
     }
 }
 
+/// The nets of routed items violating the pairwise clearance to another
+/// routed foreign item (post-routing audit; planes excepted).
+fn violating_nets(board: &BasicBoard) -> Vec<i32> {
+    use crate::board::ItemKind;
+    let mut nets = Vec::new();
+    let routed: Vec<ItemId> = board
+        .items()
+        .filter(|(_, it)| {
+            it.base.component_no == 0
+                && it.base.net_count() > 0
+                && !matches!(it.kind, ItemKind::ObstacleArea(_))
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    for &id in &routed {
+        let Some(item) = board.get_item(id) else {
+            continue;
+        };
+        let shapes: Vec<_> = item.tile_shapes(&board.padstacks).to_vec();
+        'shapes: for (shape, layer) in shapes {
+            let max_cl = board.rules.clearance_matrix.max_value(layer).max(0) as f64;
+            for other_id in board.overlapping_items(&shape.offset(max_cl), Some(layer)) {
+                if other_id == id {
+                    continue;
+                }
+                let Some(other) = board.get_item(other_id) else {
+                    continue;
+                };
+                if other.base.shares_net(&item.base) || other.base.component_no != 0 {
+                    continue;
+                }
+                if let ItemKind::ObstacleArea(a) = &other.kind {
+                    if a.is_conduction {
+                        continue;
+                    }
+                }
+                let cl = board.rules.clearance_matrix.get_value(
+                    item.base.clearance_class,
+                    other.base.clearance_class,
+                    layer,
+                    false,
+                ) as f64;
+                let check = shape.offset(cl);
+                let conflict = other
+                    .tile_shapes(&board.padstacks)
+                    .iter()
+                    .any(|(s, l)| *l == layer && s.intersection(&check).dimension() >= 2);
+                if conflict {
+                    nets.extend(item.base.net_nos.iter().copied());
+                    nets.extend(other.base.net_nos.iter().copied());
+                    break 'shapes;
+                }
+            }
+        }
+    }
+    nets.sort();
+    nets.dedup();
+    nets
+}
+
+/// Rips and reroutes the nets with clearance violations among routed
+/// items; incomplete beats illegal, so failed reroutes stay unrouted.
+fn repair_violations(
+    board: &mut BasicBoard,
+    request: &BatchRequest,
+    time_limit: Option<&crate::datastructures::TimeLimit>,
+) -> usize {
+    let mut repaired = 0;
+    let all_nets: Vec<i32> = (1..=board.rules.nets.max_net_no()).collect();
+    for _round in 0..2 {
+        let nets = violating_nets(board);
+        if nets.is_empty() {
+            break;
+        }
+        // transactional: the repair may not trade completion away —
+        // kept only when every rerouted net completes again
+        let complete_before = all_nets
+            .iter()
+            .filter(|&&n| board.net_is_completely_connected(n))
+            .count();
+        board.generate_snapshot();
+        let to_remove: Vec<ItemId> = board
+            .items()
+            .filter(|(_, it)| {
+                it.base.component_no == 0
+                    && it.is_routable()
+                    && it.base.net_nos.iter().any(|n| nets.contains(n))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in to_remove {
+            board.remove_item(id);
+        }
+        let ripup_penalty = request.via_cost.max(20_000.0);
+        for &net_no in &nets {
+            if time_limit.is_some_and(|t| t.limit_exceeded()) {
+                break;
+            }
+            let net_request = request_for_net(board, net_no, request);
+            route_net_with_ripup(board, net_no, &net_request, ripup_penalty);
+        }
+        let complete_after = all_nets
+            .iter()
+            .filter(|&&n| board.net_is_completely_connected(n))
+            .count();
+        if complete_after >= complete_before {
+            board.pop_snapshot();
+            repaired += nets.len();
+        } else {
+            board.undo();
+            break; // this round's reroutes failed; keep completion
+        }
+    }
+    repaired
+}
+
 /// Like [`batch_route_passes`] with an optional wall-clock limit checked
 /// between nets (Java: BatchAutorouter's TimeLimit); on expiry the batch
 /// stops after the current connection and reports the state so far.
@@ -457,6 +573,14 @@ pub fn batch_route_passes_with_time_limit(
             dry_rounds += 1;
         }
     }
+    // final guarantee: no clearance violations among routed items —
+    // violating nets are ripped and rerouted against the now-complete
+    // board (incomplete beats illegal)
+    repair_violations(board, request, time_limit);
+    total.failed_connections = net_nos
+        .iter()
+        .filter(|&&n| !board.net_is_completely_connected(n))
+        .count();
     total
 }
 
