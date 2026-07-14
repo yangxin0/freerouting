@@ -171,21 +171,37 @@ pub fn find_connection(
             );
         }
         for &room in &start_rooms {
+            // the start corner must lie inside room ∩ start shape so the
+            // first segment cannot leave the room (the pad's centre of
+            // gravity may be outside a sliver room — same DRC leak as on
+            // the arrival side)
+            let room_shape = engine.graph.room(room).shape.clone();
+            let start_door = room_shape.intersection(start_shape);
+            let start_point = if start_door.dimension() >= 1 {
+                start_door.centre_of_gravity()
+            } else {
+                start_center
+            };
             if engine
                 .target_doors(room)
                 .iter()
                 .any(|t| t.item == request.dest_item)
             {
-                let dest_point =
-                    destination_point(board, request.dest_item, *layer, start_center);
+                let dest_point = destination_point(
+                    board,
+                    request.dest_item,
+                    *layer,
+                    Some(&room_shape),
+                    start_point,
+                );
                 return Some(MazeSearchResult {
-                    corners: vec![(start_center, *layer), (dest_point, *layer)],
+                    corners: vec![(start_point, *layer), (dest_point, *layer)],
                 });
             }
             engine.expand_room(board, room);
             let root = nodes.len();
             nodes.push(BacktrackNode {
-                location: start_center,
+                location: start_point,
                 layer: *layer,
                 parent: None,
             });
@@ -194,7 +210,7 @@ pub fn find_connection(
                 board,
                 request,
                 room,
-                start_center,
+                start_point,
                 0.0,
                 root,
                 None,
@@ -263,8 +279,14 @@ pub fn find_connection(
                 curr = nodes[i].parent;
             }
             corners.reverse();
-            let dest_point =
-                destination_point(board, request.dest_item, layer, entry.location);
+            let arrival_shape = engine.graph.room(room).shape.clone();
+            let dest_point = destination_point(
+                board,
+                request.dest_item,
+                layer,
+                Some(&arrival_shape),
+                entry.location,
+            );
             corners.push((dest_point, layer));
             return Some(MazeSearchResult { corners });
         }
@@ -484,14 +506,17 @@ fn via_free(board: &BasicBoard, request: &MazeRouteRequest, point: IntPoint) -> 
     true
 }
 
-/// The centre of the destination item's shape on `layer` (or its first
-/// shape). For area destinations (power planes) the arrival location is
-/// used instead: any point inside the area connects, and its centre of
-/// gravity could be across the board.
+/// The point where the connection enters the destination item. The
+/// straight segment from the arrival location to this point must stay
+/// legal: when the arrival room is known, the point is taken inside
+/// room ∩ dest shape, so the segment never leaves the (convex) room.
+/// (Using the dest shape's centre of gravity let the final segment
+/// cross foreign clearance zones — the last DRC leak.)
 fn destination_point(
     board: &BasicBoard,
     dest_item: ItemId,
     layer: usize,
+    arrival_room: Option<&TileShape>,
     fallback: FloatPoint,
 ) -> FloatPoint {
     board
@@ -501,11 +526,18 @@ fn destination_point(
                 return Some(fallback);
             }
             let shapes = item.tile_shapes(&board.padstacks);
-            shapes
+            let dest_shape = shapes
                 .iter()
                 .find(|(_, l)| *l == layer)
                 .or_else(|| shapes.first())
-                .map(|(s, _)| s.centre_of_gravity())
+                .map(|(s, _)| s)?;
+            if let Some(room) = arrival_room {
+                let door = room.intersection(dest_shape);
+                if door.dimension() >= 1 {
+                    return Some(door.centre_of_gravity());
+                }
+            }
+            Some(dest_shape.centre_of_gravity())
         })
         .unwrap_or(fallback)
 }

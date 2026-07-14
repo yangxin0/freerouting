@@ -30,6 +30,24 @@ pub fn set_birth_tag(tag: u8) {
     BIRTH_TAG.with(|t| t.set(tag));
 }
 
+/// The watch region from FR_DEBUG_REGION="x1,y1,x2,y2" (diagnostics).
+fn debug_region() -> Option<IntBox> {
+    thread_local! {
+        static REGION: std::cell::OnceCell<Option<IntBox>> =
+            const { std::cell::OnceCell::new() };
+    }
+    REGION.with(|r| {
+        *r.get_or_init(|| {
+            let v = std::env::var("FR_DEBUG_REGION").ok()?;
+            let nums: Vec<i32> = v.split(',').filter_map(|p| p.parse().ok()).collect();
+            let [x1, y1, x2, y2] = nums[..] else {
+                return None;
+            };
+            Some(IntBox::from_coords(x1, y1, x2, y2))
+        })
+    })
+}
+
 /// One search-tree entry of an item: which shape of which item on which
 /// layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -87,6 +105,15 @@ impl BasicBoard {
         item.base.id_no = id;
         if item.base.birth == 0 {
             item.base.birth = BIRTH_TAG.with(|t| t.get());
+        }
+        if let Some(region) = debug_region() {
+            let bb = item.bounding_box(&self.padstacks);
+            if bb.intersects(region) {
+                eprintln!(
+                    "EVENT insert {id} birth {} nets {:?} bbox {:?}",
+                    item.base.birth, item.base.net_nos, bb
+                );
+            }
         }
         self.insert_into_search_tree(id, &item);
         self.item_list.insert(id, item);
@@ -189,6 +216,17 @@ impl BasicBoard {
     pub fn remove_item(&mut self, id: ItemId) -> bool {
         if self.item_list.get(&id).is_none() {
             return false;
+        }
+        if let Some(region) = debug_region() {
+            if let Some(item) = self.item_list.get(&id) {
+                let bb = item.bounding_box(&self.padstacks);
+                if bb.intersects(region) {
+                    eprintln!(
+                        "EVENT remove {id} birth {} nets {:?}",
+                        item.base.birth, item.base.net_nos
+                    );
+                }
+            }
         }
         self.remove_from_search_tree(id);
         self.item_list.delete(&id)

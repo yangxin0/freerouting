@@ -258,6 +258,16 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 126): THE ENDPOINT LEAK FOUND AND FIXED — the
+  final approach segment ran from the arrival door to the dest pad's
+  CENTRE OF GRAVITY, crossing whatever lay between (foreign via
+  clearance zones); the start segment had the mirror bug (pad cog
+  outside sliver start rooms). Both endpoints now land inside
+  room ∩ pad, so the segment cannot leave the convex room — legal by
+  construction. RESULT: J2_reference 24/24 with ZERO violations, the
+  first fully DRC-clean board. Display (78) and wavefolder (23)
+  shuffled — their rerouted paths hit remaining instances; continue
+  with the event-region trace on display's new top violation.
 - 2026-07-15 (iter 125): round five state — birth tags landed (item
   birth preserved across pull-tight reinsertion after a first
   false-conviction run) and the verdict is: ALL residual violations
