@@ -91,11 +91,14 @@ pub fn complete_shape_with_ripup(
         if ignore_rippable && is_rippable(item, net_no) {
             continue;
         }
+        // with the safety margin (Java: add_safety_margin) — the room
+        // guarantee otherwise EQUALS the requirement exactly, and corner
+        // rounding (≤1 unit) tips boundary-riding paths into violation
         let clearance = matrix.get_value(
             item.base.clearance_class,
             trace_clearance_class,
             room.layer,
-            false,
+            true,
         );
         for (shape, layer) in item.tile_shapes(&board.padstacks) {
             if *layer == room.layer {

@@ -258,6 +258,20 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 135): SAFETY MARGIN — the boundary-equality bug:
+  the room guarantee (obstacle margin hw+cl) EQUALS the DRC
+  requirement exactly, so boundary-riding paths tip into violation
+  with ≤1-unit corner rounding. The clearance matrix's Java-faithful
+  add_safety_margin flag (never used until now) closes it. RESULTS:
+  wavefolder 31/31 complete with ZERO violations, J2 24/24 with ZERO
+  — two boards fully complete AND fully DRC-clean; display 30/30 with
+  34 violations remaining (the genuine transactional blind-window
+  class: an on-board-at-insert case was disproven this round via the
+  158/439 timeline — 439's insert was illegal with 158 present and
+  rooms COLLECTING it, resolved as boundary-equality; the rest
+  correlate with rip windows). Chain of this round: legal-at-birth
+  inversion → late-comer 439 → completions collected the victim →
+  guarantee-equals-requirement arithmetic → safety margin.
 - 2026-07-15 (iter 134): THE PRISTINE-CASE LEAK FOUND AND FIXED — the
   timeline correlated a final violating trace to an ILLEGAL first-pass
   insert blocked by STATIC IMPORTED PINS (no transactions involved),
