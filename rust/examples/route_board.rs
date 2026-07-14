@@ -2,7 +2,8 @@
 //!
 //! Usage: cargo run --release --example route_board [path/to/board.dsn]
 
-use freerouting::autoroute::{batch_route_passes, BatchRequest};
+use freerouting::autoroute::{batch_route_passes_with_time_limit, BatchRequest};
+use freerouting::datastructures::TimeLimit;
 use freerouting::io::{export_ses, import_dsn};
 use std::time::Instant;
 
@@ -50,7 +51,10 @@ fn main() {
 
     let t1 = Instant::now();
     let net_count = board.rules.nets.max_net_no();
-    let result = batch_route_passes(&mut board, &request, 3);
+    // bound the batch to 5 minutes of wall clock
+    let time_limit = TimeLimit::new(300_000);
+    let result =
+        batch_route_passes_with_time_limit(&mut board, &request, 3, Some(&time_limit));
     let mut complete_nets = 0usize;
     let mut incomplete_nets = Vec::new();
     for net_no in 1..=net_count {

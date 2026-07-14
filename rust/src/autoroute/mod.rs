@@ -12,7 +12,8 @@ pub mod room_completion;
 pub mod simple_router;
 
 pub use batch::{
-    batch_route, batch_route_passes, route_net, route_net_with_ripup, BatchRequest, BatchResult,
+    batch_route, batch_route_passes, batch_route_passes_with_time_limit, route_net,
+    route_net_with_ripup, BatchRequest, BatchResult,
 };
 pub use engine::{AutorouteEngine, TargetDoor};
 pub use expansion_room::{

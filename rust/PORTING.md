@@ -107,8 +107,11 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 - 2026-07-14 (iter 50): in-search ripup costs (rooms overlap rippable
   items, maze pays per-item penalty, precise geometry-intersection rips,
   transactional victim reroute). Partial-completion scenario (imported
-  pre-routed wiring): 173/173 nets (100%) in 1.9 s. From-scratch run
-  pending below.
+  pre-routed wiring): 173/173 nets (100%) in 1.9 s.
+- 2026-07-14 (iter 52): from-scratch with in-search ripup: 163/173 (94%)
+  in 150 s. Progression: 84% → 90% → 91% → 94%. Remaining: /PC-A* bus
+  tail, /MA12, /OE-, GND, VCC. Batch passes now support a wall-clock
+  TimeLimit (demo bounds runs to 5 min).
 
 ## Notes / decisions log
 

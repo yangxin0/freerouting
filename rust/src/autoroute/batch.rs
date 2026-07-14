@@ -238,13 +238,25 @@ fn net_extent(board: &BasicBoard, net_no: i32) -> i64 {
 }
 
 /// Routes all nets over several passes: pass 1 in shortest-net-first
-/// order, later passes retrying the incomplete nets with a doubled
-/// expansion budget each time (a simplified stand-in for Java's
-/// ripup-cost pass escalation). Returns the result of the final state.
+/// order, later passes retrying the incomplete nets with in-search ripup
+/// and a doubled expansion budget each time. Returns the result of the
+/// final state.
 pub fn batch_route_passes(
     board: &mut BasicBoard,
     request: &BatchRequest,
     passes: usize,
+) -> BatchResult {
+    batch_route_passes_with_time_limit(board, request, passes, None)
+}
+
+/// Like [`batch_route_passes`] with an optional wall-clock limit checked
+/// between nets (Java: BatchAutorouter's TimeLimit); on expiry the batch
+/// stops after the current connection and reports the state so far.
+pub fn batch_route_passes_with_time_limit(
+    board: &mut BasicBoard,
+    request: &BatchRequest,
+    passes: usize,
+    time_limit: Option<&crate::datastructures::TimeLimit>,
 ) -> BatchResult {
     let mut net_nos: Vec<i32> = (1..=board.rules.nets.max_net_no()).collect();
     net_nos.sort_by_key(|&n| net_extent(board, n));
@@ -263,13 +275,26 @@ pub fn batch_route_passes(
         } else {
             request.via_cost.max(20_000.0)
         };
+        let mut out_of_time = false;
         for &net_no in &net_nos {
+            if time_limit.is_some_and(|t| t.limit_exceeded()) {
+                out_of_time = true;
+                break;
+            }
             if board.net_is_completely_connected(net_no) {
                 continue;
             }
             let result = route_net_with_ripup(board, net_no, &pass_request, ripup_penalty);
             total.routed_connections += result.routed_connections;
             failed_this_pass += result.failed_connections;
+        }
+        if out_of_time {
+            // count the remaining incomplete nets as failures and stop
+            total.failed_connections += net_nos
+                .iter()
+                .filter(|&&n| !board.net_is_completely_connected(n))
+                .count();
+            break;
         }
         if failed_this_pass == 0 {
             break;
