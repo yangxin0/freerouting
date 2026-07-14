@@ -83,11 +83,28 @@ impl Polyline {
         while i + 1 < lines.len() {
             let c = lines[i].intersection_approx(&lines[i + 1]);
             if c.x.abs() > limit || c.y.abs() > limit {
-                lines.remove(i + 1);
-                if lines.len() < 3 {
-                    return Polyline { arr: Vec::new() };
+                // Drop one line of the nearly parallel pair, but never one
+                // of the first two or last two lines: those define the end
+                // corners, and moving an endpoint breaks the exact-equality
+                // trace connectivity at that point.
+                let last_safe = lines.len().saturating_sub(3);
+                let drop = if (2..=last_safe).contains(&(i + 1)) {
+                    Some(i + 1)
+                } else if (2..=last_safe).contains(&i) {
+                    Some(i)
+                } else {
+                    None
+                };
+                match drop {
+                    Some(d) => {
+                        lines.remove(d);
+                        if lines.len() < 3 {
+                            return Polyline { arr: Vec::new() };
+                        }
+                        i = i.saturating_sub(1);
+                    }
+                    None => i += 1,
                 }
-                i = i.saturating_sub(1);
             } else {
                 i += 1;
             }

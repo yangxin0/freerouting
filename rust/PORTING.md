@@ -136,15 +136,27 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   MST-style closest-component merging kept (benign: 165/173 in 140 s
   after revert, within run variance of the 166 baseline). Conclusion:
   further completion gains need shove, not more ripup tuning.
+- 2026-07-14 (iters 63–66): quasi-infinite-corner fix saga. Pull-tight
+  length report exposed traces with corners far outside CRIT_INT (total
+  length ~85e9). Fix 1: sanitize nearly parallel adjacent lines in
+  `Polyline::from_lines`. That first (a) stack-overflowed the benchmark
+  via unbounded `restrain_shape` recursion on degenerate slivers (fixed
+  with a depth cap of 64), then (b) REGRESSED to 154/173 in 236 s:
+  dropping one of the two first/last lines moves an end corner, and
+  trace connectivity is exact-endpoint-equality, so routed connections
+  stopped registering — HYPOTHESIS REFUTED: restricting drops to
+  endpoint-safe interior lines (indices 2..=len-3, kept as a safety
+  invariant) reproduced the 154/173 run bit-for-bit, so no
+  endpoint-adjacent drops ever fire on this board. Investigation
+  continues (see open issues).
 
 ## Open issues
 
-- Some routed traces carry quasi-infinite corner coordinates (near
-  parallel adjacent polyline lines from split/combine): total trace
-  length reads ~100x too large even after pull-tight, and such corners
-  would leak into SES output. Needs a polyline sanitation pass on
-  insertion (drop/merge adjacent lines whose intersection leaves the
-  CRIT_INT range).
+- From-scratch benchmark regressed 165/173 in 139 s → 154/173 in 236 s
+  somewhere in the polyline-sanitation + restrain_shape-depth-cap pair
+  of commits (27dbe435, 14839b9a). Deterministic reproduction. Next:
+  benchmark with sanitation disabled (depth cap kept) and count
+  depth-cap hits to attribute the regression.
 
 ## Notes / decisions log
 
