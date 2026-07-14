@@ -812,13 +812,17 @@ fn insert_connection(
                         }
                     }
                 }
-                items.push(board.insert_trace(
+                let new_id = board.insert_trace(
                     polyline,
                     layer,
                     request.trace_half_width,
                     vec![request.net_no],
                     request.clearance_class,
-                ));
+                );
+                if std::env::var_os("FR_DEBUG_MAZE").is_some() {
+                    eprintln!("INSERTED trace {new_id} net {} layer {layer}", request.net_no);
+                }
+                items.push(new_id);
             }
         };
     for (corner, layer) in &result.corners {

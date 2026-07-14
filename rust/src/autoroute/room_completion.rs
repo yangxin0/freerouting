@@ -62,8 +62,15 @@ pub fn complete_shape_with_ripup(
     // door shrink by the trace half width then keeps the copper edges
     // `clearance` apart.
     let matrix = &board.rules.clearance_matrix;
+    // the query must include the margin: an obstacle just OUTSIDE the
+    // room's start shape still restrains it when its inflated shape
+    // reaches inside (missing this was the final DRC leak — obstacles
+    // behind a frontier half-plane's border were invisible)
+    let max_margin =
+        trace_half_width as f64 + matrix.max_value(room.layer).max(0) as f64;
+    let query_shape = start_shape.offset(max_margin);
     let mut obstacles: Vec<(ItemId, TileShape)> = Vec::new();
-    for item_id in board.overlapping_items(&start_shape, Some(room.layer)) {
+    for item_id in board.overlapping_items(&query_shape, Some(room.layer)) {
         if Some(item_id) == ignore_item {
             continue;
         }

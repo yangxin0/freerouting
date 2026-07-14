@@ -258,6 +258,20 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 134): THE PRISTINE-CASE LEAK FOUND AND FIXED — the
+  timeline correlated a final violating trace to an ILLEGAL first-pass
+  insert blocked by STATIC IMPORTED PINS (no transactions involved),
+  and the region probe showed the completion collecting obstacle 58
+  while the tree saw [58, 60]: pin 60 lay just OUTSIDE the frontier
+  half-plane, so its uninflated shape missed the collection query
+  while its inflated margin reached inside the room (the iter-131
+  "elimination" of query coverage was WRONG — huge half-planes still
+  have borders that pass arbitrarily close to obstacles). Fix: the
+  obstacle query runs on start_shape.offset(half width + max
+  clearance). Results: wavefolder 31/31 with TWO violations (from 322
+  at campaign start), J2 24/24 with ZERO, display 30/30 complete with
+  illegal inserts halved (71→35; the pin case gone — the remainder is
+  the transactional blind-window class, next target).
 - 2026-07-15 (iter 133): the transactional layer is EXONERATED — a
   fuzz test (40 seeds x 200 random insert/remove/generate/pop/undo
   ops against a shadow model, verifying BOTH the alive set and the

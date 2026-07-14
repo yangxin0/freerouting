@@ -52,8 +52,10 @@ fn main() {
     };
     let limit = TimeLimit::new(limit_s * 1000);
     batch_route_passes_with_time_limit(&mut board, &request, 99, Some(&limit));
-    combine_all_traces(&mut board);
-    pull_tight_all(&mut board, 3);
+    if std::env::var_os("FR_NO_POST").is_none() {
+        combine_all_traces(&mut board);
+        pull_tight_all(&mut board, 3);
+    }
 
     // audit: routed items (component 0) vs everything foreign
     let mut violations = 0usize;
