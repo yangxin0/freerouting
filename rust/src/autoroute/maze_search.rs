@@ -132,7 +132,14 @@ pub fn find_connection(
     // create and seed the start rooms on every layer of the start item
     for (start_shape, layer) in &start_shapes {
         let start_center = start_shape.centre_of_gravity();
-        let start_rooms = engine.create_start_rooms(board, start_shape.clone(), *layer);
+        let mut start_rooms = engine.create_start_rooms(board, start_shape.clone(), *layer);
+        if start_rooms.is_empty() {
+            // an earlier layer's expansion may already have completed
+            // rooms covering this pad (new rooms must not overlap them);
+            // those existing rooms then serve as the start
+            start_rooms =
+                engine.rooms_containing(start_center.round(), *layer, board);
+        }
         // set FR_DEBUG_MAZE=1 to diagnose instantly failing connections
         if std::env::var_os("FR_DEBUG_MAZE").is_some() {
             eprintln!(

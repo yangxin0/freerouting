@@ -152,6 +152,13 @@ pub fn route_net(board: &mut BasicBoard, net_no: i32, request: &BatchRequest) ->
         let Some((start, dest)) = best else {
             break;
         };
+        if std::env::var_os("FR_DEBUG_MAZE").is_some() {
+            eprintln!(
+                "ROUTE net {net_no}: connect item {start:?} -> item {dest:?} \
+                 ({} components)",
+                components.len()
+            );
+        }
         let maze_request = MazeRouteRequest {
             net_no,
             start_item: start,

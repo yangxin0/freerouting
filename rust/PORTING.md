@@ -194,6 +194,20 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 
 ## Open issues
 
+- 2026-07-14 (iter 77): wavefolder fully solved — 31/31 in 3.3 s. The
+  last two nets failed because back-side placement used the wrong flip
+  style: Java (and the specctra default) mirrors pin offsets and pad
+  shapes at the y axis BEFORE the component rotation; we rotated
+  first. An axial diode pin thereby landed 4.7 mm outside the board
+  outline. Import now follows the default and honours
+  (place_control (flip_style rotate_first)). Also: when start-room
+  creation returns empty because earlier expansion already covered
+  the pad, the existing containing rooms now serve as start rooms.
+  Fleet after the fix (120 s cap): display-8-digit 30/30 (was 29),
+  pic_programmer 111/111 in 2.6 s (was 109 in 60 s), wavefolder
+  31/31, ecc83 13/13, rpi_splitter 5/5, J2_reference 23/24,
+  NormalPuzzle 70/72, 8088sbc 100/104, interf_u 169/173@120s cap
+  (100% needs ~185 s).
 - Issue153-wavefolder 17/31 RESOLVED → 29/31 (iter 74): the real bug
   was contact detection, not reachability. The staggered TO-92 pads
   have off-centre shapes ([0,±400] um), the maze ends traces at the

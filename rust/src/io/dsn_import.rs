@@ -200,7 +200,15 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
     // placement: instantiate the image pins per component place
     // cache of placed padstack variants per (padstack, quadrant, side):
     // quarter turns rotate the shapes, back-side placement additionally
-    // mirrors them at the vertical axis and flips their layers
+    // mirrors them at the vertical axis and flips their layers.
+    // Flip style (Java: Components.flip_style_rotate_first): by default
+    // back-side pins mirror BEFORE the rotation; with
+    // (place_control (flip_style rotate_first)) they rotate first.
+    let rotate_first = structure
+        .child("place_control")
+        .and_then(|pc| pc.child("flip_style"))
+        .and_then(|fs| fs.arg())
+        .is_some_and(|v| v.eq_ignore_ascii_case("rotate_first"));
     let mut placed_padstacks: HashMap<(usize, i32, bool), usize> = HashMap::new();
     for placement in pcb.children("placement") {
         for component in placement.children("component") {
@@ -248,14 +256,24 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
                                         let Some(s) = p.get_shape(l) else {
                                             continue;
                                         };
-                                        let s = s.turn_90_degree(quarter, origin);
-                                        // mirror the shape and flip its
-                                        // layer for the back side, like
-                                        // the pin offsets
+                                        // back side: mirror the shape and
+                                        // flip its layer, like the pin
+                                        // offsets; mirror before or after
+                                        // the rotation per the flip style
                                         let (s, target) = if on_front {
-                                            (s, l)
+                                            (s.turn_90_degree(quarter, origin), l)
+                                        } else if rotate_first {
+                                            (
+                                                s.turn_90_degree(quarter, origin)
+                                                    .mirror_vertical(origin),
+                                                n - 1 - l,
+                                            )
                                         } else {
-                                            (s.mirror_vertical(origin), n - 1 - l)
+                                            (
+                                                s.mirror_vertical(origin)
+                                                    .turn_90_degree(quarter, origin),
+                                                n - 1 - l,
+                                            )
                                         };
                                         shapes[target] = Some(s);
                                     }
@@ -278,12 +296,15 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
                     } else {
                         padstack_no
                     };
-                    // rotate the offset, mirror for back side
-                    let (mut dx, dy) = (
-                        pin.dx * cos - pin.dy * sin,
-                        pin.dx * sin + pin.dy * cos,
-                    );
-                    if !on_front {
+                    // pin offset: mirror at the y axis for the back side
+                    // (before or after the rotation per the flip style)
+                    let px = if on_front || rotate_first {
+                        pin.dx
+                    } else {
+                        -pin.dx
+                    };
+                    let (mut dx, dy) = (px * cos - pin.dy * sin, px * sin + pin.dy * cos);
+                    if !on_front && rotate_first {
                         dx = -dx;
                     }
                     let center = IntPoint::new(scale(x + dx), scale(y + dy));

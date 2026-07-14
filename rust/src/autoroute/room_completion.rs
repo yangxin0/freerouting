@@ -77,7 +77,7 @@ pub fn complete_shape_with_ripup(
         }
     }
 
-    for (_, obstacle_shape) in &obstacles {
+    for (obstacle_id, obstacle_shape) in &obstacles {
         let mut new_result = Vec::new();
         for curr_room in result {
             let intersection = curr_room.shape.intersection(obstacle_shape);
@@ -88,6 +88,17 @@ pub fn complete_shape_with_ripup(
             }
         }
         result = new_result;
+        if result.is_empty() {
+            if std::env::var_os("FR_DEBUG_MAZE").is_some() {
+                eprintln!(
+                    "ROOM KILLED on layer {} by obstacle item {obstacle_id:?} \
+                     (bbox {:?})",
+                    room.layer,
+                    obstacle_shape.bounding_box()
+                );
+            }
+            break;
+        }
     }
     result
 }
