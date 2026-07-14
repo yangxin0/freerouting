@@ -95,6 +95,9 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   100k expansion budget → 131 connections routed, 145/173 nets complete
   (84%) in 31 s. Incompletes: dense buses (/MA*, /PC-A*) + GND/VCC.
   Next lever: ripup escalation passes (Java reaches 100% with them).
+- 2026-07-14 (iter 44): 3 passes, shortest-extent-first ordering, budget
+  doubling per pass → 156/173 nets complete (90%) in 93 s. The remaining
+  17 incompletes are congestion cases needing real ripup.
 
 ## Notes / decisions log
 
