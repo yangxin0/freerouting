@@ -201,14 +201,28 @@ pub fn route_net_with_ripup(
     let mut success =
         retry.failed_connections == 0 && board.net_is_completely_connected(net_no);
     if success {
-        // reroute the victims immediately; all must recover
-        for &ripped in &retry.ripped_nets {
-            let r = route_net(board, ripped, request);
+        // Reroute the victims; a victim's reroute may itself rip further
+        // nets (bounded cascade), all of which must recover before the
+        // transaction commits.
+        let mut worklist: Vec<i32> = retry.ripped_nets.clone();
+        let mut reroutes = 0usize;
+        const MAX_CASCADE_REROUTES: usize = 20;
+        while let Some(ripped) = worklist.pop() {
+            if board.net_is_completely_connected(ripped) {
+                continue;
+            }
+            reroutes += 1;
+            if reroutes > MAX_CASCADE_REROUTES {
+                success = false;
+                break;
+            }
+            let r = route_net(board, ripped, &rip_request);
             extra_routed += r.routed_connections;
             if r.failed_connections > 0 || !board.net_is_completely_connected(ripped) {
                 success = false;
                 break;
             }
+            worklist.extend(r.ripped_nets);
         }
     }
     if success {
