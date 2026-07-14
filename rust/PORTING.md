@@ -248,6 +248,11 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 113): layer-aware A* estimate — when the
+  destination has no shape on the queried layer, one via is
+  unavoidable, so via_cost joins the admissible remaining-cost
+  estimate. interf_u 173/173 in 112 s (HALVED from 227 s); coldfire
+  263/278 @ 300 s; NormalPuzzle 72/72 in 16 s; wavefolder 1.19 s.
 - 2026-07-15 (iter 112): coldfire ceiling data — 269/278 at 600 s
   (was 267 before the tree/bbox fixes); all remaining holdouts (GND
   77/77, +3.3V 77/77, /XTAL and 6 signals) route fully ALONE — the

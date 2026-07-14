@@ -115,22 +115,31 @@ pub fn find_connection(
             .get_value(request.clearance_class, request.clearance_class, 0, false)
             .max(0) as f64
             / 2.0;
-    // destination centers for the admissible remaining-distance estimate
-    let dest_centers: Vec<FloatPoint> = board
+    // destination centers (with their layers) for the admissible
+    // remaining-distance estimate; when the destination has no shape on
+    // the queried layer, at least one via is unavoidable and its cost
+    // belongs in the estimate
+    let dest_centers: Vec<(FloatPoint, usize)> = board
         .get_item(request.dest_item)
         .map(|item| {
             item.tile_shapes(&board.padstacks)
-                .into_iter()
-                .map(|(s, _)| s.centre_of_gravity())
+                .iter()
+                .map(|(s, l)| (s.centre_of_gravity(), *l))
                 .collect()
         })
         .unwrap_or_default();
-    let estimate_to_dest = move |p: FloatPoint| -> f64 {
-        dest_centers
+    let via_cost_for_estimate = request.via_cost;
+    let estimate_to_dest = move |p: FloatPoint, layer: usize| -> f64 {
+        let dist = dest_centers
             .iter()
-            .map(|d| p.distance(*d))
+            .map(|(d, _)| p.distance(*d))
             .fold(f64::MAX, f64::min)
-            .min(1e12)
+            .min(1e12);
+        if dest_centers.iter().any(|(_, l)| *l == layer) {
+            dist
+        } else {
+            dist + via_cost_for_estimate
+        }
     };
 
     let mut nodes: Vec<BacktrackNode> = Vec::new();
@@ -312,7 +321,7 @@ fn seed_room(
     offset: f64,
     open: &mut BinaryHeap<Reverse<QueueEntry>>,
     drilled: &mut HashSet<(i32, i32, usize)>,
-    estimate_to_dest: &dyn Fn(FloatPoint) -> f64,
+    estimate_to_dest: &dyn Fn(FloatPoint, usize) -> f64,
 ) {
     let layer = engine.graph.room(room).layer;
     // door expansions
@@ -339,9 +348,10 @@ fn seed_room(
             let ripup_cost =
                 request.ripup_penalty * engine.rippable_items(other).len() as f64;
             let cost = base_cost + location.distance(midpoint) + ripup_cost;
+            let other_layer = engine.graph.room(other).layer;
             open.push(Reverse(QueueEntry {
                 cost,
-                estimate: cost + estimate_to_dest(midpoint),
+                estimate: cost + estimate_to_dest(midpoint, other_layer),
                 step: Step::Door { door, section },
                 room_to_enter: other,
                 parent: Some(parent),
@@ -405,7 +415,7 @@ fn seed_room(
                 let cost = drill_cost + request.via_cost + ripup_cost;
                 open.push(Reverse(QueueEntry {
                     cost,
-                    estimate: cost + estimate_to_dest(drill_point.to_float()),
+                    estimate: cost + estimate_to_dest(drill_point.to_float(), next_layer),
                     step: Step::Drill,
                     room_to_enter: target_room,
                     parent: Some(parent),
