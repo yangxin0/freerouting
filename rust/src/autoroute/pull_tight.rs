@@ -10,6 +10,10 @@ use crate::geometry::planar::{IntPoint, Polyline, TileShape};
 /// Pulls one trace tight by corner elimination. Returns the id of the
 /// (possibly replaced) trace and the number of corners removed.
 pub fn pull_tight_trace(board: &mut BasicBoard, id: ItemId) -> (ItemId, usize) {
+    // pull-tight reinserts the trace; the diagnostic birth of the
+    // ORIGINAL inserting mechanism is preserved (a plain tag here made
+    // every trace look pull-tight-born)
+    let original_birth = board.get_item(id).map(|i| i.base.birth).unwrap_or(0);
     let Some(item) = board.get_item(id).cloned() else {
         return (id, 0);
     };
@@ -65,6 +69,7 @@ pub fn pull_tight_trace(board: &mut BasicBoard, id: ItemId) -> (ItemId, usize) {
         }
     }
 
+    crate::board::basic_board::set_birth_tag(3);
     let new_id = board.insert_trace(
         Polyline::from_int_points(&corners),
         layer,
@@ -72,6 +77,9 @@ pub fn pull_tight_trace(board: &mut BasicBoard, id: ItemId) -> (ItemId, usize) {
         item.base.net_nos.clone(),
         clearance_class,
     );
+    if original_birth != 0 {
+        board.set_birth(new_id, original_birth);
+    }
     (new_id, removed)
 }
 
@@ -106,6 +114,7 @@ pub fn pull_tight_all(board: &mut BasicBoard, max_rounds: usize) -> usize {
 /// corner). Reduces the fragmentation left by junction splitting and
 /// shove cutouts. Returns the number of removed items.
 pub fn combine_all_traces(board: &mut BasicBoard) -> usize {
+    crate::board::basic_board::set_birth_tag(4);
     let before = board.items().count();
     let ids: Vec<crate::board::ItemId> = board
         .items()

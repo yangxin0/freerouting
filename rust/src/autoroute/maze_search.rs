@@ -699,6 +699,7 @@ fn insert_connection(
     request: &MazeRouteRequest,
     result: &MazeSearchResult,
 ) -> Option<Vec<ItemId>> {
+    crate::board::basic_board::set_birth_tag(1);
 
     let mut new_items = Vec::new();
     let mut run: Vec<IntPoint> = Vec::new();

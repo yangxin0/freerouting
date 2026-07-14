@@ -258,6 +258,20 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 125): round five state — birth tags landed (item
+  birth preserved across pull-tight reinsertion after a first
+  false-conviction run) and the verdict is: ALL residual violations
+  are MAZE-born (birth 1 vs 1), and 51/53 are deeper than 2 units —
+  NOT corner-rounding epsilon on exact-touch paths (hypothesis
+  tested and rejected via a depth-classified checker). Eliminated so
+  far: pull-tight, shove substitutes (forbidden zones), snapshots,
+  rounding. Remaining candidates for the maze path: the rip loop's
+  window coverage vs the inserted geometry, via_free's
+  ripup-transparency interplay when the VIA is the survivor, and the
+  no-ripup searches' room fidelity for via-sized obstacles. NEXT
+  TOOL: event-log one violating pair end to end (FR_DEBUG: every
+  rip/shove/insert touching items 211/1132 on display) — one run
+  names the exact step that placed illegal copper.
 - 2026-07-15 (iter 124): round four state — display's 53 violations
   are uniformly EARLY vias (ids 211-388, pass phase) vs LATE traces
   (ids 1100+, late passes/repair) at ~600 um via pads. The rip-radius

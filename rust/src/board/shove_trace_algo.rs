@@ -194,6 +194,7 @@ fn shove_insert(
                 return false;
             }
         }
+        crate::board::basic_board::set_birth_tag(2);
         board.insert_trace(polyline, piece_layer, half_width, net_nos, piece_cl);
     }
     true

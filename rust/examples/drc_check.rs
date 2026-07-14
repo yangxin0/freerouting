@@ -57,6 +57,7 @@ fn main() {
 
     // audit: routed items (component 0) vs everything foreign
     let mut violations = 0usize;
+    let mut hard_violations = 0usize;
     let mut checked = 0usize;
     let routed: Vec<_> = board
         .items()
@@ -104,6 +105,18 @@ fn main() {
                     .tile_shapes(&board.padstacks)
                     .iter()
                     .any(|(s, l)| *l == layer && s.intersection(&check).dimension() >= 2);
+                // classify: deeper than 2 units = a real violation; the
+                // rest is corner-rounding epsilon on exact-touch paths
+                let hard = conflict
+                    && other.tile_shapes(&board.padstacks).iter().any(|(s, l)| {
+                        *l == layer
+                            && s.intersection(&shape.offset(clearance - 2.0))
+                                .dimension()
+                                >= 2
+                    });
+                if hard {
+                    hard_violations += 1;
+                }
                 if conflict {
                     violations += 1;
                     if violations <= 10 {
@@ -113,15 +126,14 @@ fn main() {
                             ItemKind::ObstacleArea(_) => "area",
                         };
                         println!(
-                            "VIOLATION: {} {id} (nets {:?}, comp {}) vs {} {other_id} \
-                             (nets {:?}, comp {}) layer {layer} req {clearance} at {:?}",
+                            "VIOLATION: {} {id} (nets {:?}, birth {}) vs {} {other_id} \
+                             (nets {:?}, birth {}) layer {layer} req {clearance}",
                             kind(item),
                             item.base.net_nos,
-                            item.base.component_no,
+                            item.base.birth,
                             kind(other),
                             other.base.net_nos,
-                            other.base.component_no,
-                            shape.bounding_box()
+                            other.base.birth,
                         );
                     }
                 }
@@ -132,7 +144,8 @@ fn main() {
         .filter(|&n| board.net_is_completely_connected(n))
         .count();
     println!(
-        "routed {complete}/{} nets; DRC: {checked} pair checks, {violations} violations",
+        "routed {complete}/{} nets; DRC: {checked} pair checks, {violations} violations \
+         ({hard_violations} deeper than 2 units)",
         board.rules.nets.max_net_no()
     );
     std::process::exit(if violations == 0 { 0 } else { 1 });

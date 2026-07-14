@@ -35,6 +35,10 @@ pub struct ItemBase {
     /// The component this item belongs to (0 = none).
     pub component_no: i32,
     pub fixed_state: FixedState,
+    /// Which mechanism inserted the item (diagnostics only):
+    /// 0 import/unknown, 1 maze, 2 shove substitute, 3 pull-tight,
+    /// 4 combine, 5 repair.
+    pub birth: u8,
 }
 
 impl ItemBase {
@@ -45,6 +49,7 @@ impl ItemBase {
             clearance_class,
             component_no: 0,
             fixed_state: FixedState::Unfixed,
+            birth: 0,
         }
     }
 

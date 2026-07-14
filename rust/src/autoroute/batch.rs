@@ -407,6 +407,7 @@ fn repair_violations(
             board.remove_item(id);
         }
         let ripup_penalty = request.via_cost.max(20_000.0);
+        crate::board::basic_board::set_birth_tag(5);
         for &net_no in &nets {
             if time_limit.is_some_and(|t| t.limit_exceeded()) {
                 break;
@@ -414,6 +415,7 @@ fn repair_violations(
             let net_request = request_for_net(board, net_no, request);
             route_net_with_ripup(board, net_no, &net_request, ripup_penalty);
         }
+        crate::board::basic_board::set_birth_tag(0);
         let complete_after = all_nets
             .iter()
             .filter(|&&n| board.net_is_completely_connected(n))

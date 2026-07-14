@@ -19,6 +19,17 @@ use crate::rules::BoardRules;
 /// Unique id of an item on the board.
 pub type ItemId = i32;
 
+thread_local! {
+    /// Diagnostic birth tag applied to newly inserted items (see
+    /// [`crate::board::item::ItemBase::birth`]).
+    static BIRTH_TAG: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// Sets the diagnostic birth tag for subsequently inserted items.
+pub fn set_birth_tag(tag: u8) {
+    BIRTH_TAG.with(|t| t.set(tag));
+}
+
 /// One search-tree entry of an item: which shape of which item on which
 /// layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -74,6 +85,9 @@ impl BasicBoard {
     pub fn insert_item(&mut self, mut item: Item) -> ItemId {
         let id = self.new_id_no();
         item.base.id_no = id;
+        if item.base.birth == 0 {
+            item.base.birth = BIRTH_TAG.with(|t| t.get());
+        }
         self.insert_into_search_tree(id, &item);
         self.item_list.insert(id, item);
         id
@@ -514,6 +528,13 @@ impl BasicBoard {
     pub fn set_component_no(&mut self, id: ItemId, component_no: i32) {
         if let Some(item) = self.item_list.get_mut(&id) {
             item.base.component_no = component_no;
+        }
+    }
+
+    /// Sets the diagnostic birth tag of an alive item.
+    pub fn set_birth(&mut self, id: ItemId, birth: u8) {
+        if let Some(item) = self.item_list.get_mut(&id) {
+            item.base.birth = birth;
         }
     }
 
