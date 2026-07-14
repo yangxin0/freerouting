@@ -285,10 +285,8 @@ fn seed_room(
             }));
         }
     }
-    // drill expansion at the entry location (Java: ExpansionDrill via
-    // DrillPages; drilling at entry locations is a documented
-    // simplification)
-    let drill_point = location.round();
+    // drill expansion (Java: ExpansionDrill candidates from DrillPages):
+    // try the entry location plus a grid of sample points within the room
     let Some(padstack) = board.padstacks.get_by_no(request.via_padstack) else {
         return;
     };
@@ -297,30 +295,59 @@ fn seed_room(
     if layer < from || layer > to {
         return;
     }
-    if !via_free(board, request, drill_point) {
-        return;
+    let mut drill_points: Vec<IntPoint> = vec![location.round()];
+    {
+        // grid sampling like drill pages: step derived from the via size
+        let room_shape = engine.graph.room(room).shape.clone();
+        let bb = room_shape.bounding_box();
+        let via_extent = padstack
+            .get_shape(from)
+            .map(|s| s.bounding_box().width().max(1))
+            .unwrap_or(1000);
+        let step = (2 * via_extent).max(4 * request.trace_half_width);
+        let mut count = 0;
+        let mut x = bb.ll.x - bb.ll.x.rem_euclid(step) + step;
+        while x < bb.ur.x && count < 16 {
+            let mut y = bb.ll.y - bb.ll.y.rem_euclid(step) + step;
+            while y < bb.ur.y && count < 16 {
+                let p = IntPoint::new(x, y);
+                if room_shape.contains(&crate::geometry::planar::Point::Int(p)) {
+                    drill_points.push(p);
+                    count += 1;
+                }
+                y += step;
+            }
+            x += step;
+        }
     }
-    for next_layer in from..=to {
-        if next_layer == layer {
+    for drill_point in drill_points {
+        if !via_free(board, request, drill_point) {
             continue;
         }
-        if !drilled.insert((drill_point.x, drill_point.y, next_layer)) {
-            continue;
-        }
-        // find or create the room on the target layer containing the point
-        let target_rooms = engine.rooms_containing(drill_point, next_layer, board);
-        for target_room in target_rooms {
-            let ripup_cost =
-                request.ripup_penalty * engine.rippable_items(target_room).len() as f64;
-            let cost = base_cost + request.via_cost + ripup_cost;
-            open.push(Reverse(QueueEntry {
-                cost,
-                estimate: cost + estimate_to_dest(drill_point.to_float()),
-                step: Step::Drill,
-                room_to_enter: target_room,
-                parent: Some(parent),
-                location: drill_point.to_float(),
-            }));
+        let drill_cost = base_cost + location.distance(drill_point.to_float());
+        for next_layer in from..=to {
+            if next_layer == layer {
+                continue;
+            }
+            if !drilled.insert((drill_point.x, drill_point.y, next_layer)) {
+                continue;
+            }
+            // find or create the room on the target layer containing the
+            // point
+            let target_rooms = engine.rooms_containing(drill_point, next_layer, board);
+            for target_room in target_rooms {
+                let ripup_cost =
+                    request.ripup_penalty * engine.rippable_items(target_room).len() as f64;
+                let cost = drill_cost + request.via_cost + ripup_cost;
+                open.push(Reverse(QueueEntry {
+                    cost,
+                    estimate: cost + estimate_to_dest(drill_point.to_float()),
+                    step: Step::Drill,
+                    room_to_enter: target_room,
+                    parent: Some(parent),
+                    location: drill_point.to_float(),
+                }));
+            }
         }
     }
 }
