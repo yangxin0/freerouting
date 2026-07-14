@@ -4,23 +4,30 @@ Incremental port of the Java sources (`src/main/java/app/freerouting`, 484 files
 to the `rust/` crate. Updated by each `/loop` iteration; the next iteration
 should pick up the first unchecked item below.
 
-## Status (as of iteration 69)
+## Status (as of iteration 100)
 
-- **Working end to end**: DSN import (incl. pre-routed wiring) →
-  expansion-room maze routing with in-search ripup → SES export.
-  `cargo run --release --example route_board [board.dsn] [--strip-wiring]`.
-- **Benchmarks** (WITH clearance compensation since iter 79):
-  wavefolder 31/31, NormalPuzzle 71/72, J2_reference 23/24,
-  interf_u 168/173 @ 300 s cap. Without clearance (iter 78) every
-  fleet board reached 100%; the dip is the price of honest
-  clearance-respecting routing and is to be won back via shove /
-  search improvements. Pre-routed interf_u completes in 1.9 s.
-- ~18k lines of Rust, 174 tests, no warnings; ~70 Java files ported.
-- 6 upstream Java bugs found and documented (see the notes/decisions log
-  and code comments marked "deviation").
-- Main gaps vs Java: shove algorithms, pull-tight optimizer, fanout,
-  faithful SortedRoomNeighbours door algorithm, 45°/90° restricted modes,
-  GUI (out of scope), rules/SES fidelity details.
+- **Working end to end**: DSN import (planes, net classes, back-side /
+  rotated placement, multi-layer) → expansion-room maze routing with
+  clearance compensation, in-search ripup, trace shoving and a
+  transactional restart fallback → pull-tight → SES export. CLI:
+  `cargo run --release -- -de input.dsn [-do out.ses] [-mp passes]
+  [-tl seconds]`.
+- **Fleet** (from scratch, clearance-honest, 300 s cap):
+  8088sbc 104/104 (78 s), pic_programmer 111/111 (0.9 s),
+  wavefolder 31/31 (1.6 s), ecc83 13/13, rpi_splitter 5/5,
+  interf_u 167/173, coldfire-xilinx (4 layers) 244/278,
+  NormalPuzzle 69/72, display-8-digit 29/30, J2_reference 23/24
+  (GND assessed unroutable under the file's own rules: 450 um pad
+  gaps < trace 250 + 2 x clearance 200.1; the fixture's wiring
+  section is empty — the design was never routed).
+- ~21k lines of Rust, 188 tests, no warnings; ~80 Java files ported.
+- 7+ upstream Java bugs found and documented (notes/decisions log and
+  code comments marked "deviation").
+- Main gaps vs Java: ordered forced insertion (full shove recursion /
+  distinct-net stacking), via shoving (ForcedViaAlgo), fanout, the
+  optimizer beyond pull-tight, SortedRoomNeighbours door algorithm,
+  45/90-degree restricted modes, GUI (out of scope per user
+  directive — the CLI is the deliverable).
 
 ## Conventions
 
@@ -243,6 +250,16 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 100): J2_reference GND VERDICT — unroutable under
+  the file's own rules: its class demands 200.1 um clearance and
+  250 um width while the fine-pitch pad gaps are 450 um
+  (250 + 2 x 200.1 = 650 > 450), and the escape pocket is too narrow
+  for the 800 um via; the fixture's wiring section is EMPTY (the
+  design was never routed by anyone). 23/24 is the honest maximum;
+  the shove acceptance focus moves to interf_u's holdouts and
+  display-8-digit's VCC (29/30 since the shape-based shove — small
+  open regression). Status header refreshed with the full fleet
+  snapshot.
 - 2026-07-15 (iter 99): shove core rewritten shape-based after the
   per-victim version fragmented chained victims (duplicate arcs + gaps
   found by test): one ShapeTraceEntries pass per shove shape, one
