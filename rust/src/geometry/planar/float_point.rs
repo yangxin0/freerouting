@@ -54,6 +54,21 @@ impl FloatPoint {
         FloatPoint::new(self.x * factor, self.y * factor)
     }
 
+    /// The point on the ray from this point through `to_point` at distance
+    /// `new_length` from this point.
+    pub fn change_length(self, to_point: FloatPoint, new_length: f64) -> FloatPoint {
+        let dx = to_point.x - self.x;
+        let dy = to_point.y - self.y;
+        if dx == 0.0 && dy == 0.0 {
+            return to_point;
+        }
+        let length = (dx * dx + dy * dy).sqrt();
+        FloatPoint::new(
+            self.x + (dx * new_length) / length,
+            self.y + (dy * new_length) / length,
+        )
+    }
+
     /// The point in the middle between this point and `other`.
     pub fn middle_point(self, other: FloatPoint) -> Self {
         FloatPoint::new((self.x + other.x) / 2.0, (self.y + other.y) / 2.0)
