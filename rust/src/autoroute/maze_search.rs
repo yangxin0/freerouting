@@ -740,8 +740,41 @@ fn insert_connection(
         |board: &mut BasicBoard, run: &mut Vec<IntPoint>, layer: usize, items: &mut Vec<ItemId>| {
             run.dedup();
             if run.len() > 1 {
+                let polyline = Polyline::from_int_points(run);
+                // birth-site validation: the post-rip board must leave
+                // every inserted segment its full clearance
+                if std::env::var_os("FR_DEBUG_MAZE").is_some() {
+                    for seg in polyline.offset_shapes(request.trace_half_width) {
+                        let cl = board
+                            .rules
+                            .clearance_matrix
+                            .get_value(request.clearance_class, request.clearance_class, layer, false)
+                            .max(0) as f64;
+                        let check = seg.offset(cl - 2.0);
+                        for id in board.overlapping_items(&check, Some(layer)) {
+                            let Some(item) = board.get_item(id) else { continue };
+                            if item.base.contains_net(request.net_no) {
+                                continue;
+                            }
+                            if let crate::board::ItemKind::ObstacleArea(a) = &item.kind {
+                                if a.is_conduction {
+                                    continue;
+                                }
+                            }
+                            eprintln!(
+                                "ILLEGAL INSERT net {} layer {layer} ripup={} \
+                                 blocked by item {id} (nets {:?}, birth {}) run {:?}",
+                                request.net_no,
+                                request.ripup_penalty > 0.0,
+                                item.base.net_nos,
+                                item.base.birth,
+                                run
+                            );
+                        }
+                    }
+                }
                 items.push(board.insert_trace(
-                    Polyline::from_int_points(run),
+                    polyline,
                     layer,
                     request.trace_half_width,
                     vec![request.net_no],

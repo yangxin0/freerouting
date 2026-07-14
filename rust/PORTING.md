@@ -258,6 +258,19 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 129): BIRTH-SITE VALIDATOR LANDED — insert-time
+  clearance checking under FR_DEBUG_MAZE caught 70 illegal inserts on
+  display including the exact studied case (net 11, ripup=false,
+  blocked by via 185, full corner list printed). The convexity
+  argument closes the logic: consecutive maze corners lie on one
+  room's boundary, a convex room that excluded via+margin cannot host
+  a segment passing within the margin — so the ROOM COMPLETION MISSED
+  THE VIA as an obstacle for that search. Remaining candidate
+  mechanisms: the obstacle-collection query (uninflated tree shapes
+  vs margin-inflated restrain — an obstacle near but not overlapping
+  the query shape is missed), or a stale-cache path. NEXT: log the
+  obstacle list of the room owning the offending segment (region
+  instrumentation in complete_shape_with_ripup) — one run decides.
 - 2026-07-15 (iter 128): round eight state — full picture of the
   display case: pin 65 (net 8, imported) carries via 185 (net 8's
   own via ON its pad, legal) whose 600 um pad POKES BEYOND the pin
