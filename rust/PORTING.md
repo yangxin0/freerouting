@@ -243,6 +243,11 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 89): bounding-box pre-filters in the three restrain
+  / door loops (obstacle x piece, piece x existing room, door touch
+  tests) skip the exact simplex intersections for separated pairs.
+  wavefolder 1.6 s (was 2.2 s), interf_u 167/173 (+1), coldfire
+  246/278 (+5) — more connections routed inside the same 300 s cap.
 - 2026-07-15 (iter 88): Line::side_of_intersection's exact fallback
   now computes in i128 instead of BigInt rationals (intersection
   numerators < 2^82, side determinant < 2^111 for i32 coordinates);

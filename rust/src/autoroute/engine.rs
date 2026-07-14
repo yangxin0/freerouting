@@ -124,14 +124,19 @@ impl AutorouteEngine {
             self.trace_clearance_class,
         );
         // restrain against the existing complete rooms (they must not
-        // overlap)
+        // overlap); bounding boxes prune the exact overlap tests
         for &existing in &self.complete_rooms {
             if self.graph.room(existing).layer != room.layer {
                 continue;
             }
             let existing_shape = self.graph.room(existing).shape.clone();
+            let existing_bbox = existing_shape.bounding_box();
             let mut new_pieces = Vec::new();
             for piece in pieces {
+                if !piece.shape.bounding_box().intersects(existing_bbox) {
+                    new_pieces.push(piece);
+                    continue;
+                }
                 let intersection = piece.shape.intersection(&existing_shape);
                 if intersection.dimension() == 2 {
                     new_pieces.extend(restrain_shape(&piece, &existing_shape));
@@ -150,14 +155,18 @@ impl AutorouteEngine {
             let room_id =
                 self.graph
                     .add_room(piece.shape.clone(), piece.layer, RoomKind::CompleteFreeSpace);
-            // doors to touching complete rooms
+            // doors to touching complete rooms (bounding boxes prune the
+            // exact touch tests)
+            let piece_bbox = piece.shape.bounding_box();
             for &existing in &self.complete_rooms {
                 if self.graph.room(existing).layer != piece.layer {
                     continue;
                 }
-                let dim = self
-                    .graph
-                    .room(existing)
+                let existing_room = self.graph.room(existing);
+                if !existing_room.shape.bounding_box().intersects(piece_bbox) {
+                    continue;
+                }
+                let dim = existing_room
                     .shape
                     .intersection(&piece.shape)
                     .dimension();

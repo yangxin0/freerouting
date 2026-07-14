@@ -102,8 +102,14 @@ pub fn complete_shape_with_ripup(
     }
 
     for (obstacle_id, obstacle_shape) in &obstacles {
+        // cheap bounding-box separation test before the exact overlap
+        let obstacle_bbox = obstacle_shape.bounding_box();
         let mut new_result = Vec::new();
         for curr_room in result {
+            if !curr_room.shape.bounding_box().intersects(obstacle_bbox) {
+                new_result.push(curr_room);
+                continue;
+            }
             let intersection = curr_room.shape.intersection(obstacle_shape);
             if intersection.dimension() == 2 {
                 new_result.extend(restrain_shape(&curr_room, obstacle_shape));
