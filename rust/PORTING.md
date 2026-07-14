@@ -258,6 +258,20 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 121): round-two lead — the residual violations are
+  ROUTED-vs-ROUTED pairs whose ids mix two insertion eras (600-800 =
+  pass phase vs 1200-1350 = restart phase) even though the restart
+  claims a rollback on non-improvement. Prime suspect: NESTED
+  SNAPSHOT LEAKAGE — shove_aside runs generate_snapshot/pop_snapshot
+  INSIDE route_net_with_ripup's and the restart's snapshots;
+  pop_snapshot splices same-level undo versions, and a splice bug
+  could let restart-phase items survive the outer undo (two eras of
+  copper coexisting = the exact overlap pattern seen). NEXT: a unit
+  test reproducing nested generate/pop/undo with insertions at each
+  level, asserting exact restoration; then re-audit. Alternative
+  suspects if that passes: multi-piece shove inserts not cross-checked
+  against each other (currently covered by ordered recursion — verify
+  with a test), pad-entry proximity.
 - 2026-07-15 (iter 120): CLEARANCE CORRECTNESS CAMPAIGN, round one —
   three leaks fixed: (1) room margin now trace half width + FULL
   clearance (obstacles carry the whole margin; the door shrink is
