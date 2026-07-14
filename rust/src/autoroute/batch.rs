@@ -21,6 +21,9 @@ pub struct BatchRequest {
     pub clearance_class: usize,
     pub via_padstack: usize,
     pub via_cost: f64,
+    /// Expansion budget per connection (see
+    /// `MazeRouteRequest::max_expansions`).
+    pub max_expansions: usize,
 }
 
 /// The connected components of the connectable items of `net_no`.
@@ -139,6 +142,7 @@ pub fn route_net(board: &mut BasicBoard, net_no: i32, request: &BatchRequest) ->
             clearance_class: request.clearance_class,
             via_padstack: request.via_padstack,
             via_cost: request.via_cost,
+            max_expansions: request.max_expansions,
         };
         if maze_route(board, &maze_request).is_some() {
             result.routed_connections += 1;
@@ -197,6 +201,7 @@ mod tests {
             clearance_class: 1,
             via_padstack: 1,
             via_cost: 5000.0,
+            max_expansions: 100_000,
         }
     }
 

@@ -78,6 +78,9 @@ pub struct MazeRouteRequest {
     pub via_padstack: usize,
     /// Additional cost of a layer change in board units.
     pub via_cost: f64,
+    /// Budget for the expansion: the maximum number of queue pops before
+    /// the search gives up (Java bounds passes with a TimeLimit instead).
+    pub max_expansions: usize,
 }
 
 /// Runs the maze expansion from the start item towards the destination
@@ -129,7 +132,12 @@ pub fn find_connection(
         }
     }
 
+    let mut expansions = 0usize;
     while let Some(Reverse(entry)) = open.pop() {
+        expansions += 1;
+        if expansions > request.max_expansions {
+            return None; // budget exhausted
+        }
         // occupy the step
         match entry.step {
             Step::Door { door, section } => {
@@ -418,6 +426,7 @@ mod tests {
             clearance_class: 1,
             via_padstack: 1,
             via_cost: 5000.0,
+            max_expansions: 100_000,
         }
     }
 
