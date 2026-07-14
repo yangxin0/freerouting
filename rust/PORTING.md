@@ -243,6 +243,18 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 99): shove core rewritten shape-based after the
+  per-victim version fragmented chained victims (duplicate arcs + gaps
+  found by test): one ShapeTraceEntries pass per shove shape, one
+  victim net family per call (Java's ordered forced insertion — each
+  substitute pushing earlier ones outward — is needed for distinct-net
+  stacking and recursion; attempts to approximate it with per-segment
+  recursion ping-ponged between adjacent substitutes and were
+  refused). Substitutes are verified free BEFORE the board is touched;
+  non-trace victims (vias, pins, keepouts) stay as blockers and the
+  maze rips whatever remains after the shove. Fleet unchanged
+  (interf_u 167/173, wavefolder 31/31); connection-count profiles
+  vary between shove variants but completion is identical.
 - 2026-07-15 (iter 98): shove wired into the maze rip phase — trace
   victims in the connection corridor are shoved aside first (staying
   connected; no victim reroute) and only ripped when the shove is
