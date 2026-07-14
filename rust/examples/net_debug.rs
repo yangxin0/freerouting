@@ -1,6 +1,7 @@
 //! Diagnostic: import a DSN and dump the items of one net (or all nets'
 //! item counts) with shapes and layers.
 
+use freerouting::autoroute::{route_net, BatchRequest};
 use freerouting::io::import_dsn;
 
 fn main() {
@@ -11,7 +12,53 @@ fn main() {
         Some(pos) => format!("{})", &content[..pos]),
         None => content,
     };
-    let board = import_dsn(&content).expect("import failed");
+    let mut board = import_dsn(&content).expect("import failed");
+
+    // --route: try routing the named net alone on the fresh board
+    if std::env::args().any(|a| a == "--route") {
+        let name = net_name.clone().expect("--route needs a net name");
+        let net_no = board
+            .rules
+            .nets
+            .get_by_name(&name)
+            .first()
+            .map(|n| n.net_number)
+            .expect("net not found");
+        let all_layers = board.layer_structure.layer_count().saturating_sub(1);
+        let via_padstack = (1..=board.padstacks.count())
+            .find(|no| {
+                board
+                    .padstacks
+                    .get_by_no(*no)
+                    .is_some_and(|p| p.name.starts_with("Via"))
+            })
+            .or_else(|| {
+                (1..=board.padstacks.count()).find(|no| {
+                    board
+                        .padstacks
+                        .get_by_no(*no)
+                        .is_some_and(|p| p.from_layer() == 0 && p.to_layer() == all_layers)
+                })
+            })
+            .unwrap_or(0);
+        let request = BatchRequest {
+            trace_half_width: board.rules.get_min_trace_half_width().max(500),
+            clearance_class: 1,
+            via_padstack,
+            via_cost: 50_000.0,
+            max_expansions: 100_000,
+            ripup_penalty: 0.0,
+            deadline: None,
+        };
+        let result = route_net(&mut board, net_no, &request);
+        println!(
+            "route {name} alone: {} routed, {} failed, connected={}",
+            result.routed_connections,
+            result.failed_connections,
+            board.net_is_completely_connected(net_no)
+        );
+        return;
+    }
 
     match net_name {
         None => {

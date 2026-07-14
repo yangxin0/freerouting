@@ -195,8 +195,17 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 ## Open issues
 
 - Issue153-wavefolder routes only 17/31 in 60 s: 14 failures on
-  transistor pin nets (Q1–Q6) and power. Not the pad-rotation bug
-  (unchanged after the fix); needs its own investigation.
+  transistor pin nets (Q1–Q6) and power. Ruled out so far (results
+  bit-identical after each fix): pad rotation, oval-pad bounding-box
+  over-approximation (ovals now import as octagon unions), back-side
+  shape mirroring/layer flip (now implemented). A failing net fails
+  even ALONE on the empty board with valid start rooms on both ends
+  (search exhausts ~30k expansions), so the target is unreachable in
+  the room graph. TO-92 pads are 1100x1800 um at 1270 um pitch
+  (170 um gaps); suspect the door-section shrink by trace half-width
+  makes every door around the tight pad column unusably narrow —
+  Java expands into TARGET doors without the width shrink
+  (TargetItemExpansionDoor). Next: port that special case.
 - Issue026-J2_reference GND (22 pins) still incomplete after the
   rotation fix.
 - Non-quarter-turn component rotations still only rotate pin offsets,

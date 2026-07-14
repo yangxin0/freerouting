@@ -210,6 +210,28 @@ impl TileShape {
         }
     }
 
+    /// Mirrors this shape at the vertical line through `pole`
+    /// (x -> 2*pole.x - x). Mirroring flips the orientation, so border
+    /// lines swap their defining points to keep the interior on the left.
+    pub fn mirror_vertical(&self, pole: IntPoint) -> TileShape {
+        let mirror = |p: IntPoint| IntPoint::new(2 * pole.x - p.x, p.y);
+        match self {
+            TileShape::Box(b) => TileShape::Box(IntBox::new(
+                IntPoint::new(2 * pole.x - b.ur.x, b.ll.y),
+                IntPoint::new(2 * pole.x - b.ll.x, b.ur.y),
+            )),
+            other => {
+                let lines: Vec<Line> = other
+                    .to_simplex()
+                    .border_lines()
+                    .iter()
+                    .map(|l| Line::new(mirror(l.b), mirror(l.a)))
+                    .collect();
+                TileShape::Simplex(Simplex::new(lines))
+            }
+        }
+    }
+
     /// Turns this shape by `factor` times 90 degree around `pole`
     /// (Java: `TileShape.turn_90_degree`).
     pub fn turn_90_degree(&self, factor: i32, pole: IntPoint) -> TileShape {

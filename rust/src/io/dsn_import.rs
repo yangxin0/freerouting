@@ -4,16 +4,16 @@
 //! with layers, padstacks, placed component pins and nets.
 //!
 //! Simplifications (documented): pad shapes are converted to boxes /
-//! bounding octagons (circles/ovals), back-side placement mirrors pin
-//! offsets at the y axis without padstack layer mirroring, and wiring /
-//! keepout import follows later.
+//! bounding octagons (circles/ovals); back-side placement mirrors pin
+//! offsets and pad shapes at the y axis and flips the shape layers;
+//! non-quarter-turn rotations only rotate pin offsets, not pad shapes.
 
 use std::collections::HashMap;
 
 use crate::board::basic_board::BasicBoard;
 use crate::board::{Layer, LayerStructure};
 use crate::core::Padstacks;
-use crate::geometry::planar::{Circle, IntBox, IntPoint, TileShape};
+use crate::geometry::planar::{Circle, IntBox, IntOctagon, IntPoint, TileShape};
 use crate::io::dsn::{parse_dsn, SExpr};
 use crate::rules::{BoardRules, ClearanceMatrix};
 
@@ -198,8 +198,10 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
     }
 
     // placement: instantiate the image pins per component place
-    // cache of 90-degree-rotated padstack variants per (padstack, quadrant)
-    let mut rotated_padstacks: HashMap<(usize, i32), usize> = HashMap::new();
+    // cache of placed padstack variants per (padstack, quadrant, side):
+    // quarter turns rotate the shapes, back-side placement additionally
+    // mirrors them at the vertical axis and flips their layers
+    let mut placed_padstacks: HashMap<(usize, i32, bool), usize> = HashMap::new();
     for placement in pcb.children("placement") {
         for component in placement.children("component") {
             let image_name = component.arg().unwrap_or_default();
@@ -233,29 +235,43 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
                     let Some(&padstack_no) = padstack_nos.get(&pin.padstack_name) else {
                         continue;
                     };
-                    let padstack_no = if quarter != 0 {
-                        match rotated_padstacks.get(&(padstack_no, quarter)) {
+                    let padstack_no = if quarter != 0 || !on_front {
+                        match placed_padstacks.get(&(padstack_no, quarter, on_front)) {
                             Some(&no) => no,
                             None => {
+                                let origin = IntPoint::new(0, 0);
                                 let (name, shapes, attach) = {
                                     let p = board.padstacks.get_by_no(padstack_no).unwrap();
+                                    let n = p.board_layer_count();
+                                    let mut shapes: Vec<Option<TileShape>> = vec![None; n];
+                                    for l in 0..n {
+                                        let Some(s) = p.get_shape(l) else {
+                                            continue;
+                                        };
+                                        let s = s.turn_90_degree(quarter, origin);
+                                        // mirror the shape and flip its
+                                        // layer for the back side, like
+                                        // the pin offsets
+                                        let (s, target) = if on_front {
+                                            (s, l)
+                                        } else {
+                                            (s.mirror_vertical(origin), n - 1 - l)
+                                        };
+                                        shapes[target] = Some(s);
+                                    }
                                     (
-                                        format!("{}::rot{}", p.name, quarter * 90),
-                                        (0..p.board_layer_count())
-                                            .map(|l| {
-                                                p.get_shape(l).map(|s| {
-                                                    s.turn_90_degree(
-                                                        quarter,
-                                                        IntPoint::new(0, 0),
-                                                    )
-                                                })
-                                            })
-                                            .collect::<Vec<_>>(),
+                                        format!(
+                                            "{}::rot{}{}",
+                                            p.name,
+                                            quarter * 90,
+                                            if on_front { "" } else { "::back" }
+                                        ),
+                                        shapes,
                                         p.attach_allowed,
                                     )
                                 };
                                 let no = board.padstacks.add(name, shapes, attach, false);
-                                rotated_padstacks.insert((padstack_no, quarter), no);
+                                placed_padstacks.insert((padstack_no, quarter, on_front), no);
                                 no
                             }
                         }
@@ -449,24 +465,27 @@ fn read_pad_shape(node: &SExpr, scale: &dyn Fn(f64) -> i32) -> Option<(TileShape
             scale(nums[1].max(nums[3])),
         ))
     } else if kind.eq_ignore_ascii_case("path") {
-        // (path LAYER width x1 y1 x2 y2 ...): an oval; approximated by
-        // the bounding box of the path offset by half the width
+        // (path LAYER width x1 y1 x2 y2 ...): an oval / thick segment,
+        // approximated by the union of the corner circles' bounding
+        // octagons. (A plain bounding box kept the sharp corners and
+        // strangled the routing corridors between neighbouring pads.)
         if nums.len() < 5 {
             return None;
         }
-        let half_width = nums[0] / 2.0;
-        let xs: Vec<f64> = nums[1..].iter().step_by(2).copied().collect();
-        let ys: Vec<f64> = nums[2..].iter().step_by(2).copied().collect();
-        let min_x = xs.iter().cloned().fold(f64::MAX, f64::min) - half_width;
-        let max_x = xs.iter().cloned().fold(f64::MIN, f64::max) + half_width;
-        let min_y = ys.iter().cloned().fold(f64::MAX, f64::min) - half_width;
-        let max_y = ys.iter().cloned().fold(f64::MIN, f64::max) + half_width;
-        TileShape::Box(IntBox::from_coords(
-            scale(min_x),
-            scale(min_y),
-            scale(max_x),
-            scale(max_y),
-        ))
+        let radius = nums[0] / 2.0;
+        let mut oct: Option<IntOctagon> = None;
+        for pair in nums[1..].chunks_exact(2) {
+            let c = Circle::new(
+                IntPoint::new(scale(pair[0]), scale(pair[1])),
+                scale(radius).max(1),
+            );
+            let o = c.bounding_octagon();
+            oct = Some(match oct {
+                Some(prev) => prev.union(o),
+                None => o,
+            });
+        }
+        TileShape::Octagon(oct?)
     } else if kind.eq_ignore_ascii_case("polygon") {
         // (polygon LAYER aperture x1 y1 ...): bounding box approximation
         if nums.len() < 5 {
