@@ -16,6 +16,7 @@ pub struct BatchResult {
 }
 
 /// Parameters for a batch pass.
+#[derive(Debug, Clone, Copy)]
 pub struct BatchRequest {
     pub trace_half_width: i32,
     pub clearance_class: usize,
@@ -165,6 +166,61 @@ pub fn batch_route(board: &mut BasicBoard, request: &BatchRequest) -> BatchResul
         result.failed_connections += net_result.failed_connections;
     }
     result
+}
+
+/// The half perimeter of the bounding box of a net's connectable items,
+/// used to order nets shortest-first.
+fn net_extent(board: &BasicBoard, net_no: i32) -> i64 {
+    let mut bb = crate::geometry::planar::IntBox::EMPTY;
+    for (_, item) in board.items() {
+        if item.base.contains_net(net_no) && item.is_connectable() {
+            bb = bb.union(item.bounding_box(&board.padstacks));
+        }
+    }
+    if bb.is_empty() {
+        0
+    } else {
+        bb.width() as i64 + bb.height() as i64
+    }
+}
+
+/// Routes all nets over several passes: pass 1 in shortest-net-first
+/// order, later passes retrying the incomplete nets with a doubled
+/// expansion budget each time (a simplified stand-in for Java's
+/// ripup-cost pass escalation). Returns the result of the final state.
+pub fn batch_route_passes(
+    board: &mut BasicBoard,
+    request: &BatchRequest,
+    passes: usize,
+) -> BatchResult {
+    let mut net_nos: Vec<i32> = (1..=board.rules.nets.max_net_no()).collect();
+    net_nos.sort_by_key(|&n| net_extent(board, n));
+
+    let mut total = BatchResult::default();
+    let mut budget = request.max_expansions;
+    for pass in 0..passes.max(1) {
+        let pass_request = BatchRequest {
+            max_expansions: budget,
+            ..*request
+        };
+        let mut failed_this_pass = 0usize;
+        for &net_no in &net_nos {
+            if board.net_is_completely_connected(net_no) {
+                continue;
+            }
+            let result = route_net(board, net_no, &pass_request);
+            total.routed_connections += result.routed_connections;
+            failed_this_pass += result.failed_connections;
+        }
+        if failed_this_pass == 0 {
+            break;
+        }
+        if pass + 1 == passes {
+            total.failed_connections += failed_this_pass;
+        }
+        budget = budget.saturating_mul(2);
+    }
+    total
 }
 
 #[cfg(test)]

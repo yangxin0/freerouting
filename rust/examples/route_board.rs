@@ -2,7 +2,7 @@
 //!
 //! Usage: cargo run --release --example route_board [path/to/board.dsn]
 
-use freerouting::autoroute::{route_net, BatchRequest};
+use freerouting::autoroute::{batch_route_passes, BatchRequest};
 use freerouting::io::{export_ses, import_dsn};
 use std::time::Instant;
 
@@ -41,15 +41,11 @@ fn main() {
     };
 
     let t1 = Instant::now();
-    let mut routed = 0usize;
-    let mut failed = 0usize;
+    let net_count = board.rules.nets.max_net_no();
+    let result = batch_route_passes(&mut board, &request, 3);
     let mut complete_nets = 0usize;
     let mut incomplete_nets = Vec::new();
-    let net_count = board.rules.nets.max_net_no();
     for net_no in 1..=net_count {
-        let result = route_net(&mut board, net_no, &request);
-        routed += result.routed_connections;
-        failed += result.failed_connections;
         if board.net_is_completely_connected(net_no) {
             complete_nets += 1;
         } else {
@@ -65,8 +61,8 @@ fn main() {
     println!(
         "routing finished in {:?}: {} connections routed, {} failed; {}/{} nets complete",
         t1.elapsed(),
-        routed,
-        failed,
+        result.routed_connections,
+        result.failed_connections,
         complete_nets,
         net_count
     );
