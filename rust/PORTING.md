@@ -243,6 +243,17 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 97): shove arc piece 4: depth-1 shove_aside ported
+  (board/shove_trace_algo.rs) — cuts a single crossing trace at the
+  shove shape and inserts the ShapeTraceEntries substitutes, but only
+  after verifying every substitute is free (fall back to ripup
+  otherwise; board untouched on failure). Connectivity is exact by
+  construction: the cut stubs and the substitute share corners derived
+  from identical line pairs, so the exact-endpoint trace contacts
+  hold (tested: the shoved net stays one connected set and leaves the
+  shove shape). Recursive shoving and via shoving still open. Next:
+  wire shove_aside into the maze rip phase (prefer shove over rip for
+  trace victims) and benchmark.
 - 2026-07-15 (iter 96): shove arc piece 3c: the full ShapeTraceEntries
   bookkeeping ported — store_items (classify vias/pins/traces/areas,
   collect shove vias, reject unshovable obstacles), store_trace
