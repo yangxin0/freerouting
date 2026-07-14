@@ -25,12 +25,16 @@ use crate::geometry::planar::TileShape;
 /// blocks them, directed by the from-side derived from the substitute
 /// geometry, before being inserted. Returns true when the shape is
 /// cleared; false leaves the board unchanged (transactional).
+/// `forbidden` are the not-yet-inserted shapes of the pending connection
+/// (all corridor segments and via footprints, clearance-inflated): the
+/// substitutes must avoid them, since the board cannot show them yet.
 pub fn shove_aside(
     board: &mut BasicBoard,
     shove_shape: &TileShape,
     layer: usize,
     own_net_nos: &[i32],
     cl_class: usize,
+    forbidden: &[(TileShape, usize)],
 ) -> bool {
     board.generate_snapshot();
     if shove_insert(
@@ -40,6 +44,7 @@ pub fn shove_aside(
         layer,
         own_net_nos,
         cl_class,
+        forbidden,
         4,
     ) {
         board.pop_snapshot();
@@ -60,6 +65,7 @@ fn shove_insert(
     layer: usize,
     own_net_nos: &[i32],
     cl_class: usize,
+    forbidden: &[(TileShape, usize)],
     depth: usize,
 ) -> bool {
     if trace_shape.is_empty() {
@@ -152,10 +158,20 @@ fn shove_insert(
         if polyline.is_empty() || polyline.corner_count() < 2 {
             continue;
         }
+        // the substitute must avoid the pending connection's own shapes
+        // (they are not on the board yet)
+        let segment_shapes = polyline.offset_shapes(half_width);
+        let hits_forbidden = segment_shapes.iter().any(|seg| {
+            forbidden.iter().any(|(f, fl)| {
+                *fl == piece_layer && f.intersection(seg).dimension() >= 2
+            })
+        });
+        if hits_forbidden {
+            return false;
+        }
         // clear the way for this substitute segment by segment, with the
         // from side derived from the substitute geometry (directs the
         // inner shoves away instead of ping-ponging back)
-        let segment_shapes = polyline.offset_shapes(half_width);
         for (i, segment_shape) in segment_shapes.iter().enumerate() {
             let calc = crate::board::CalcShapeAndFromSide::new(
                 &polyline,
@@ -172,6 +188,7 @@ fn shove_insert(
                 piece_layer,
                 &net_nos,
                 piece_cl,
+                forbidden,
                 depth - 1,
             ) {
                 return false;
@@ -207,7 +224,7 @@ mod tests {
         ]);
         let victim = board.insert_trace(polyline, 0, 100, vec![2], 1);
         let shape = TileShape::Box(IntBox::from_coords(-1000, -1000, 1000, 1000));
-        assert!(shove_aside(&mut board, &shape, 0, &[1], 1));
+        assert!(shove_aside(&mut board, &shape, 0, &[1], 1, &[]));
         // the victim was cut; the substitute keeps net 2 connected around
         // the shape: from one stub end to the other via trace contacts
         let net_items: Vec<ItemId> = board
@@ -254,7 +271,7 @@ mod tests {
         let shape = TileShape::Box(IntBox::from_coords(-1000, -1000, 1000, 1000));
         // one net family is shoved per call (distinct-net stacking needs
         // ordered forced insertion, still open); both nets stay connected
-        let _ = shove_aside(&mut board, &shape, 0, &[1], 1);
+        let _ = shove_aside(&mut board, &shape, 0, &[1], 1, &[]);
         for net in [2, 3] {
             let items: Vec<ItemId> = board
                 .items()
@@ -290,7 +307,7 @@ mod tests {
             1,
         );
         let shape = TileShape::Box(IntBox::from_coords(-1000, -1000, 1000, 1000));
-        let _ = shove_aside(&mut board, &shape, 0, &[1], 1);
+        let _ = shove_aside(&mut board, &shape, 0, &[1], 1, &[]);
         for net in [2, 3] {
             let items: Vec<ItemId> = board
                 .items()
@@ -324,7 +341,7 @@ mod tests {
         }
         let shape = TileShape::Box(IntBox::from_coords(-1000, -1000, 1000, 1000));
         let items_before = board.items().count();
-        assert!(!shove_aside(&mut board, &shape, 0, &[1], 1));
+        assert!(!shove_aside(&mut board, &shape, 0, &[1], 1, &[]));
         assert_eq!(board.items().count(), items_before, "board unchanged");
     }
 }

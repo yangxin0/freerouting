@@ -967,6 +967,41 @@ mod tests {
     }
 
     #[test]
+    fn nested_snapshot_pop_then_undo_restores_exactly() {
+        // the restart fallback snapshots the board, and shove_aside runs
+        // its own snapshot/pop INSIDE that scope: after the inner commit
+        // and the outer undo, the board must be exactly the pre-restart
+        // state (leaked inner items were the round-two DRC suspect)
+        let mut board = test_board();
+        let a = board.insert_trace(trace_polyline(&[(0, 0), (1000, 0)]), 0, 100, vec![1], 1);
+
+        board.generate_snapshot(); // restart level
+        let b = board.insert_trace(trace_polyline(&[(0, 500), (1000, 500)]), 0, 100, vec![2], 1);
+        board.remove_item(a);
+
+        board.generate_snapshot(); // shove level
+        let c = board.insert_trace(trace_polyline(&[(0, 900), (1000, 900)]), 0, 100, vec![3], 1);
+        board.remove_item(b);
+        board.pop_snapshot(); // shove commits into the restart level
+
+        assert!(board.get_item(c).is_some());
+        assert!(board.get_item(b).is_none());
+
+        board.undo(); // restart rolls back
+
+        assert!(board.get_item(a).is_some(), "pre-restart item lost");
+        assert!(board.get_item(b).is_none(), "restart item leaked");
+        assert!(board.get_item(c).is_none(), "inner (shove) item leaked");
+        assert_eq!(board.items().count(), 1, "exactly the original item");
+        // the search tree must agree with the item list
+        let hits = board.overlapping_items(
+            &TileShape::Box(IntBox::from_coords(-100, -1100, 1100, 1100)),
+            Some(0),
+        );
+        assert_eq!(hits, vec![a], "search tree out of sync after undo");
+    }
+
+    #[test]
     fn combine_traces_at_simple_joints() {
         let mut board = test_board();
         // a chain of three traces sharing endpoints

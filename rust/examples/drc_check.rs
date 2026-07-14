@@ -107,10 +107,21 @@ fn main() {
                 if conflict {
                     violations += 1;
                     if violations <= 10 {
+                        let kind = |it: &freerouting::board::Item| match &it.kind {
+                            ItemKind::Via(_) => "via",
+                            ItemKind::PolylineTrace(_) => "trace",
+                            ItemKind::ObstacleArea(_) => "area",
+                        };
                         println!(
-                            "VIOLATION: item {id} (nets {:?}) vs item {other_id} \
-                             (nets {:?}) on layer {layer}, required {clearance}",
-                            item.base.net_nos, other.base.net_nos
+                            "VIOLATION: {} {id} (nets {:?}, comp {}) vs {} {other_id} \
+                             (nets {:?}, comp {}) layer {layer} req {clearance} at {:?}",
+                            kind(item),
+                            item.base.net_nos,
+                            item.base.component_no,
+                            kind(other),
+                            other.base.net_nos,
+                            other.base.component_no,
+                            shape.bounding_box()
                         );
                     }
                 }

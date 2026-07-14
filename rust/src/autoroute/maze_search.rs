@@ -555,6 +555,38 @@ pub fn maze_route_with_engine(
     // connection geometry before inserting it
     let mut ripped_nets: Vec<i32> = Vec::new();
     if allow_ripup {
+        // the pending connection's own shapes (not yet on the board):
+        // shove substitutes must avoid them
+        let mut forbidden: Vec<(TileShape, usize)> = Vec::new();
+        for window in result.corners.windows(2) {
+            let ((a, layer_a), (b, layer_b)) = (window[0], window[1]);
+            let (pa, pb) = (a.round(), b.round());
+            if layer_a == layer_b && pa != pb {
+                let max_cl = board.rules.clearance_matrix.max_value(layer_a).max(0);
+                if let Some(shape) = Polyline::from_two_points(pa, pb)
+                    .offset_shape(request.trace_half_width + max_cl + 1, 0)
+                {
+                    forbidden.push((shape, layer_a));
+                }
+            } else if layer_a != layer_b {
+                if let Some(padstack) = board.padstacks.get_by_no(request.via_padstack) {
+                    for layer in padstack.from_layer()..=padstack.to_layer() {
+                        if let Some(shape) = padstack.get_shape(layer) {
+                            let max_cl =
+                                board.rules.clearance_matrix.max_value(layer).max(0) as f64;
+                            forbidden.push((
+                                shape
+                                    .translate_by(crate::geometry::planar::IntVector::new(
+                                        pa.x, pa.y,
+                                    ))
+                                    .offset(max_cl + 1.0),
+                                layer,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         let mut to_rip: Vec<ItemId> = Vec::new();
         for window in result.corners.windows(2) {
             let ((a, layer_a), (b, layer_b)) = (window[0], window[1]);
@@ -582,6 +614,7 @@ pub fn maze_route_with_engine(
                         layer_a,
                         &[request.net_no],
                         request.clearance_class,
+                        &forbidden,
                     );
                     for id in board.overlapping_items(&shape, Some(layer_a)) {
                         if board.get_item(id).is_some_and(|item| {

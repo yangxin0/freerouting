@@ -258,6 +258,20 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 122): round two landed — (a) nested-snapshot
+  leakage RULED OUT by a new unit test (generate/pop/undo at shove
+  nesting depth restores exactly, search tree in sync; the suspicious
+  id ranges were innocently from combine/pull-tight reinsertion);
+  (b) the real hole, found by printing violation geometry: SHOVE
+  SUBSTITUTES CANNOT SEE THE PENDING CONNECTION — they were verified
+  against the board before the new traces/vias were inserted and
+  routed straight through the incoming copper. shove_aside now takes
+  the pending connection's clearance-inflated shapes as forbidden
+  zones. Violations: wavefolder 21 (unchanged — separate source),
+  display 93→53, J2 17→11 (campaign total from 639/322/222).
+  Round three: wavefolder's 21 (via-vs-trace pairs — suspect
+  via_free's ripup transparency vs the actual rip/shove coverage),
+  then fleet re-benchmark for honest numbers.
 - 2026-07-15 (iter 121): round-two lead — the residual violations are
   ROUTED-vs-ROUTED pairs whose ids mix two insertion eras (600-800 =
   pass phase vs 1200-1350 = restart phase) even though the restart
