@@ -48,6 +48,16 @@ fn net_components(board: &BasicBoard, net_no: i32) -> Vec<Vec<ItemId>> {
             continue;
         }
         let component = board.get_connected_set(item, net_no);
+        if std::env::var_os("FR_DEBUG_MAZE").is_some() {
+            for member in &component {
+                if assigned.contains(member) {
+                    eprintln!(
+                        "NET {net_no}: item {member:?} is in several components \
+                         (asymmetric contacts; seed {item:?})"
+                    );
+                }
+            }
+        }
         assigned.extend(component.iter().copied());
         components.push(component);
     }

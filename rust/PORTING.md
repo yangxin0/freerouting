@@ -243,6 +243,16 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 87): asymmetric-contact bug fixed — the
+  pad-containment contact (iter 74) was one-directional (A contacts B
+  when A's center lies in B's shape, but B's scan never checked A's
+  center against its own shapes), so an item could appear in SEVERAL
+  connected components and route_net then tried to "connect" an item
+  to itself forever. Found via a duplicate-component detector in
+  net_components (FR_DEBUG_MAZE). The via containment scan now also
+  reports drill items whose center lies inside the pad shape, making
+  the relation symmetric. Coldfire GND routes fully alone (77/77);
+  coldfire 241/278 @ 300 s, interf_u 166/173 (+1), wavefolder 31/31.
 - 2026-07-15 (iter 86): power planes imported as conduction areas —
   (plane NET (polygon LAYER ...)) becomes a net-carrying conduction
   ObstacleArea; conduction areas do not restrain rooms or block vias

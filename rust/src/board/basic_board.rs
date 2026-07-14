@@ -347,13 +347,25 @@ impl BasicBoard {
                         if !other.base.shares_net(&item.base) {
                             continue;
                         }
-                        if let ItemKind::PolylineTrace(t) = &other.kind {
-                            if t.layer == layer
-                                && (shape.contains(&t.first_corner())
-                                    || shape.contains(&t.last_corner()))
-                            {
-                                r.push(other_id);
+                        match &other.kind {
+                            ItemKind::PolylineTrace(t) => {
+                                if t.layer == layer
+                                    && (shape.contains(&t.first_corner())
+                                        || shape.contains(&t.last_corner()))
+                                {
+                                    r.push(other_id);
+                                }
                             }
+                            // drill items whose center lies inside this
+                            // pad shape: makes the containment contact
+                            // symmetric (the other side checks its own
+                            // center against our shapes)
+                            ItemKind::Via(ov) => {
+                                if shape.contains(&Point::Int(ov.center)) {
+                                    r.push(other_id);
+                                }
+                            }
+                            ItemKind::ObstacleArea(_) => {}
                         }
                     }
                 }
