@@ -404,6 +404,13 @@ fn via_free(board: &BasicBoard, request: &MazeRouteRequest, point: IntPoint) -> 
                     continue; // planes get fabrication cutouts
                 }
             }
+            // with ripup, rippable items do not block drills: the via
+            // insertion rips whatever its footprint overlaps
+            if request.ripup_penalty > 0.0
+                && crate::autoroute::room_completion::is_rippable(item, request.net_no)
+            {
+                continue;
+            }
             let pairwise = board
                 .rules
                 .clearance_matrix

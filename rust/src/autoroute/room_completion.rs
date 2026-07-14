@@ -120,9 +120,12 @@ pub fn complete_shape_with_ripup(
         result = new_result;
         if result.is_empty() {
             if std::env::var_os("FR_DEBUG_MAZE").is_some() {
+                let rippable = board
+                    .get_item(*obstacle_id)
+                    .is_some_and(|i| is_rippable(i, net_no));
                 eprintln!(
                     "ROOM KILLED on layer {} by obstacle item {obstacle_id:?} \
-                     (bbox {:?})",
+                     (bbox {:?}, ripup_mode={ignore_rippable}, rippable={rippable})",
                     room.layer,
                     obstacle_shape.bounding_box()
                 );

@@ -250,6 +250,20 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 105): instrumentation verdict — ZERO room kills
+  with ripup_mode=true on rippable items (transparency is flawless;
+  the 12-14-expansion seals are the no-ripup first attempts, as
+  hypothesised). By elimination the ripup-view room graph matches the
+  empty board, so via_free was made ripup-aware too (rippable items
+  no longer block drills; insertion rips the footprint anyway). Fleet
+  STILL neutral — the crowded searches empty their queue after 70-95k
+  expansions without reaching the dest on an effectively-empty graph
+  where the lone probe succeeds. Remaining suspect: ARRIVAL, i.e.
+  hypothesis (c) missing target doors to the dest in crowded rooms.
+  Next instrumentation: on search failure print whether any completed
+  room carried a target door to the dest item (and the dest item
+  kind: the failing connection may target a trace, whose target-door
+  path differs from pads).
 - 2026-07-15 (iter 104): sealed-pocket diagnosis data (display /P):
   under ripup, its failing searches show BOTH profiles — some seal at
   12-14 expansions (start pocket closed even though rippable items are
