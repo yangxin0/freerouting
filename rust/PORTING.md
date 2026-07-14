@@ -258,6 +258,18 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 124): round four state — display's 53 violations
+  are uniformly EARLY vias (ids 211-388, pass phase) vs LATE traces
+  (ids 1100+, late passes/repair) at ~600 um via pads. The rip-radius
+  math says this cannot survive the ripup path (any pad within
+  hw+cl of a corridor overlaps the rip shape and gets ripped), and
+  rooms inflate vias for no-ripup searches — so SOME code path
+  inserts traces without either protection. NEXT SESSION'S TOOL:
+  birth-tag items (which mechanism inserted them: maze / shove
+  substitute / pull-tight / combine / repair) under FR_DEBUG, then
+  match tags of violating pairs — that identifies the leaking
+  mechanism in one run. Wavefolder's 13 and the fleet re-benchmark
+  queue behind it.
 - 2026-07-15 (iter 123): round three — transactional DRC repair pass:
   after routing, nets with routed-vs-routed clearance violations are
   ripped and rerouted against the completed board; the round is kept
