@@ -1026,6 +1026,83 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_fuzz_against_shadow_model() {
+        // random insert/remove/generate/pop/undo sequences must keep the
+        // board's alive set identical to a trivial shadow model (found
+        // necessary after tree-sees-nothing evidence implied an undo
+        // splice leak deeper than the hand-written nesting test)
+        for seed in 1u64..40 {
+            let mut board = test_board();
+            let mut rng = seed;
+            let mut next = || {
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (rng >> 33) as usize
+            };
+            // shadow: stack of saved alive-sets; current alive set
+            let mut saved: Vec<Vec<ItemId>> = Vec::new();
+            let mut alive: Vec<ItemId> = Vec::new();
+            let mut y = 0i32;
+            for _step in 0..200 {
+                match next() % 10 {
+                    0..=3 => {
+                        y += 300;
+                        let id = board.insert_trace(
+                            trace_polyline(&[(0, y), (2000, y)]),
+                            0,
+                            100,
+                            vec![1],
+                            1,
+                        );
+                        alive.push(id);
+                    }
+                    4..=5 => {
+                        if !alive.is_empty() {
+                            let idx = next() % alive.len();
+                            let id = alive.remove(idx);
+                            assert!(board.remove_item(id), "shadow said alive");
+                        }
+                    }
+                    6..=7 => {
+                        board.generate_snapshot();
+                        saved.push(alive.clone());
+                    }
+                    8 => {
+                        if !saved.is_empty() {
+                            board.pop_snapshot();
+                            saved.pop(); // changes kept
+                        }
+                    }
+                    _ => {
+                        if !saved.is_empty() {
+                            board.undo();
+                            alive = saved.pop().unwrap();
+                        }
+                    }
+                }
+                let mut board_alive: Vec<ItemId> =
+                    board.items().map(|(id, _)| *id).collect();
+                board_alive.sort_unstable();
+                let mut shadow = alive.clone();
+                shadow.sort_unstable();
+                assert_eq!(
+                    board_alive, shadow,
+                    "divergence at seed {seed} step {_step}"
+                );
+                // the search tree must agree with the item list
+                let mut tree_view = board.overlapping_items(
+                    &TileShape::Box(IntBox::from_coords(-1000, -1000, 3000, 100_000)),
+                    Some(0),
+                );
+                tree_view.sort_unstable();
+                assert_eq!(
+                    tree_view, shadow,
+                    "TREE divergence at seed {seed} step {_step}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn nested_snapshot_pop_then_undo_restores_exactly() {
         // the restart fallback snapshots the board, and shove_aside runs
         // its own snapshot/pop INSIDE that scope: after the inner commit

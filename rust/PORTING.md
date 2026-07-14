@@ -258,6 +258,22 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 133): the transactional layer is EXONERATED — a
+  fuzz test (40 seeds x 200 random insert/remove/generate/pop/undo
+  ops against a shadow model, verifying BOTH the alive set and the
+  search-tree view after every op) passes with zero divergence. So:
+  tree ✓, rooms ✓, corners ✓, segments ✓, endpoints ✓, snapshots ✓ —
+  yet the original via and the blind-window trace coexist. Note the
+  ILLEGAL INSERT count (71) exceeds final violations (53): many
+  blind-window inserts DO roll back. The remaining reconciliation:
+  either a kept insert had the via present but pull-tight later moved
+  the path within its unchanged bbox (bbox-identical is NOT
+  geometry-identical — re-examine the bypass check against this exact
+  case), or the undo restore path diverges only under mutations the
+  fuzz didn't model (set_component_no/set_fixed_state/get_mut
+  in-place edits). NEXT: full lifecycle timeline — extend the region
+  event log with undo/pop restore events and correlate item 185 and
+  the final violating trace id in one run.
 - 2026-07-15 (iter 132): SMOKING GUN — the tree probe shows
   `tree-sees []`: during the offending layer-0 completions the search
   tree returns NOTHING for the region (one drill room is completed AT
