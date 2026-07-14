@@ -445,7 +445,23 @@ pub fn maze_route_with_ripup(
         allow_ripup,
         request.clearance_class,
     );
-    let result = find_connection(board, &mut engine, request)?;
+    maze_route_with_engine(board, &mut engine, request)
+}
+
+/// Like [`maze_route_with_ripup`], but reusing a caller-owned engine: the
+/// expansion-room graph stays valid across the connections of one net
+/// (own-net items never restrain rooms; items ripped in between only make
+/// the kept rooms conservative). The engine must be fresh whenever the
+/// board changes outside this net's routing (e.g. after an undo).
+pub fn maze_route_with_engine(
+    board: &mut BasicBoard,
+    engine: &mut AutorouteEngine,
+    request: &MazeRouteRequest,
+) -> Option<RoutedConnection> {
+    let allow_ripup = request.ripup_penalty > 0.0;
+    // clear the occupation state of the previous search
+    engine.graph.reset();
+    let result = find_connection(board, engine, request)?;
 
     // with ripup: remove the rippable foreign items intersecting the
     // connection geometry before inserting it
@@ -507,6 +523,9 @@ pub fn maze_route_with_ripup(
     }
 
     let new_items = insert_connection(board, request, &result)?;
+    // rooms are reused across a net's connections: make the new items
+    // reachable as destinations
+    engine.register_new_targets(board, &new_items);
     Some(RoutedConnection {
         new_items,
         ripped_nets,

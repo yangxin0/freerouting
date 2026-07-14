@@ -110,6 +110,12 @@ fn closest_pair(
 pub fn route_net(board: &mut BasicBoard, net_no: i32, request: &BatchRequest) -> BatchResult {
     let mut result = BatchResult::default();
     let mut prev_component_count = usize::MAX;
+    // NOTE: reusing one engine for all connections of a net was tried and
+    // REVERTED: complete_room restrains every new room against ALL
+    // accumulated rooms, so the graph grows quadratically on many-pin
+    // nets — interf_u routed fewer connections in the same time and J2
+    // lost a net (wavefolder also slowed). Reuse needs Java's
+    // SortedRoomNeighbours incremental invalidation first.
     loop {
         if request.deadline.is_some_and(|t| t.limit_exceeded()) {
             result.failed_connections += 1;

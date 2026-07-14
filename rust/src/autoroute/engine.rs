@@ -73,6 +73,34 @@ impl AutorouteEngine {
         &self.rippable_items[room]
     }
 
+    /// Registers target doors for own-net items inserted after rooms were
+    /// completed (rooms are reused across the connections of a net; the
+    /// new items would otherwise be unreachable as destinations).
+    pub fn register_new_targets(&mut self, board: &BasicBoard, items: &[ItemId]) {
+        for &item_id in items {
+            let Some(item) = board.get_item(item_id) else {
+                continue;
+            };
+            if !item.is_connectable() || !item.base.contains_net(self.net_no) {
+                continue;
+            }
+            for (index, (shape, layer)) in
+                item.tile_shapes(&board.padstacks).iter().enumerate()
+            {
+                for &room in &self.complete_rooms {
+                    if self.graph.room(room).layer == *layer
+                        && shape.intersects(&self.graph.room(room).shape)
+                    {
+                        self.target_doors[room].push(TargetDoor {
+                            item: item_id,
+                            shape_index: index,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     pub fn complete_rooms(&self) -> &[RoomId] {
         &self.complete_rooms
     }

@@ -233,6 +233,16 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   the room graph and only removes rooms touching changed items — ours
   rebuilds from scratch per connection), octagon-specialized restrain,
   and shove.
+- 2026-07-14 (iter 83): naive engine reuse across a net's connections
+  tried and REVERTED: complete_room restrains each new room against
+  ALL accumulated rooms, so the reused graph grows quadratically on
+  many-pin nets — interf_u routed FEWER connections in 300 s (153 vs
+  175), wavefolder slowed 2.7→3.6 s, J2 varied. NormalPuzzle alone
+  gained (2x). Do not retry without first porting incremental
+  invalidation + the SortedRoomNeighbours door algorithm (Java
+  completes rooms against neighbours, not the whole graph). The
+  maze_route_with_engine / register_new_targets API is kept dormant
+  for that future port.
 - 2026-07-14 (iter 78): FULL FLEET AT 100%. J2's GND routed fully when
   alone → pure ordering congestion (largest-extent nets route last
   into consumed corridors). A global largest-first order fixed J2 and
