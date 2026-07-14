@@ -433,7 +433,11 @@ pub fn maze_route_with_ripup(
     request: &MazeRouteRequest,
 ) -> Option<RoutedConnection> {
     let allow_ripup = request.ripup_penalty > 0.0;
-    let mut engine = AutorouteEngine::new_with_ripup(request.net_no, allow_ripup);
+    let mut engine = AutorouteEngine::new_with_clearance(
+        request.net_no,
+        allow_ripup,
+        request.clearance_class,
+    );
     let result = find_connection(board, &mut engine, request)?;
 
     // with ripup: remove the rippable foreign items intersecting the
@@ -505,7 +509,8 @@ pub fn maze_route_with_ripup(
 /// Runs the maze search and inserts the found connection as per-layer
 /// polyline traces joined by vias. Returns the inserted item ids.
 pub fn maze_route(board: &mut BasicBoard, request: &MazeRouteRequest) -> Option<Vec<ItemId>> {
-    let mut engine = AutorouteEngine::new(request.net_no);
+    let mut engine =
+        AutorouteEngine::new_with_clearance(request.net_no, false, request.clearance_class);
     let result = find_connection(board, &mut engine, request)?;
     insert_connection(board, request, &result)
 }

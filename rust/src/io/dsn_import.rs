@@ -99,8 +99,30 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
         .and_then(|w| w.arg_f64())
         .map(&scale)
         .unwrap_or(250);
-    let clearance_matrix =
-        ClearanceMatrix::get_default_instance(layer_structure.clone(), default_clearance);
+    // clearance classes: "null" (0), "default" (1), "smd" (2); typed
+    // clearance rules like (clearance 50 (type smd_smd)) refine pairs
+    let mut clearance_matrix =
+        ClearanceMatrix::new(layer_structure.clone(), &["null", "default", "smd"]);
+    clearance_matrix.set_default_value(default_clearance);
+    if let Some(rule) = structure.child("rule") {
+        for clearance_node in rule.children("clearance") {
+            let Some(value) = clearance_node.arg_f64().map(&scale) else {
+                continue;
+            };
+            let Some(kind) = clearance_node.child("type").and_then(|t| t.arg()) else {
+                continue; // the untyped default, already applied
+            };
+            let pair = match kind.to_ascii_lowercase().as_str() {
+                "smd_smd" => Some((2, 2)),
+                "default_smd" | "smd_default" => Some((1, 2)),
+                _ => None,
+            };
+            if let Some((i, j)) = pair {
+                clearance_matrix.set_value_on_all_layers(i, j, value);
+                clearance_matrix.set_value_on_all_layers(j, i, value);
+            }
+        }
+    }
     let mut rules = BoardRules::new(layer_structure.clone(), clearance_matrix);
     rules.get_default_net_class();
     rules.set_default_trace_half_widths((default_width / 2).max(1));
@@ -313,11 +335,23 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
                         .get(&pin_ref)
                         .map(|n| vec![*n])
                         .unwrap_or_default();
-                    let attach_allowed = board
+                    let (attach_allowed, clearance_class) = board
                         .padstacks
                         .get_by_no(padstack_no)
-                        .is_some_and(|p| p.attach_allowed);
-                    let id = board.insert_via(padstack_no, center, net_nos, 1, attach_allowed);
+                        .map(|p| {
+                            // single-layer padstacks are SMD pads and use
+                            // the (usually tighter) smd clearance class
+                            let smd = p.from_layer() == p.to_layer();
+                            (p.attach_allowed, if smd { 2 } else { 1 })
+                        })
+                        .unwrap_or((false, 1));
+                    let id = board.insert_via(
+                        padstack_no,
+                        center,
+                        net_nos,
+                        clearance_class,
+                        attach_allowed,
+                    );
                     // pins belong to their component: protected from ripup
                     // and not written to session files
                     board.set_component_no(id, 1);

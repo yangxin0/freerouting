@@ -42,6 +42,7 @@ pub fn complete_shape_with_ripup(
     net_no: i32,
     ignore_item: Option<ItemId>,
     ignore_rippable: bool,
+    trace_clearance_class: usize,
 ) -> Vec<IncompleteRoom> {
     let board_box = board.bounding_box().offset(1000.0);
     let start_shape = TileShape::Box(board_box).intersection_with_simplify(&room.shape);
@@ -54,7 +55,12 @@ pub fn complete_shape_with_ripup(
         contained_shape: room.contained_shape.clone(),
     }];
 
-    // deterministic obstacle order: (item id, shape index)
+    // deterministic obstacle order: (item id, shape index). Obstacle
+    // shapes are inflated by the pairwise clearance to the routed trace
+    // (Java: clearance compensation in the autoroute search tree); the
+    // door shrink by the trace half width then keeps the copper edges
+    // `clearance` apart.
+    let matrix = &board.rules.clearance_matrix;
     let mut obstacles: Vec<(ItemId, TileShape)> = Vec::new();
     for item_id in board.overlapping_items(&start_shape, Some(room.layer)) {
         if Some(item_id) == ignore_item {
@@ -70,8 +76,19 @@ pub fn complete_shape_with_ripup(
         if ignore_rippable && is_rippable(item, net_no) {
             continue;
         }
+        let clearance = matrix.get_value(
+            item.base.clearance_class,
+            trace_clearance_class,
+            room.layer,
+            false,
+        );
         for (shape, layer) in item.tile_shapes(&board.padstacks) {
             if layer == room.layer {
+                let shape = if clearance > 0 {
+                    shape.offset(clearance as f64)
+                } else {
+                    shape
+                };
                 obstacles.push((item_id, shape));
             }
         }
@@ -103,14 +120,15 @@ pub fn complete_shape_with_ripup(
     result
 }
 
-/// [`complete_shape_with_ripup`] without ripup.
+/// [`complete_shape_with_ripup`] without ripup, with the default trace
+/// clearance class.
 pub fn complete_shape(
     board: &BasicBoard,
     room: &IncompleteRoom,
     net_no: i32,
     ignore_item: Option<ItemId>,
 ) -> Vec<IncompleteRoom> {
-    complete_shape_with_ripup(board, room, net_no, ignore_item, false)
+    complete_shape_with_ripup(board, room, net_no, ignore_item, false, 1)
 }
 
 /// Restrains the room shape so it no longer intersects the interior of

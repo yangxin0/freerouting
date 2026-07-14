@@ -9,11 +9,12 @@ should pick up the first unchecked item below.
 - **Working end to end**: DSN import (incl. pre-routed wiring) →
   expansion-room maze routing with in-search ripup → SES export.
   `cargo run --release --example route_board [board.dsn] [--strip-wiring]`.
-- **Benchmarks: every fleet board routes 100% from scratch** —
-  interf_u 173/173 (~250 s), 8088sbc 104/104, pic_programmer 111/111,
-  NormalPuzzle 72/72, wavefolder 31/31, display-8-digit 30/30,
-  J2_reference 24/24, ecc83 13/13, rpi_splitter 5/5. Pre-routed
-  interf_u completes in 1.9 s. See the benchmark log.
+- **Benchmarks** (WITH clearance compensation since iter 79):
+  wavefolder 31/31, NormalPuzzle 71/72, J2_reference 23/24,
+  interf_u 168/173 @ 300 s cap. Without clearance (iter 78) every
+  fleet board reached 100%; the dip is the price of honest
+  clearance-respecting routing and is to be won back via shove /
+  search improvements. Pre-routed interf_u completes in 1.9 s.
 - ~18k lines of Rust, 174 tests, no warnings; ~70 Java files ported.
 - 6 upstream Java bugs found and documented (see the notes/decisions log
   and code comments marked "deviation").
@@ -196,6 +197,16 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 
 ## Open issues
 
+- 2026-07-14 (iter 79): clearance compensation added — the router no
+  longer produces zero-clearance copper. DSN typed clearance rules
+  ((clearance V (type smd_smd)) etc.) now populate the matrix classes
+  null/default/smd; single-layer (SMD) padstacks get class smd; room
+  completion inflates obstacle shapes by the pairwise clearance to the
+  routed trace's class (the door shrink by the trace half width then
+  keeps copper edges `clearance` apart). Completion cost: interf_u
+  168/173 @ 300 s (was 173), J2 23/24, NormalPuzzle 71/72, wavefolder
+  still 31/31. Known gap: via pads are placed with trace-width rooms,
+  so vias can still violate clearance (needs via-aware compensation).
 - 2026-07-14 (iter 78): FULL FLEET AT 100%. J2's GND routed fully when
   alone → pure ordering congestion (largest-extent nets route last
   into consumed corridors). A global largest-first order fixed J2 and

@@ -29,6 +29,9 @@ pub struct AutorouteEngine {
     /// If true, rippable foreign route items do not restrain rooms; the
     /// maze search pays a penalty to pass through them.
     pub allow_ripup: bool,
+    /// The clearance class of the routed trace (obstacles restrain rooms
+    /// inflated by the pairwise clearance to this class).
+    pub trace_clearance_class: usize,
     /// All completed free-space rooms.
     complete_rooms: Vec<RoomId>,
     /// The target doors of each room, indexed by room id.
@@ -45,10 +48,19 @@ impl AutorouteEngine {
     }
 
     pub fn new_with_ripup(net_no: i32, allow_ripup: bool) -> Self {
+        Self::new_with_clearance(net_no, allow_ripup, 1)
+    }
+
+    pub fn new_with_clearance(
+        net_no: i32,
+        allow_ripup: bool,
+        trace_clearance_class: usize,
+    ) -> Self {
         AutorouteEngine {
             net_no,
             graph: RoomGraph::new(),
             allow_ripup,
+            trace_clearance_class,
             complete_rooms: Vec::new(),
             target_doors: Vec::new(),
             rippable_items: Vec::new(),
@@ -81,6 +93,7 @@ impl AutorouteEngine {
             self.net_no,
             None,
             self.allow_ripup,
+            self.trace_clearance_class,
         );
         // restrain against the existing complete rooms (they must not
         // overlap)
