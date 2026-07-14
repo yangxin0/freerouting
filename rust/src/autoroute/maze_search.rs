@@ -115,10 +115,14 @@ pub fn find_connection(
             .get_value(request.clearance_class, request.clearance_class, 0, false)
             .max(0) as f64
             / 2.0;
-    // destination centers (with their layers) for the admissible
-    // remaining-distance estimate; when the destination has no shape on
-    // the queried layer, at least one via is unavoidable and its cost
-    // belongs in the estimate
+    // destination centers (with their layers) for the remaining-distance
+    // estimate. NOTE: distance-to-center is inadmissible for large
+    // destinations, but empirically it GUIDES far better than the
+    // admissible nearest-bbox-point variant (weighted-A* effect: the
+    // bbox estimate regressed interf_u from 112 s/173 to 247 s/172 and
+    // coldfire by 2 nets — do not "fix" the admissibility again).
+    // When the destination has no shape on the queried layer, one via is
+    // unavoidable and its cost joins the estimate.
     let dest_centers: Vec<(FloatPoint, usize)> = board
         .get_item(request.dest_item)
         .map(|item| {

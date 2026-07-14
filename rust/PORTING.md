@@ -248,6 +248,11 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 114): admissible bbox-based A* estimate tried and
+  REVERTED — distance-to-nearest-bbox-point (theoretically correct)
+  regressed interf_u 112 s/173 → 247 s/172 and coldfire by 2 nets:
+  the inadmissible distance-to-center heuristic GUIDES far better
+  (weighted-A* effect). Do-not-retry note left in the code.
 - 2026-07-15 (iter 113): layer-aware A* estimate — when the
   destination has no shape on the queried layer, one via is
   unavoidable, so via_cost joins the admissible remaining-cost
