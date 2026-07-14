@@ -248,6 +248,14 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 112): coldfire ceiling data — 269/278 at 600 s
+  (was 267 before the tree/bbox fixes); all remaining holdouts (GND
+  77/77, +3.3V 77/77, /XTAL and 6 signals) route fully ALONE — the
+  board is uniformly congestion/time-bound with no geometric blockers
+  left. Completion scales with throughput: every future perf win
+  converts to nets. The deep levers remain the SortedRoomNeighbours
+  door algorithm + room reuse (fewer completions per search) and a
+  smarter A* estimate.
 - 2026-07-15 (iter 111): passes now effectively unlimited under the
   wall clock (default -mp 99, Java-like) — the router previously
   STOPPED after 3 passes leaving most of the time budget unused, and
