@@ -10,7 +10,7 @@
 //! together with the rational point/vector layer.
 
 use crate::datastructures::Signum;
-use crate::geometry::planar::{FloatPoint, IntPoint, IntVector, Side};
+use crate::geometry::planar::{IntPoint, IntVector, Side};
 use std::cmp::Ordering;
 
 /// A direction in the plane with integer coordinates, kept gcd-normalized.

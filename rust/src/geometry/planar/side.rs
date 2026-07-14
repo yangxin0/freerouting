@@ -24,6 +24,12 @@ impl Side {
         }
     }
 
+    /// Same as [`Side::of`] for a sign value (-1, 0, +1), e.g. a `BigInt`
+    /// signum.
+    pub fn of_sign(sign: i32) -> Self {
+        Self::of_i64(sign as i64)
+    }
+
     /// Same as [`Side::of`] for exact integer determinants.
     pub fn of_i64(value: i64) -> Self {
         match value.signum() {
