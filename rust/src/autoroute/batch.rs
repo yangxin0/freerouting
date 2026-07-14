@@ -320,6 +320,11 @@ pub fn batch_route_passes_with_time_limit(
                 .count();
             break;
         }
+        if failed_this_pass > 0 {
+            // tighten the routed traces between passes: shorter traces
+            // free space for the retries
+            crate::autoroute::pull_tight::pull_tight_all(board, 1);
+        }
         if failed_this_pass == 0 {
             break;
         }
