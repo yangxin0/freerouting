@@ -19,7 +19,7 @@ Usage: freerouting -de <input.dsn> [options]
 Options:
   -de <file.dsn>     design file to route (required)
   -do <file.ses>     session output file (default: input file with .ses)
-  -mp <n>            maximum number of ripup passes (default 3)
+  -mp <n>            maximum number of ripup passes (default 99)
   -tl <seconds>      wall-clock time limit for routing (default 300)
   --strip-wiring     remove the pre-routed wiring and route from scratch
   -h, --help         show this help";
@@ -46,7 +46,9 @@ fn main() -> ExitCode {
             let stem = design.strip_suffix(".dsn").unwrap_or(design);
             format!("{stem}.ses")
         });
-    let max_passes: usize = flag_value("-mp").and_then(|v| v.parse().ok()).unwrap_or(3);
+    // like the Java jar, passes are effectively unlimited by default and
+    // the wall clock (-tl) is the real bound
+    let max_passes: usize = flag_value("-mp").and_then(|v| v.parse().ok()).unwrap_or(99);
     let limit_s: u64 = flag_value("-tl").and_then(|v| v.parse().ok()).unwrap_or(300);
     let strip_wiring = args.iter().any(|a| a == "--strip-wiring");
 

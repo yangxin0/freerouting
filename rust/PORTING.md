@@ -12,12 +12,12 @@ should pick up the first unchecked item below.
   transactional restart fallback → pull-tight → SES export. CLI:
   `cargo run --release -- -de input.dsn [-do out.ses] [-mp passes]
   [-tl seconds]`.
-- **Fleet** (from scratch, clearance-honest, 300 s cap): EIGHT boards
-  at 100% — interf_u 173/173 (250 s), 8088sbc 104/104 (70 s),
-  pic_programmer 111/111 (0.8 s), display-8-digit 30/30 (8 s),
-  wavefolder 31/31 (1.3 s), J2_reference 24/24 (0.4 s),
+- **Fleet** (from scratch, clearance-honest, 300 s cap): NINE of ten
+  boards at 100% — interf_u 173/173, 8088sbc 104/104, pic_programmer
+  111/111 (0.8 s), display-8-digit 30/30 (8 s), wavefolder 31/31
+  (1.3 s), NormalPuzzle 72/72 (16 s), J2_reference 24/24 (0.4 s),
   ecc83 13/13, rpi_splitter 5/5. Remaining: coldfire-xilinx
-  (4 layers) 246/278, NormalPuzzle 69/72.
+  (4 layers) 261/278, time-bound.
 - ~21k lines of Rust, 188 tests, no warnings; ~80 Java files ported.
 - 7+ upstream Java bugs found and documented (notes/decisions log and
   code comments marked "deviation").
@@ -248,6 +248,13 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 111): passes now effectively unlimited under the
+  wall clock (default -mp 99, Java-like) — the router previously
+  STOPPED after 3 passes leaving most of the time budget unused, and
+  failures without "exhausted" debug lines turned out to be silent
+  expansion-budget exits, cured by the pass-doubling budgets of later
+  passes. NormalPuzzle 72/72 in 16 s (0 failed) — NINE of ten fleet
+  boards at 100%; only time-bound coldfire (261/278) remains.
 - 2026-07-15 (iter 110): Simplex bounding boxes memoized (OnceCell,
   excluded from PartialEq like the other derived-state caches): corner
   computation was reappearing in the profile through the restrain

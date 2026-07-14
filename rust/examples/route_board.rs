@@ -77,7 +77,7 @@ fn main() {
         .unwrap_or(300);
     let time_limit = TimeLimit::new(limit_s * 1000);
     let result =
-        batch_route_passes_with_time_limit(&mut board, &request, 3, Some(&time_limit));
+        batch_route_passes_with_time_limit(&mut board, &request, 99, Some(&time_limit));
     let mut complete_nets = 0usize;
     let mut incomplete_nets = Vec::new();
     for net_no in 1..=net_count {
