@@ -48,7 +48,9 @@ should pick up the first unchecked item below.
 - [x] datastructures/UndoableObjects.java → `undoable_objects.rs` (explicit key/value split, arena version chains; pop_snapshot splices same-level undo versions — documented deviation fixing a Java edge-case that loses objects)
 - [x] datastructures/Stoppable.java + TimeLimit.java → `stoppable.rs`
 - [ ] datastructures remaining: PlanarDelaunayTriangulation (autoroute-time), IdentifierType/IndentFileWriter (specctra I/O time)
-- [ ] rules (nets, clearance matrix, via rules)
+- [x] board/Layer.java + LayerStructure.java → `board/layer.rs`
+- [x] rules/ClearanceMatrix.java → `rules/clearance_matrix.rs` (even-rounded values, per-row/layer maxima, append/remove class, safety margin)
+- [ ] rules remaining: Net/Nets, NetClass/NetClasses, ViaInfo(s)/ViaRule, BoardRules, DefaultItemClearanceClasses
 - [ ] board (items, traces, vias, search tree)
 
 ## Phase 3 — routing engines
