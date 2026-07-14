@@ -467,6 +467,76 @@ impl BasicBoard {
         true
     }
 
+    /// Combines a trace with neighbour traces at its end corners while the
+    /// only contact there is exactly one other trace with the same layer,
+    /// half width and nets (Java: `PolylineTrace.combine`). Returns the id
+    /// of the surviving combined trace.
+    pub fn combine_trace(&mut self, id: ItemId) -> ItemId {
+        let mut current = id;
+        loop {
+            let Some(item) = self.get_item(current) else {
+                return current;
+            };
+            let ItemKind::PolylineTrace(t) = item.kind.clone() else {
+                return current;
+            };
+            let base = item.base.clone();
+            let mut combined = false;
+            for corner in [t.first_corner(), t.last_corner()] {
+                // contacts at this corner, ignoring conduction areas
+                let contacts: Vec<ItemId> = self
+                    .get_normal_contacts_at(current, &corner, false)
+                    .into_iter()
+                    .filter(|c| {
+                        !matches!(
+                            self.get_item(*c).map(|i| &i.kind),
+                            Some(ItemKind::ObstacleArea(_))
+                        )
+                    })
+                    .collect();
+                let [other_id] = contacts[..] else {
+                    continue;
+                };
+                let Some(other) = self.get_item(other_id) else {
+                    continue;
+                };
+                let ItemKind::PolylineTrace(other_t) = &other.kind else {
+                    continue;
+                };
+                if other_t.layer != t.layer
+                    || other_t.half_width != t.half_width
+                    || other.base.net_nos != base.net_nos
+                    || other.base.is_user_fixed()
+                    || base.is_user_fixed()
+                {
+                    continue;
+                }
+                let combined_polyline = t.polyline.combine(&other_t.polyline);
+                if combined_polyline == t.polyline || combined_polyline.is_empty() {
+                    continue;
+                }
+                let half_width = t.half_width;
+                let layer = t.layer;
+                let net_nos = base.net_nos.clone();
+                let clearance_class = base.clearance_class;
+                self.remove_item(current);
+                self.remove_item(other_id);
+                current = self.insert_trace(
+                    combined_polyline,
+                    layer,
+                    half_width,
+                    net_nos,
+                    clearance_class,
+                );
+                combined = true;
+                break;
+            }
+            if !combined {
+                return current;
+            }
+        }
+    }
+
     /// The smallest box containing all items of the board.
     pub fn bounding_box(&self) -> IntBox {
         let mut result = IntBox::EMPTY;
@@ -774,6 +844,64 @@ mod tests {
         // splitting at an endpoint or off the trace does nothing
         assert!(!board.split_traces_at(IntPoint::new(0, 0), 0, 1));
         assert!(!board.split_traces_at(IntPoint::new(4000, 100), 0, 1));
+    }
+
+    #[test]
+    fn combine_traces_at_simple_joints() {
+        let mut board = test_board();
+        // a chain of three traces sharing endpoints
+        let t1 = board.insert_trace(trace_polyline(&[(0, 0), (4000, 0)]), 0, 100, vec![1], 1);
+        let _t2 = board.insert_trace(
+            trace_polyline(&[(4000, 0), (4000, 4000)]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        let _t3 = board.insert_trace(
+            trace_polyline(&[(4000, 4000), (8000, 4000)]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        assert_eq!(board.item_count(), 3);
+        let combined = board.combine_trace(t1);
+        assert_eq!(board.item_count(), 1);
+        let item = board.get_item(combined).unwrap();
+        let ItemKind::PolylineTrace(t) = &item.kind else {
+            panic!("not a trace")
+        };
+        assert_eq!(t.corner_count(), 4);
+        let first = t.first_corner();
+        let last = t.last_corner();
+        let expected_ends = [
+            Point::Int(IntPoint::new(0, 0)),
+            Point::Int(IntPoint::new(8000, 4000)),
+        ];
+        assert!(expected_ends.contains(&first) && expected_ends.contains(&last) && first != last);
+
+        // a via at the joint prevents combining (two contacts there)
+        let t4 = board.insert_trace(
+            trace_polyline(&[(8000, 4000), (12000, 4000)]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        board.insert_via(1, IntPoint::new(8000, 4000), vec![1], 1, false);
+        let survivor = board.combine_trace(t4);
+        assert_eq!(survivor, t4, "combined across a via junction");
+
+        // different half widths do not combine
+        let t5 = board.insert_trace(
+            trace_polyline(&[(12000, 4000), (16000, 4000)]),
+            0,
+            200,
+            vec![1],
+            1,
+        );
+        assert_eq!(board.combine_trace(t5), t5);
     }
 
     #[test]
