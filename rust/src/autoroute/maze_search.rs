@@ -385,9 +385,16 @@ fn via_free(board: &BasicBoard, request: &MazeRouteRequest, point: IntPoint) -> 
         let Some(shape) = padstack.get_shape(layer) else {
             continue;
         };
+        // the via pad must keep the (conservative: largest for its class)
+        // clearance to foreign copper on every spanned layer
+        let clearance = board
+            .rules
+            .clearance_matrix
+            .max_value_of_class(request.clearance_class, layer)
+            .max(request.trace_half_width);
         let query = shape
             .translate_by(crate::geometry::planar::IntVector::new(point.x, point.y))
-            .enlarge(request.trace_half_width as f64);
+            .enlarge(clearance as f64);
         if board.is_blocked(&query, layer, request.net_no) {
             return false;
         }

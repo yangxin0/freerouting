@@ -207,6 +207,14 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   168/173 @ 300 s (was 173), J2 23/24, NormalPuzzle 71/72, wavefolder
   still 31/31. Known gap: via pads are placed with trace-width rooms,
   so vias can still violate clearance (needs via-aware compensation).
+- 2026-07-14 (iter 80): via placement is clearance-aware too —
+  via_free enlarges the via pad by the largest clearance of the trace
+  class (was: by the trace half width) before the blocking check.
+  Small boards unchanged (wavefolder 31/31, J2 23/24, NormalPuzzle
+  71/72); interf_u 164/173 @ 300 s hard cap — now clearly
+  TIME-limited (each search costs more under clearance). Priority for
+  completion is therefore performance (octagon-specialized restrain,
+  fewer redundant-line simplifications) and then shove.
 - 2026-07-14 (iter 78): FULL FLEET AT 100%. J2's GND routed fully when
   alone → pure ordering congestion (largest-extent nets route last
   into consumed corridors). A global largest-first order fixed J2 and
