@@ -258,6 +258,20 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 130): completion-region logging landed. Findings
+  on the studied net-11 run: the violating segment is corner4→corner5
+  (a 61k-unit hop from a sliver-hop cluster beside the via, passing
+  ~1000 units above the via pad); the region COMPLETE lines show only
+  LAYER-1 completions logging the watched obstacles while the
+  violation is LAYER 0 (either the layer-0 completions eluded the
+  watch filter or the offending room was never completed by this
+  path). Sliver-room-overlap was REFUTED by proof: restrain pieces
+  are cut by the obstacle's own border lines and never overlap the
+  inflated obstacle. The one unverified link left is the
+  CONSECUTIVE-CORNERS-SHARE-A-ROOM invariant — implement room-id-per-
+  backtrack-corner and print per illegal segment which room should
+  contain it and whether it actually does. That is the whole
+  remaining search space.
 - 2026-07-15 (iter 129): BIRTH-SITE VALIDATOR LANDED — insert-time
   clearance checking under FR_DEBUG_MAZE caught 70 illegal inserts on
   display including the exact studied case (net 11, ripup=false,

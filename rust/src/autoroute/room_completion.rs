@@ -108,6 +108,32 @@ pub fn complete_shape_with_ripup(
         }
     }
 
+    // region-scoped completion log (FR_DEBUG_REGION): records whether a
+    // watched obstacle was collected and what pieces resulted
+    let watch = std::env::var("FR_DEBUG_REGION").ok().and_then(|v| {
+        let n: Vec<i32> = v.split(',').filter_map(|p| p.parse().ok()).collect();
+        let [x1, y1, x2, y2] = n[..] else { return None };
+        Some(crate::geometry::planar::IntBox::from_coords(x1, y1, x2, y2))
+    });
+    if let Some(region) = watch {
+        if room.contained_shape.bounding_box().intersects(region)
+            || obstacles
+                .iter()
+                .any(|(_, s)| s.bounding_box().intersects(region))
+        {
+            let in_region: Vec<_> = obstacles
+                .iter()
+                .filter(|(_, s)| s.bounding_box().intersects(region))
+                .map(|(id, _)| *id)
+                .collect();
+            eprintln!(
+                "COMPLETE layer {} contained {:?} region-obstacles {:?}",
+                room.layer,
+                room.contained_shape.bounding_box(),
+                in_region
+            );
+        }
+    }
     for (obstacle_id, obstacle_shape) in &obstacles {
         // cheap bounding-box separation test before the exact overlap
         let obstacle_bbox = obstacle_shape.bounding_box();
@@ -138,6 +164,14 @@ pub fn complete_shape_with_ripup(
                 );
             }
             break;
+        }
+    }
+    if let Some(region) = watch {
+        for piece in &result {
+            let bb = piece.shape.bounding_box();
+            if bb.intersects(region) {
+                eprintln!("  PIECE layer {} bbox {:?}", room.layer, bb);
+            }
         }
     }
     result
