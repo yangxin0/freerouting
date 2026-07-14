@@ -12,15 +12,12 @@ should pick up the first unchecked item below.
   transactional restart fallback → pull-tight → SES export. CLI:
   `cargo run --release -- -de input.dsn [-do out.ses] [-mp passes]
   [-tl seconds]`.
-- **Fleet** (from scratch, clearance-honest, 300 s cap):
-  interf_u 173/173 (250 s), 8088sbc 104/104 (70 s),
-  pic_programmer 111/111, display-8-digit 30/30 (8 s),
-  wavefolder 31/31 (1.3 s), ecc83 13/13, rpi_splitter 5/5,
-  coldfire-xilinx (4 layers) ~244/278,
-  NormalPuzzle 69/72, J2_reference 23/24
-  (GND assessed unroutable under the file's own rules: 450 um pad
-  gaps < trace 250 + 2 x clearance 200.1; the fixture's wiring
-  section is empty — the design was never routed).
+- **Fleet** (from scratch, clearance-honest, 300 s cap): EIGHT boards
+  at 100% — interf_u 173/173 (250 s), 8088sbc 104/104 (70 s),
+  pic_programmer 111/111 (0.8 s), display-8-digit 30/30 (8 s),
+  wavefolder 31/31 (1.3 s), J2_reference 24/24 (0.4 s),
+  ecc83 13/13, rpi_splitter 5/5. Remaining: coldfire-xilinx
+  (4 layers) 246/278, NormalPuzzle 69/72.
 - ~21k lines of Rust, 188 tests, no warnings; ~80 Java files ported.
 - 7+ upstream Java bugs found and documented (notes/decisions log and
   code comments marked "deviation").
@@ -251,6 +248,15 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 108): J2 VERDICT CORRECTED — 24/24 in 0.4 s under
+  half-compensation. The iter-100 "unroutable" analysis was itself an
+  artifact of full-inflation sealing: the pairwise separations are
+  preserved by half-compensation, but the ROOM TOPOLOGY (door paths,
+  via reachability) is what full inflation destroyed. Full fleet now:
+  interf_u 173/173, 8088sbc 104/104, pic_programmer 111/111 (0.8 s),
+  display 30/30, wavefolder 31/31, J2 24/24, ecc83 13/13, rpi 5/5 —
+  EIGHT boards at 100% with honest clearance; coldfire 246/278 (4
+  layers), NormalPuzzle 69/72 remaining.
 - 2026-07-15 (iter 107): CLEARANCE HALF-COMPENSATION — THE BREAKTHROUGH.
   Obstacles now inflate by clearance/2 and the door shrink carries
   half width + clearance/2 (Java: compensated search tree +
