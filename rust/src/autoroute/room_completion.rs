@@ -161,13 +161,27 @@ fn restrain_shape_bounded(
     obstacle_shape: &TileShape,
     depth: usize,
 ) -> Vec<IncompleteRoom> {
+    // Convert to Simplex: border lines of length 0 of octagons may not be
+    // handled correctly otherwise (Java comment). Converted once here and
+    // shared through the recursion.
+    let obstacle_tile = TileShape::Simplex(obstacle_shape.to_simplex());
+    restrain_shape_prepared(room, &obstacle_tile, depth)
+}
+
+/// Worker for [`restrain_shape_bounded`]; `obstacle_tile` is already a
+/// simplex.
+fn restrain_shape_prepared(
+    room: &IncompleteRoom,
+    obstacle_tile: &TileShape,
+    depth: usize,
+) -> Vec<IncompleteRoom> {
     let mut result = Vec::new();
     if depth == 0 {
         return result;
     }
-    // Convert to Simplex: border lines of length 0 of octagons may not be
-    // handled correctly otherwise (Java comment).
-    let obstacle_simplex = obstacle_shape.to_simplex();
+    let TileShape::Simplex(obstacle_simplex) = obstacle_tile else {
+        unreachable!("caller converts to simplex");
+    };
     let room_shape = &room.shape;
     let shape_to_be_contained = TileShape::Simplex(room.contained_shape.to_simplex());
     if shape_to_be_contained.is_empty() {
@@ -181,8 +195,7 @@ fn restrain_shape_bounded(
     let mut cut_line: Option<Line> = None;
     let mut cut_line_distance = -1.0;
     for i in 0..obstacle_simplex.border_line_count() {
-        let obstacle_tile = TileShape::Simplex(obstacle_simplex.clone());
-        let curr_line_segment = LineSegment::from_shape(&obstacle_tile, i);
+        let curr_line_segment = LineSegment::from_shape(obstacle_tile, i);
         if room_shape.is_intersected_interior_by(&curr_line_segment) {
             let curr_line = obstacle_simplex.border_line(i);
             let curr_min_distance = shape_to_be_contained.distance_to_the_left(&curr_line);
@@ -213,8 +226,7 @@ fn restrain_shape_bounded(
     }
     let mut cut_line: Option<Line> = None;
     for i in 0..obstacle_simplex.border_line_count() {
-        let obstacle_tile = TileShape::Simplex(obstacle_simplex.clone());
-        let curr_line_segment = LineSegment::from_shape(&obstacle_tile, i);
+        let curr_line_segment = LineSegment::from_shape(obstacle_tile, i);
         if room_shape.is_intersected_interior_by(&curr_line_segment) {
             let curr_line = obstacle_simplex.border_line(i);
             if shape_to_be_contained.side_of_line(&curr_line) == Side::Collinear {
@@ -246,7 +258,7 @@ fn restrain_shape_bounded(
             layer: room.layer,
             contained_shape: shape_to_be_contained.intersection(&opposite_half_plane),
         };
-        result.extend(restrain_shape_bounded(&rest_room, obstacle_shape, depth - 1));
+        result.extend(restrain_shape_prepared(&rest_room, obstacle_tile, depth - 1));
     }
     result
 }

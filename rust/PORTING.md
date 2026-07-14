@@ -243,6 +243,12 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 90): restrain_shape converts the obstacle to a
+  simplex once and shares it through the recursion (previously it
+  cloned the simplex per border line in two loops and re-converted on
+  every recursion step). Behaviour-neutral (interf_u bit-identical);
+  cap-bound coldfire runs vary a few nets run-to-run with wall-clock
+  deadlines — treat single-run deltas under ~5 nets as noise.
 - 2026-07-15 (iter 89): bounding-box pre-filters in the three restrain
   / door loops (obstacle x piece, piece x existing room, door touch
   tests) skip the exact simplex intersections for separated pairs.
