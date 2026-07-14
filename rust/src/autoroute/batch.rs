@@ -285,6 +285,24 @@ pub fn batch_route_passes(
     batch_route_passes_with_time_limit(board, request, passes, None)
 }
 
+/// The request adjusted to `net_no`'s net class rules: its trace half
+/// width and via padstack when the imported rules define them.
+fn request_for_net(board: &BasicBoard, net_no: i32, base: &BatchRequest) -> BatchRequest {
+    let class_half_width = board.rules.get_trace_half_width(net_no, 0);
+    BatchRequest {
+        trace_half_width: if class_half_width > 0 {
+            class_half_width
+        } else {
+            base.trace_half_width
+        },
+        via_padstack: board
+            .rules
+            .via_padstack_for_net(net_no)
+            .unwrap_or(base.via_padstack),
+        ..*base
+    }
+}
+
 /// Like [`batch_route_passes`] with an optional wall-clock limit checked
 /// between nets (Java: BatchAutorouter's TimeLimit); on expiry the batch
 /// stops after the current connection and reports the state so far.
@@ -331,7 +349,8 @@ pub fn batch_route_passes_with_time_limit(
             if board.net_is_completely_connected(net_no) {
                 continue;
             }
-            let result = route_net_with_ripup(board, net_no, &pass_request, ripup_penalty);
+            let net_request = request_for_net(board, net_no, &pass_request);
+            let result = route_net_with_ripup(board, net_no, &net_request, ripup_penalty);
             total.routed_connections += result.routed_connections;
             failed_this_pass += result.failed_connections;
         }
@@ -395,7 +414,8 @@ pub fn batch_route_passes_with_time_limit(
             if time_limit.is_some_and(|t| t.limit_exceeded()) {
                 break;
             }
-            let result = route_net_with_ripup(board, net_no, &restart_request, ripup_penalty);
+            let net_request = request_for_net(board, net_no, &restart_request);
+            let result = route_net_with_ripup(board, net_no, &net_request, ripup_penalty);
             restart.routed_connections += result.routed_connections;
             restart.failed_connections += result.failed_connections;
         }

@@ -187,6 +187,16 @@ impl BoardRules {
         class.set_trace_clearance_class(clearance_class);
     }
 
+    /// The via padstack routing `net_no` should use, from the net's class
+    /// via rule (the first via info of the rule).
+    pub fn via_padstack_for_net(&self, net_no: i32) -> Option<usize> {
+        let net = self.nets.get_by_no(net_no)?;
+        let rule_id = self.net_classes.get(net.get_class()).get_via_rule()?;
+        let rule = self.via_rules.get(rule_id)?;
+        let via_info_id = *rule.vias().first()?;
+        Some(self.via_infos.get(via_info_id).get_padstack())
+    }
+
     /// The index of the default via rule, if any.
     pub fn default_via_rule_id(&self) -> Option<usize> {
         if self.via_rules.is_empty() {

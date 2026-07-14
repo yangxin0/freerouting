@@ -243,6 +243,16 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 85): net class rules imported and obeyed — (class
+  NAME nets... (circuit (use_via V)) (rule (width W))) now populates
+  NetClasses/ViaInfos/ViaRules, nets get their class, and the batch
+  router overrides trace half width and via padstack per net
+  (request_for_net). Wavefolder's Power nets route at 400 um with the
+  800:400 via (SES shows both 2500 and 4000 widths). A class listing
+  no nets updates the default class. Fleet: wavefolder 31/31,
+  8088sbc 104/104, interf_u 165/173, J2 23/24 unchanged; NormalPuzzle
+  69/72 (was 71 — its classes demand 10 mil traces and a specific via,
+  which we previously ignored; honest-rules result).
 - 2026-07-15 (iter 84): wall-clock budget split — the normal passes
   now get 70% of the time limit, reserving the rest for the restart
   fallback (previously the passes consumed everything and the fallback

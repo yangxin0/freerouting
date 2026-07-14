@@ -133,6 +133,11 @@ impl ViaRule {
         self.list.push(via);
     }
 
+    /// The via infos of this rule in priority order.
+    pub fn vias(&self) -> &[ViaInfoId] {
+        &self.list
+    }
+
     /// Removes `via` from the rule; false if it was not contained.
     pub fn remove_via(&mut self, via: ViaInfoId) -> bool {
         match self.list.iter().position(|&v| v == via) {

@@ -199,6 +199,74 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
         }
     }
 
+    // network classes: per-class trace width, clearance and via
+    // ((class NAME net... (circuit (use_via V)) (rule (width W) ...)))
+    for network in pcb.children("network") {
+        for class_node in network.children("class") {
+            let mut class_args = class_node.args();
+            let Some(class_name) = class_args.next() else {
+                continue;
+            };
+            let member_nets: Vec<&str> = class_args.collect();
+            let half_width = class_node
+                .child("rule")
+                .and_then(|r| r.child("width"))
+                .and_then(|w| w.arg_f64())
+                .map(&scale)
+                .map(|w| (w / 2).max(1));
+            let via_padstack = class_node
+                .child("circuit")
+                .and_then(|c| c.child("use_via"))
+                .and_then(|u| u.arg())
+                .and_then(|name| padstack_nos.get(name).copied());
+            // the class listing no nets describes the default rules
+            let class_idx = if member_nets.is_empty() {
+                rules.get_default_net_class()
+            } else {
+                let ls = rules.layer_structure().clone();
+                rules.net_classes.append(class_name, &ls, false)
+            };
+            {
+                let class = rules.net_classes.get_mut(class_idx);
+                if let Some(hw) = half_width {
+                    class.set_trace_half_width(hw);
+                }
+                class.set_trace_clearance_class(1);
+            }
+            if let Some(padstack_no) = via_padstack {
+                let via_info = crate::rules::ViaInfo::new(
+                    format!("via::{class_name}"),
+                    padstack_no,
+                    1,
+                    false,
+                );
+                if let Some(via_info_id) = rules.via_infos.add(via_info) {
+                    let mut via_rule = crate::rules::ViaRule::new(class_name);
+                    via_rule.append_via(via_info_id);
+                    rules.via_rules.push(via_rule);
+                    let rule_id = rules.via_rules.len() - 1;
+                    rules
+                        .net_classes
+                        .get_mut(class_idx)
+                        .set_via_rule(Some(rule_id));
+                }
+            }
+            for net_name in member_nets {
+                let numbers: Vec<i32> = rules
+                    .nets
+                    .get_by_name(net_name)
+                    .iter()
+                    .map(|n| n.net_number)
+                    .collect();
+                for no in numbers {
+                    if let Some(net) = rules.nets.get_by_no_mut(no) {
+                        net.set_class(class_idx);
+                    }
+                }
+            }
+        }
+    }
+
     let mut board = BasicBoard::new(layer_structure, rules, padstacks);
     board.resolution = resolution.round() as i32;
 
