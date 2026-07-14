@@ -170,9 +170,21 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   from-scratch benchmark jumped 165/173 → **173/173 (100%) in 123 s,
   0 failed**; total length now 4.85e7 (sane), SES 68.6 kB.
 
+- 2026-07-14 (iter 70): first multi-board sweep (60 s limit each,
+  from scratch, `--time-limit-s`): ecc83 13/13 (0.02 s);
+  rpi_splitter 5/5; NormalPuzzle 70/72 (needed the no-"Via*"-padstack
+  fallback); display-8-digit 29/30 (VCC); pic_programmer 109/111
+  (1.2 s); 8088sbc 98/104; interf_u 173/173 —
+  but wavefolder 17/31 and J2_reference 13/24 (see open issues).
+
 ## Open issues
 
-- (none currently)
+- Issue153-wavefolder routes only 17/31 in 60 s: 14 failures on
+  transistor pin nets (Q1–Q6) and power. Congestion or a pad-shape
+  import gap; needs investigation.
+- Issue026-J2_reference fails 11/24 nets instantly (3.4 ms total):
+  failures with no search time smell like missing start/target rooms —
+  likely an import gap (padstack shapes or pin-net binding).
 
 ## Notes / decisions log
 

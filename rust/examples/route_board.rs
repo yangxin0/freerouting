@@ -1,6 +1,7 @@
 //! Demo: import a DSN file, batch-route all nets, export the session.
 //!
 //! Usage: cargo run --release --example route_board [path/to/board.dsn]
+//!        [--strip-wiring] [--time-limit-s N]
 
 use freerouting::autoroute::{batch_route_passes_with_time_limit, BatchRequest};
 use freerouting::datastructures::TimeLimit;
@@ -31,7 +32,10 @@ fn main() {
         board.item_count()
     );
 
-    // pick a via padstack: the first one whose name starts with "Via"
+    // pick a via padstack: the first one whose name starts with "Via",
+    // else any padstack spanning all layers, else none (0 disables the
+    // drill expansions and routing stays on one layer per connection)
+    let all_layers = board.layer_structure.layer_count().saturating_sub(1);
     let via_padstack = (1..=board.padstacks.count())
         .find(|no| {
             board
@@ -39,7 +43,18 @@ fn main() {
                 .get_by_no(*no)
                 .is_some_and(|p| p.name.starts_with("Via"))
         })
-        .expect("no via padstack");
+        .or_else(|| {
+            (1..=board.padstacks.count()).find(|no| {
+                board
+                    .padstacks
+                    .get_by_no(*no)
+                    .is_some_and(|p| p.from_layer() == 0 && p.to_layer() == all_layers)
+            })
+        })
+        .unwrap_or(0);
+    if via_padstack == 0 {
+        println!("no via padstack found: routing without layer changes");
+    }
     let request = BatchRequest {
         trace_half_width: board.rules.get_min_trace_half_width().max(500),
         clearance_class: 1,
@@ -52,8 +67,15 @@ fn main() {
 
     let t1 = Instant::now();
     let net_count = board.rules.nets.max_net_no();
-    // bound the batch to 5 minutes of wall clock
-    let time_limit = TimeLimit::new(300_000);
+    // bound the batch to 5 minutes of wall clock (or --time-limit-s)
+    let args: Vec<String> = std::env::args().collect();
+    let limit_s: u64 = args
+        .iter()
+        .position(|a| a == "--time-limit-s")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300);
+    let time_limit = TimeLimit::new(limit_s * 1000);
     let result =
         batch_route_passes_with_time_limit(&mut board, &request, 3, Some(&time_limit));
     let mut complete_nets = 0usize;
@@ -91,9 +113,13 @@ fn main() {
         "pull tight in {:?}: {} corners removed, trace length {:.0} -> {:.0} ({:.1}% shorter)",
         t2.elapsed(),
         removed,
-        len_before,
-        len_after,
-        (1.0 - len_after / len_before.max(1.0)) * 100.0
+        len_before.max(0.0),
+        len_after.max(0.0),
+        if len_before > 0.0 {
+            (1.0 - len_after / len_before) * 100.0
+        } else {
+            0.0
+        }
     );
 
     let ses = export_ses(&board, "routed_board", 10);
