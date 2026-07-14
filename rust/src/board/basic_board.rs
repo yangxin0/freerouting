@@ -274,7 +274,16 @@ impl BasicBoard {
                 ItemKind::PolylineTrace(t) => {
                     *point == t.first_corner() || *point == t.last_corner()
                 }
-                ItemKind::Via(v) => *point == Point::Int(v.center),
+                // a trace may end anywhere inside a pad/via shape, not
+                // only at its center (pad shapes can be off-center, e.g.
+                // the staggered TO-92 pads); Java uses shape containment
+                ItemKind::Via(v) => {
+                    *point == Point::Int(v.center)
+                        || other
+                            .tile_shapes(&self.padstacks)
+                            .iter()
+                            .any(|(s, _)| s.contains(point))
+                }
                 ItemKind::ObstacleArea(a) => a.is_conduction && a.area.contains(point),
             };
             if touches {
@@ -300,7 +309,30 @@ impl BasicBoard {
                 r
             }
             ItemKind::Via(v) => {
-                self.get_normal_contacts_at(id, &Point::Int(v.center), false)
+                let mut r = self.get_normal_contacts_at(id, &Point::Int(v.center), false);
+                // traces may also end anywhere inside the pad shapes
+                for (shape, layer) in item.tile_shapes(&self.padstacks) {
+                    for other_id in self.overlapping_items(&shape, Some(layer)) {
+                        if other_id == id {
+                            continue;
+                        }
+                        let Some(other) = self.get_item(other_id) else {
+                            continue;
+                        };
+                        if !other.base.shares_net(&item.base) {
+                            continue;
+                        }
+                        if let ItemKind::PolylineTrace(t) = &other.kind {
+                            if t.layer == layer
+                                && (shape.contains(&t.first_corner())
+                                    || shape.contains(&t.last_corner()))
+                            {
+                                r.push(other_id);
+                            }
+                        }
+                    }
+                }
+                r
             }
             ItemKind::ObstacleArea(a) => {
                 // a conduction area contacts the connectable items whose

@@ -194,18 +194,21 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 
 ## Open issues
 
-- Issue153-wavefolder routes only 17/31 in 60 s: 14 failures on
-  transistor pin nets (Q1–Q6) and power. Ruled out so far (results
-  bit-identical after each fix): pad rotation, oval-pad bounding-box
-  over-approximation (ovals now import as octagon unions), back-side
-  shape mirroring/layer flip (now implemented). A failing net fails
-  even ALONE on the empty board with valid start rooms on both ends
-  (search exhausts ~30k expansions), so the target is unreachable in
-  the room graph. TO-92 pads are 1100x1800 um at 1270 um pitch
-  (170 um gaps); suspect the door-section shrink by trace half-width
-  makes every door around the tight pad column unusably narrow —
-  Java expands into TARGET doors without the width shrink
-  (TargetItemExpansionDoor). Next: port that special case.
+- Issue153-wavefolder 17/31 RESOLVED → 29/31 (iter 74): the real bug
+  was contact detection, not reachability. The staggered TO-92 pads
+  have off-centre shapes ([0,±400] um), the maze ends traces at the
+  pad shape's centre of gravity, and trace-to-pin contact required
+  exact equality with the PIN CENTER — so routed traces never counted
+  as connections and route_net's no-progress guard reported failure.
+  Fix: trace-to-pin contact by shape containment (both directions in
+  get_normal_contacts*), like Java. Two boards' worth of earlier
+  "bit-identical after fix" confusion had a second cause: `cargo build
+  --release` does NOT rebuild examples, so several benchmark runs used
+  a stale route_board binary — always build with `--examples` (or
+  `--example route_board`) before benchmarking.
+- interf_u after the contact fix: still 173/173, but 249 s (was ~112 s).
+  The containment check runs tile_shapes() on the hot negative path of
+  get_normal_contacts_at; needs a cheap bounding-box pre-filter.
 - Issue026-J2_reference GND (22 pins) still incomplete after the
   rotation fix.
 - Non-quarter-turn component rotations still only rotate pin offsets,
