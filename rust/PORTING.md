@@ -71,7 +71,8 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 - [x] interim grid A* router → `autoroute/simple_router.rs` (NOT a Java port: stand-in so the pipeline routes end to end; uses exact board obstacle queries, inserts polyline traces + layer-change vias)
 - [x] expansion-room object model → `autoroute/expansion_room.rs` (ExpansionRoom/Door/MazeSearchElement as arena RoomGraph; door section segmentation incl. 2-dim restraint lines; + TileShape::diagonal_corner_segment)
 - [x] free-space room completion → `autoroute/room_completion.rs` (ShapeSearchTree.complete_shape + restrain_shape with deterministic obstacle order; + TileShape distance_to_the_left / side_of_line / is_intersected_interior_by / half_plane; divide_large_room pending)
-- [ ] faithful autoroute port remaining: AutorouteEngine (room graph maintenance, clearance compensation), SortedRoomNeighbours (door creation), MazeSearchAlgo, Locate/InsertFoundConnectionAlgo, BatchAutorouter, fanout, optimizer
+- [x] AutorouteEngine core → `autoroute/engine.rs` (per-net room graph; complete rooms restrained against board + existing rooms; doors to touching rooms; target doors to own-net items; lazy frontier expansion per border edge — simplified vs SortedRoomNeighbours' sorted-edge-gap algorithm, documented)
+- [ ] faithful autoroute port remaining: SortedRoomNeighbours faithful door/gap algorithm, clearance compensation, MazeSearchAlgo, Locate/InsertFoundConnectionAlgo, BatchAutorouter, fanout, optimizer
 
 ## Phase 4 — I/O and CLI
 

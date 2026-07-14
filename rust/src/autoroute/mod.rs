@@ -4,10 +4,12 @@
 //! MazeSearchAlgo) is ported step by step; `simple_router` provides an
 //! interim grid router so the pipeline is routable end to end meanwhile.
 
+pub mod engine;
 pub mod expansion_room;
 pub mod room_completion;
 pub mod simple_router;
 
+pub use engine::{AutorouteEngine, TargetDoor};
 pub use expansion_room::{
     ExpansionDoor, ExpansionRoom, MazeSearchElement, RoomGraph, RoomKind,
 };
