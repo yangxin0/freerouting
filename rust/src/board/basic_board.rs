@@ -276,13 +276,28 @@ impl BasicBoard {
                 }
                 // a trace may end anywhere inside a pad/via shape, not
                 // only at its center (pad shapes can be off-center, e.g.
-                // the staggered TO-92 pads); Java uses shape containment
+                // the staggered TO-92 pads); Java uses shape containment.
+                // The cached padstack bounding box rejects cheaply before
+                // the tile shapes are built.
                 ItemKind::Via(v) => {
                     *point == Point::Int(v.center)
-                        || other
-                            .tile_shapes(&self.padstacks)
-                            .iter()
-                            .any(|(s, _)| s.contains(point))
+                        || (self
+                            .padstacks
+                            .get_by_no(v.padstack)
+                            .is_some_and(|p| {
+                                let bb = p.bounding_box();
+                                !bb.is_empty() && {
+                                    let f = point.to_float();
+                                    f.x >= (v.center.x + bb.ll.x) as f64
+                                        && f.x <= (v.center.x + bb.ur.x) as f64
+                                        && f.y >= (v.center.y + bb.ll.y) as f64
+                                        && f.y <= (v.center.y + bb.ur.y) as f64
+                                }
+                            })
+                            && other
+                                .tile_shapes(&self.padstacks)
+                                .iter()
+                                .any(|(s, _)| s.contains(point)))
                 }
                 ItemKind::ObstacleArea(a) => a.is_conduction && a.area.contains(point),
             };

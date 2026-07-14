@@ -206,9 +206,15 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   --release` does NOT rebuild examples, so several benchmark runs used
   a stale route_board binary — always build with `--examples` (or
   `--example route_board`) before benchmarking.
-- interf_u after the contact fix: still 173/173, but 249 s (was ~112 s).
-  The containment check runs tile_shapes() on the hot negative path of
-  get_normal_contacts_at; needs a cheap bounding-box pre-filter.
+- interf_u after the contact fix: still 173/173, but ~253 s (was
+  ~112 s). Worktree bisect attributes the ENTIRE slowdown to the
+  oval-pads-as-octagons import (commit 3bf05067; ~150 pads now have 8
+  border lines instead of 4 in every room restrain) — the contact fix
+  itself costs nothing here (bit-identical output). A padstack
+  bounding-box pre-filter was added to the containment check anyway
+  (cheap, correct). Future optimization lever: octagon-specialized
+  restrain/intersection paths like Java's ShapeSearchTree instead of
+  the unconditional Simplex conversion in restrain_shape.
 - Issue026-J2_reference GND (22 pins) still incomplete after the
   rotation fix.
 - Non-quarter-turn component rotations still only rotate pin offsets,

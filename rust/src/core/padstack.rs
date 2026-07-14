@@ -5,7 +5,7 @@
 //! [`TileShape`] here (circles are approximated/deferred like elsewhere in
 //! the port).
 
-use crate::geometry::planar::{IntDirection, TileShape};
+use crate::geometry::planar::{IntBox, IntDirection, TileShape};
 use std::cell::Cell;
 
 #[derive(Debug, Clone)]
@@ -22,6 +22,7 @@ pub struct Padstack {
     shapes: Vec<Option<TileShape>>,
     /// Cached drill radius (computed from the name on first use).
     cached_drill_radius: Cell<Option<f64>>,
+    cached_bounding_box: Cell<Option<IntBox>>,
 }
 
 impl Padstack {
@@ -39,6 +40,7 @@ impl Padstack {
             placed_absolute,
             shapes,
             cached_drill_radius: Cell::new(None),
+            cached_bounding_box: Cell::new(None),
         }
     }
 
@@ -67,6 +69,20 @@ impl Padstack {
     /// The layer count of the board of this padstack.
     pub fn board_layer_count(&self) -> usize {
         self.shapes.len()
+    }
+
+    /// The bounding box of all shapes of this padstack (origin-relative).
+    /// Cached after the first call.
+    pub fn bounding_box(&self) -> IntBox {
+        if let Some(cached) = self.cached_bounding_box.get() {
+            return cached;
+        }
+        let mut bb = IntBox::EMPTY;
+        for shape in self.shapes.iter().flatten() {
+            bb = bb.union(shape.bounding_box());
+        }
+        self.cached_bounding_box.set(Some(bb));
+        bb
     }
 
     /// The smallest half extent of any shape of this padstack.
