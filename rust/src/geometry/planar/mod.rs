@@ -19,6 +19,7 @@ pub mod point;
 pub mod rational_point;
 pub mod rational_vector;
 pub mod side;
+pub mod simplex;
 pub mod vector;
 
 pub use direction::{BigIntDirection, Direction};
@@ -34,4 +35,5 @@ pub use point::Point;
 pub use rational_point::RationalPoint;
 pub use rational_vector::RationalVector;
 pub use side::Side;
+pub use simplex::Simplex;
 pub use vector::Vector;

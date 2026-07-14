@@ -157,6 +157,12 @@ impl IntDirection {
     pub fn angle_approx(self) -> f64 {
         (self.y as f64).atan2(self.x as f64)
     }
+
+    /// The determinant of vectors representing this direction and `other`
+    /// (positive if `other` is counterclockwise from this direction).
+    pub fn determinant(self, other: IntDirection) -> i64 {
+        self.get_vector().determinant(other.get_vector())
+    }
 }
 
 /// Orders directions by their angle with the positive x-axis
