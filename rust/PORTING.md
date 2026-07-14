@@ -72,8 +72,8 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 - [x] expansion-room object model → `autoroute/expansion_room.rs` (ExpansionRoom/Door/MazeSearchElement as arena RoomGraph; door section segmentation incl. 2-dim restraint lines; + TileShape::diagonal_corner_segment)
 - [x] free-space room completion → `autoroute/room_completion.rs` (ShapeSearchTree.complete_shape + restrain_shape with deterministic obstacle order; + TileShape distance_to_the_left / side_of_line / is_intersected_interior_by / half_plane; divide_large_room pending)
 - [x] AutorouteEngine core → `autoroute/engine.rs` (per-net room graph; complete rooms restrained against board + existing rooms; doors to touching rooms; target doors to own-net items; lazy frontier expansion per border edge — simplified vs SortedRoomNeighbours' sorted-edge-gap algorithm, documented)
-- [x] maze search core → `autoroute/maze_search.rs` (Dijkstra over door sections with MazeSearchElement occupation/backtracking, lazy room expansion, target-door termination, backtracked corner insertion as trace; single-layer, no ripup/shove yet)
-- [ ] faithful autoroute port remaining: SortedRoomNeighbours faithful door/gap algorithm, clearance compensation, multi-layer via expansion (ExpansionDrill), ripup/shove, faithful Locate/InsertFoundConnectionAlgo corner calculation, BatchAutorouter, fanout, optimizer
+- [x] maze search core → `autoroute/maze_search.rs` (Dijkstra over door sections + drill steps with backtrack-node arena; multi-layer via expansion at entry locations — simplification of DrillPage candidate generation, documented; per-layer trace + via insertion; no ripup/shove yet)
+- [ ] faithful autoroute port remaining: SortedRoomNeighbours faithful door/gap algorithm, clearance compensation, DrillPage-based drill candidates, ripup/shove, faithful Locate/InsertFoundConnectionAlgo corner calculation, BatchAutorouter, fanout, optimizer
 
 ## Phase 4 — I/O and CLI
 

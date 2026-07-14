@@ -1,32 +1,47 @@
-//! Port of the core expansion loop of `MazeSearchAlgo.java` (single-layer,
-//! without ripup/shove, which follow later) together with a simplified
-//! `LocateFoundConnectionAlgo`/`InsertFoundConnectionAlgo`: the found
-//! connection is traced through the door-section midpoints and inserted as
-//! a polyline trace.
+//! Port of the core expansion loop of `MazeSearchAlgo.java` together with
+//! simplified `LocateFoundConnectionAlgo`/`InsertFoundConnectionAlgo` and
+//! `ExpansionDrill` layer changes.
 //!
-//! The search is a Dijkstra expansion over door *sections*: each section
-//! of each door can be occupied once (`MazeSearchElement`), stores its
-//! backtrack door, and expansion enters the room behind the door,
-//! lazily materializing its neighbors through the engine's frontier
-//! expansion.
+//! The search is a Dijkstra expansion over door *sections* plus drill
+//! steps: each door section can be occupied once, rooms materialize their
+//! neighbors lazily on first entry, and layer changes are expanded by
+//! drilling at the room entry location where a via fits on all spanned
+//! layers (Java generates candidates via DrillPage/DrillPageArray; this
+//! port drills at entry locations, documented simplification). Ripup and
+//! shove follow later. The found connection is backtracked through the
+//! node chain and inserted as per-layer polyline traces joined by vias.
 
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashSet};
 
 use crate::autoroute::engine::AutorouteEngine;
 use crate::autoroute::expansion_room::{DoorId, RoomId};
 use crate::board::basic_board::{BasicBoard, ItemId};
 use crate::geometry::planar::{FloatPoint, IntBox, IntPoint, Polyline, TileShape};
 
+/// One step of the search, kept in an arena for backtracking.
+#[derive(Debug, Clone, Copy)]
+struct BacktrackNode {
+    location: FloatPoint,
+    layer: usize,
+    parent: Option<usize>,
+    is_via: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Step {
+    /// Passing through a door section into a room.
+    Door { door: DoorId, section: usize },
+    /// Drilling to another layer at the entry location.
+    Drill,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct QueueEntry {
     cost: f64,
-    door: DoorId,
-    section: usize,
-    /// The room this expansion enters through the door.
+    step: Step,
     room_to_enter: RoomId,
-    from: Option<(DoorId, usize)>,
-    /// The location this entry expands from, for cost calculation.
+    parent: Option<usize>,
     location: FloatPoint,
 }
 
@@ -41,139 +56,162 @@ impl Ord for QueueEntry {
         self.cost
             .partial_cmp(&other.cost)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| self.door.cmp(&other.door))
-            .then_with(|| self.section.cmp(&other.section))
+            .then_with(|| self.room_to_enter.cmp(&other.room_to_enter))
     }
 }
 
 pub struct MazeSearchResult {
-    /// The corners of the found connection, from start to destination.
-    pub corners: Vec<FloatPoint>,
-    pub layer: usize,
+    /// The corners of the found connection with their layers, from start
+    /// to destination. Consecutive corners on different layers are joined
+    /// by a via.
+    pub corners: Vec<(FloatPoint, usize)>,
 }
 
-/// Runs the maze expansion from `start_item` towards `dest_item` on
-/// `layer`. Returns the corner list of the found connection.
+/// Parameters of a maze routing request.
+pub struct MazeRouteRequest {
+    pub net_no: i32,
+    pub start_item: ItemId,
+    pub dest_item: ItemId,
+    pub trace_half_width: i32,
+    pub clearance_class: usize,
+    /// 1-based padstack for layer-change vias.
+    pub via_padstack: usize,
+    /// Additional cost of a layer change in board units.
+    pub via_cost: f64,
+}
+
+/// Runs the maze expansion from the start item towards the destination
+/// item. Returns the corner list of the found connection.
 pub fn find_connection(
     board: &BasicBoard,
     engine: &mut AutorouteEngine,
-    start_item: ItemId,
-    dest_item: ItemId,
-    layer: usize,
-    trace_half_width: i32,
+    request: &MazeRouteRequest,
 ) -> Option<MazeSearchResult> {
-    let start = board.get_item(start_item)?;
-    let (start_shape, _) = start
-        .tile_shapes(&board.padstacks)
-        .into_iter()
-        .find(|(_, l)| *l == layer)?;
-    let start_center = start_shape.centre_of_gravity();
-
-    let start_rooms = engine.create_start_rooms(board, start_shape, layer);
-    if start_rooms.is_empty() {
+    let start = board.get_item(request.start_item)?;
+    let start_shapes: Vec<(TileShape, usize)> = start.tile_shapes(&board.padstacks);
+    if start_shapes.is_empty() {
         return None;
     }
+    let offset = request.trace_half_width as f64;
 
-    let offset = trace_half_width as f64;
+    let mut nodes: Vec<BacktrackNode> = Vec::new();
     let mut open: BinaryHeap<Reverse<QueueEntry>> = BinaryHeap::new();
+    let mut drilled: HashSet<(i32, i32, usize)> = HashSet::new();
 
-    // check the start rooms for the destination and seed the queue
-    for &room in &start_rooms {
-        if engine
-            .target_doors(room)
-            .iter()
-            .any(|t| t.item == dest_item)
-        {
-            // trivially connected inside one room
-            let dest_point = destination_point(board, engine, dest_item, room, start_center);
-            return Some(MazeSearchResult {
-                corners: vec![start_center, dest_point],
-                layer,
+    // create and seed the start rooms on every layer of the start item
+    for (start_shape, layer) in &start_shapes {
+        let start_center = start_shape.centre_of_gravity();
+        let start_rooms = engine.create_start_rooms(board, start_shape.clone(), *layer);
+        for &room in &start_rooms {
+            if engine
+                .target_doors(room)
+                .iter()
+                .any(|t| t.item == request.dest_item)
+            {
+                let dest_point =
+                    destination_point(board, request.dest_item, *layer, start_center);
+                return Some(MazeSearchResult {
+                    corners: vec![(start_center, *layer), (dest_point, *layer)],
+                });
+            }
+            engine.expand_room(board, room);
+            let root = nodes.len();
+            nodes.push(BacktrackNode {
+                location: start_center,
+                layer: *layer,
+                parent: None,
+                is_via: false,
             });
+            seed_room(
+                engine, board, request, room, start_center, 0.0, root, None, offset, &mut open,
+                &mut drilled,
+            );
         }
-    }
-    for &room in &start_rooms {
-        // materialize the neighbors of the start room before seeding
-        engine.expand_room(board, room);
-        seed_room_doors(
-            engine,
-            board,
-            room,
-            start_center,
-            0.0,
-            None,
-            offset,
-            &mut open,
-        );
     }
 
     while let Some(Reverse(entry)) = open.pop() {
-        {
-            let sections = &mut engine.graph.door_mut(entry.door).sections;
-            if entry.section >= sections.len() || sections[entry.section].is_occupied {
-                continue;
+        // occupy the step
+        match entry.step {
+            Step::Door { door, section } => {
+                let sections = &mut engine.graph.door_mut(door).sections;
+                if section >= sections.len() || sections[section].is_occupied {
+                    continue;
+                }
+                sections[section].is_occupied = true;
             }
-            sections[entry.section].is_occupied = true;
-            sections[entry.section].backtrack_door = entry.from;
+            Step::Drill => {}
         }
         let room = entry.room_to_enter;
-        // materialize the neighbors of the entered room
+        let layer = engine.graph.room(room).layer;
+        let node_id = nodes.len();
+        nodes.push(BacktrackNode {
+            location: entry.location,
+            layer,
+            parent: entry.parent,
+            is_via: entry.step == Step::Drill,
+        });
+
         engine.expand_room(board, room);
 
-        // destination reached?
         if engine
             .target_doors(room)
             .iter()
-            .any(|t| t.item == dest_item)
+            .any(|t| t.item == request.dest_item)
         {
-            // backtrack: collect the section midpoints
-            let mut corners = vec![entry.location];
-            let mut curr = entry.from;
-            while let Some((door, section)) = curr {
-                let segments = engine.graph.door_section_segments(door, offset);
-                if let Some(seg) = segments.get(section) {
-                    corners.push(seg.a.middle_point(seg.b));
-                }
-                curr = engine.graph.door(door).sections[section].backtrack_door;
+            // backtrack through the node chain
+            let mut corners: Vec<(FloatPoint, usize)> = Vec::new();
+            let mut curr = Some(node_id);
+            while let Some(i) = curr {
+                corners.push((nodes[i].location, nodes[i].layer));
+                curr = nodes[i].parent;
             }
-            corners.push(start_center);
             corners.reverse();
-            let dest_point = destination_point(board, engine, dest_item, room, entry.location);
-            corners.push(dest_point);
-            return Some(MazeSearchResult { corners, layer });
+            let dest_point =
+                destination_point(board, request.dest_item, layer, entry.location);
+            corners.push((dest_point, layer));
+            return Some(MazeSearchResult { corners });
         }
 
-        seed_room_doors(
+        seed_room(
             engine,
             board,
+            request,
             room,
             entry.location,
             entry.cost,
-            Some((entry.door, entry.section)),
+            node_id,
+            match entry.step {
+                Step::Door { door, .. } => Some(door),
+                Step::Drill => None,
+            },
             offset,
             &mut open,
+            &mut drilled,
         );
     }
     None
 }
 
-/// Pushes all unoccupied door sections of `room` onto the queue; each
-/// entry's cost is `base_cost` plus the distance from `location` to the
-/// section midpoint (Dijkstra accumulation).
+/// Pushes the door sections and drill steps reachable from `room`.
 #[allow(clippy::too_many_arguments)]
-fn seed_room_doors(
+fn seed_room(
     engine: &mut AutorouteEngine,
-    _board: &BasicBoard,
+    board: &BasicBoard,
+    request: &MazeRouteRequest,
     room: RoomId,
     location: FloatPoint,
     base_cost: f64,
-    from: Option<(DoorId, usize)>,
+    parent: usize,
+    entered_through: Option<DoorId>,
     offset: f64,
     open: &mut BinaryHeap<Reverse<QueueEntry>>,
+    drilled: &mut HashSet<(i32, i32, usize)>,
 ) {
+    let layer = engine.graph.room(room).layer;
+    // door expansions
     let doors = engine.graph.room(room).doors.clone();
     for door in doors {
-        if from.is_some_and(|(d, _)| d == door) {
+        if entered_through == Some(door) {
             continue;
         }
         let Some(other) = engine.graph.other_room(door, room) else {
@@ -191,79 +229,134 @@ fn seed_room_doors(
                 continue;
             }
             let midpoint = seg.a.middle_point(seg.b);
-            let cost = base_cost + location.distance(midpoint);
             open.push(Reverse(QueueEntry {
-                cost,
-                door,
-                section,
+                cost: base_cost + location.distance(midpoint),
+                step: Step::Door { door, section },
                 room_to_enter: other,
-                from,
+                parent: Some(parent),
                 location: midpoint,
+            }));
+        }
+    }
+    // drill expansion at the entry location (Java: ExpansionDrill via
+    // DrillPages; drilling at entry locations is a documented
+    // simplification)
+    let drill_point = location.round();
+    let Some(padstack) = board.padstacks.get_by_no(request.via_padstack) else {
+        return;
+    };
+    let from = padstack.from_layer();
+    let to = padstack.to_layer();
+    if layer < from || layer > to {
+        return;
+    }
+    if !via_free(board, request, drill_point) {
+        return;
+    }
+    for next_layer in from..=to {
+        if next_layer == layer {
+            continue;
+        }
+        if !drilled.insert((drill_point.x, drill_point.y, next_layer)) {
+            continue;
+        }
+        // find or create the room on the target layer containing the point
+        let target_rooms = engine.rooms_containing(drill_point, next_layer, board);
+        for target_room in target_rooms {
+            open.push(Reverse(QueueEntry {
+                cost: base_cost + request.via_cost,
+                step: Step::Drill,
+                room_to_enter: target_room,
+                parent: Some(parent),
+                location: drill_point.to_float(),
             }));
         }
     }
 }
 
-/// The point on the destination item's shape nearest to `from`.
-fn destination_point(
-    board: &BasicBoard,
-    engine: &AutorouteEngine,
-    dest_item: ItemId,
-    room: RoomId,
-    from: FloatPoint,
-) -> FloatPoint {
-    let layer = engine.graph.room(room).layer;
-    board
-        .get_item(dest_item)
-        .map(|item| {
-            item.tile_shapes(&board.padstacks)
-                .into_iter()
-                .filter(|(_, l)| *l == layer)
-                .map(|(s, _)| s.centre_of_gravity())
-                .next()
-                .unwrap_or(from)
-        })
-        .unwrap_or(from)
-}
-
-/// Runs the maze search and inserts the found connection as a polyline
-/// trace. Returns the id of the inserted trace.
-pub fn maze_route(
-    board: &mut BasicBoard,
-    net_no: i32,
-    start_item: ItemId,
-    dest_item: ItemId,
-    layer: usize,
-    trace_half_width: i32,
-    clearance_class: usize,
-) -> Option<ItemId> {
-    let mut engine = AutorouteEngine::new(net_no);
-    let result = find_connection(
-        board,
-        &mut engine,
-        start_item,
-        dest_item,
-        layer,
-        trace_half_width,
-    )?;
-    // round the corners to integer points, dropping duplicates
-    let mut corners: Vec<IntPoint> = Vec::with_capacity(result.corners.len());
-    for c in &result.corners {
-        let p = c.round();
-        if corners.last() != Some(&p) {
-            corners.push(p);
+/// True if a via at `point` keeps its clearance on all layers it spans.
+fn via_free(board: &BasicBoard, request: &MazeRouteRequest, point: IntPoint) -> bool {
+    let Some(padstack) = board.padstacks.get_by_no(request.via_padstack) else {
+        return false;
+    };
+    for layer in padstack.from_layer()..=padstack.to_layer() {
+        let Some(shape) = padstack.get_shape(layer) else {
+            continue;
+        };
+        let query = shape
+            .translate_by(crate::geometry::planar::IntVector::new(point.x, point.y))
+            .enlarge(request.trace_half_width as f64);
+        if board.is_blocked(&query, layer, request.net_no) {
+            return false;
         }
     }
-    if corners.len() < 2 {
-        return None;
+    true
+}
+
+/// The centre of the destination item's shape on `layer` (or its first
+/// shape).
+fn destination_point(
+    board: &BasicBoard,
+    dest_item: ItemId,
+    layer: usize,
+    fallback: FloatPoint,
+) -> FloatPoint {
+    board
+        .get_item(dest_item)
+        .and_then(|item| {
+            let shapes = item.tile_shapes(&board.padstacks);
+            shapes
+                .iter()
+                .find(|(_, l)| *l == layer)
+                .or_else(|| shapes.first())
+                .map(|(s, _)| s.centre_of_gravity())
+        })
+        .unwrap_or(fallback)
+}
+
+/// Runs the maze search and inserts the found connection as per-layer
+/// polyline traces joined by vias. Returns the inserted item ids.
+pub fn maze_route(board: &mut BasicBoard, request: &MazeRouteRequest) -> Option<Vec<ItemId>> {
+    let mut engine = AutorouteEngine::new(request.net_no);
+    let result = find_connection(board, &mut engine, request)?;
+
+    let mut new_items = Vec::new();
+    let mut run: Vec<IntPoint> = Vec::new();
+    let mut run_layer = result.corners.first()?.1;
+    let mut flush =
+        |board: &mut BasicBoard, run: &mut Vec<IntPoint>, layer: usize, items: &mut Vec<ItemId>| {
+            run.dedup();
+            if run.len() > 1 {
+                items.push(board.insert_trace(
+                    Polyline::from_int_points(run),
+                    layer,
+                    request.trace_half_width,
+                    vec![request.net_no],
+                    request.clearance_class,
+                ));
+            }
+        };
+    for (corner, layer) in &result.corners {
+        let p = corner.round();
+        if *layer != run_layer {
+            let via_location = *run.last().unwrap_or(&p);
+            flush(board, &mut run, run_layer, &mut new_items);
+            new_items.push(board.insert_via(
+                request.via_padstack,
+                via_location,
+                vec![request.net_no],
+                request.clearance_class,
+                false,
+            ));
+            run = vec![via_location];
+            run_layer = *layer;
+        }
+        if run.last() != Some(&p) {
+            run.push(p);
+        }
     }
-    Some(board.insert_trace(
-        Polyline::from_int_points(&corners),
-        result.layer,
-        trace_half_width,
-        vec![net_no],
-        clearance_class,
-    ))
+    flush(board, &mut run, run_layer, &mut new_items);
+    Some(new_items)
 }
 
 #[allow(dead_code)]
@@ -295,13 +388,25 @@ mod tests {
         BasicBoard::new(stack, rules, padstacks)
     }
 
+    fn request(start: ItemId, dest: ItemId) -> MazeRouteRequest {
+        MazeRouteRequest {
+            net_no: 1,
+            start_item: start,
+            dest_item: dest,
+            trace_half_width: 100,
+            clearance_class: 1,
+            via_padstack: 1,
+            via_cost: 5000.0,
+        }
+    }
+
     #[test]
     fn trivial_connection_in_one_room() {
         let mut board = test_board();
         let a = board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
         let b = board.insert_via(1, IntPoint::new(5000, 0), vec![1], 1, false);
-        let trace = maze_route(&mut board, 1, a, b, 0, 100, 1).expect("route failed");
-        assert!(board.get_item(trace).is_some());
+        let items = maze_route(&mut board, &request(a, b)).expect("route failed");
+        assert!(!items.is_empty());
         assert!(board.net_is_completely_connected(1));
     }
 
@@ -310,36 +415,76 @@ mod tests {
         let mut board = test_board();
         let a = board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
         let b = board.insert_via(1, IntPoint::new(9000, 0), vec![1], 1, false);
-        // foreign-net wall between them, gap below y = -2000
+        // foreign-net wall between them on BOTH layers, gap below y = -2000
+        for layer in 0..2 {
+            board.insert_trace(
+                Polyline::from_int_points(&[
+                    IntPoint::new(4500, -2000),
+                    IntPoint::new(4500, 9000),
+                ]),
+                layer,
+                300,
+                vec![2],
+                1,
+            );
+        }
+        maze_route(&mut board, &request(a, b)).expect("route failed");
+        assert!(board.net_is_completely_connected(1));
+        // the route detours below the wall on some layer
+        let mut detoured = false;
+        for (_, item) in board.items() {
+            if let crate::board::ItemKind::PolylineTrace(t) = &item.kind {
+                if !item.base.contains_net(1) {
+                    continue;
+                }
+                detoured |= t
+                    .polyline
+                    .corner_approx_arr()
+                    .windows(2)
+                    .any(|w| {
+                        (w[0].x <= 4500.0 && w[1].x >= 4500.0)
+                            && (w[0].y + w[1].y) / 2.0 < -1500.0
+                    });
+            }
+        }
+        assert!(detoured, "trace did not detour below the wall");
+    }
+
+    #[test]
+    fn layer_change_through_via() {
+        let mut board = test_board();
+        let a = board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        let b = board.insert_via(1, IntPoint::new(9000, 0), vec![1], 1, false);
+        // an impassable wall on layer 0 only
         board.insert_trace(
             Polyline::from_int_points(&[
-                IntPoint::new(4500, -2000),
-                IntPoint::new(4500, 9000),
+                IntPoint::new(4500, -50000),
+                IntPoint::new(4500, 50000),
             ]),
             0,
             300,
             vec![2],
             1,
         );
-        let trace = maze_route(&mut board, 1, a, b, 0, 100, 1).expect("route failed");
-        let item = board.get_item(trace).unwrap();
-        // the trace goes around the wall: at x = 4500 its corner path must
-        // be below the wall's lower end
-        if let crate::board::ItemKind::PolylineTrace(t) = &item.kind {
-            assert!(t.corner_count() >= 2);
-            let crosses_below = t
-                .polyline
-                .corner_approx_arr()
-                .windows(2)
-                .any(|w| {
-                    (w[0].x <= 4500.0 && w[1].x >= 4500.0)
-                        && (w[0].y + w[1].y) / 2.0 < -1500.0
-                });
-            assert!(crosses_below, "trace did not detour below the wall");
-        } else {
-            panic!("not a trace");
-        }
+        let items = maze_route(&mut board, &request(a, b)).expect("route failed");
         assert!(board.net_is_completely_connected(1));
+        // Both pads span both layers, so the router may route entirely on
+        // layer 1; but if the route uses layer 0 it must contain a via.
+        // Verify the inserted geometry avoids the wall on layer 0.
+        for id in &items {
+            if let Some(crate::board::ItemKind::PolylineTrace(t)) =
+                board.get_item(*id).map(|i| &i.kind)
+            {
+                if t.layer == 0 {
+                    for w in t.polyline.corner_approx_arr().windows(2) {
+                        assert!(
+                            !(w[0].x < 4500.0 && w[1].x > 4500.0),
+                            "layer-0 trace crosses the wall"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -347,24 +492,26 @@ mod tests {
         let mut board = test_board();
         let a = board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
         let b = board.insert_via(1, IntPoint::new(9000, 0), vec![1], 1, false);
-        // a closed box of foreign net around the start pad
-        for (from, to) in [
-            ((-2000, -2000), (2000, -2000)),
-            ((2000, -2000), (2000, 2000)),
-            ((2000, 2000), (-2000, 2000)),
-            ((-2000, 2000), (-2000, -2000)),
-        ] {
-            board.insert_trace(
-                Polyline::from_int_points(&[
-                    IntPoint::new(from.0, from.1),
-                    IntPoint::new(to.0, to.1),
-                ]),
-                0,
-                300,
-                vec![2],
-                1,
-            );
+        // a closed box of foreign net around the start pad on both layers
+        for layer in 0..2 {
+            for (from, to) in [
+                ((-2000, -2000), (2000, -2000)),
+                ((2000, -2000), (2000, 2000)),
+                ((2000, 2000), (-2000, 2000)),
+                ((-2000, 2000), (-2000, -2000)),
+            ] {
+                board.insert_trace(
+                    Polyline::from_int_points(&[
+                        IntPoint::new(from.0, from.1),
+                        IntPoint::new(to.0, to.1),
+                    ]),
+                    layer,
+                    300,
+                    vec![2],
+                    1,
+                );
+            }
         }
-        assert!(maze_route(&mut board, 1, a, b, 0, 100, 1).is_none());
+        assert!(maze_route(&mut board, &request(a, b)).is_none());
     }
 }

@@ -160,6 +160,33 @@ impl AutorouteEngine {
         new_rooms
     }
 
+    /// The complete rooms containing `point` on `layer`; if none exists
+    /// yet, a room is completed around the point (used for drill targets).
+    pub fn rooms_containing(
+        &mut self,
+        point: crate::geometry::planar::IntPoint,
+        layer: usize,
+        board: &BasicBoard,
+    ) -> Vec<RoomId> {
+        let p = crate::geometry::planar::Point::Int(point);
+        let existing: Vec<RoomId> = self
+            .complete_rooms
+            .iter()
+            .copied()
+            .filter(|&r| {
+                self.graph.room(r).layer == layer && self.graph.room(r).shape.contains(&p)
+            })
+            .collect();
+        if !existing.is_empty() {
+            return existing;
+        }
+        self.create_start_rooms(
+            board,
+            TileShape::Box(crate::geometry::planar::IntBox::new(point, point)),
+            layer,
+        )
+    }
+
     /// Creates and completes the start rooms around a point-like shape
     /// (e.g. the connection shape of the start item).
     pub fn create_start_rooms(
