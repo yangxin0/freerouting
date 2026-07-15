@@ -194,18 +194,24 @@ pub fn route_net_with_store(
             break;
         };
         // route component to component (Java: p_start_set/p_dest_set):
-        // the maze may start from and arrive at ANY endpoint-capable item
-        // of the two sets (drills/pads — arriving mid-trace does not
-        // register a contact until junction splitting is ported)
+        // the maze may start from any endpoint-capable item and arrive at
+        // ANY connectable item of the destination component — trace
+        // arrivals land exactly on the centerline lattice so the junction
+        // split registers the contact (power-net taps)
         let start_component = candidate_sets
             .iter()
             .find(|c| c.contains(&start))
             .cloned()
             .unwrap_or_default();
-        let dest_component = candidate_sets
+        let dest_component = components
             .iter()
             .find(|c| c.contains(&dest))
-            .cloned()
+            .map(|c| {
+                c.iter()
+                    .copied()
+                    .filter(|id| board.get_item(*id).is_some_and(|it| it.is_connectable()))
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         if crate::debug::maze() {
             eprintln!(

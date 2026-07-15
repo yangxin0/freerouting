@@ -213,6 +213,40 @@ impl Polyline {
         (0..self.arr.len() - 1).map(|i| self.corner(i)).collect()
     }
 
+    /// The integer point ON the centerline nearest to `from`: for each
+    /// segment the integer lattice points are a + k·(d/gcd); the nearest
+    /// valid k is clamped to the segment. Exact by construction, so
+    /// junction splitting at the returned point always succeeds.
+    pub fn nearest_lattice_point(&self, from: FloatPoint) -> Option<IntPoint> {
+        fn gcd(a: i64, b: i64) -> i64 {
+            if b == 0 { a.abs().max(1) } else { gcd(b, a % b) }
+        }
+        let corners = self.corner_approx_arr();
+        let mut best: Option<(f64, IntPoint)> = None;
+        for w in corners.windows(2) {
+            let (a, b) = (w[0].round(), w[1].round());
+            let (dx, dy) = ((b.x - a.x) as i64, (b.y - a.y) as i64);
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            let g = gcd(dx, dy);
+            let (sx, sy) = (dx / g, dy / g);
+            let step2 = (sx * sx + sy * sy) as f64;
+            let t = ((from.x - a.x as f64) * sx as f64 + (from.y - a.y as f64) * sy as f64)
+                / step2;
+            let k = t.round().clamp(0.0, g as f64) as i64;
+            let cand = IntPoint::new(
+                a.x + (k * sx) as i32,
+                a.y + (k * sy) as i32,
+            );
+            let d = from.distance(FloatPoint::new(cand.x as f64, cand.y as f64));
+            if best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, cand));
+            }
+        }
+        best.map(|(_, p)| p)
+    }
+
     pub fn corner_approx_arr(&self) -> Vec<FloatPoint> {
         if self.arr.len() < 2 {
             return Vec::new();

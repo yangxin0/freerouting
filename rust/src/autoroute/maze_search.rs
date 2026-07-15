@@ -595,6 +595,30 @@ fn destination_point(
             if matches!(item.kind, crate::board::ItemKind::ObstacleArea(_)) {
                 return Some(fallback);
             }
+            // arriving at a TRACE: land exactly on its centerline lattice
+            // so the junction split (and thus the contact) registers
+            if let crate::board::ItemKind::PolylineTrace(t) = &item.kind {
+                let anchor = arrival_room
+                    .map(|room| {
+                        let door = room.intersection(
+                            item.tile_shapes(&board.padstacks)
+                                .iter()
+                                .find(|(_, l)| *l == layer)
+                                .map(|(s, _)| s)
+                                .unwrap_or(&room.clone()),
+                        );
+                        if door.dimension() >= 0 && !door.is_empty() {
+                            door.centre_of_gravity()
+                        } else {
+                            fallback
+                        }
+                    })
+                    .unwrap_or(fallback);
+                return t
+                    .polyline
+                    .nearest_lattice_point(anchor)
+                    .map(|p| p.to_float());
+            }
             let shapes = item.tile_shapes(&board.padstacks);
             let dest_shape = shapes
                 .iter()

@@ -258,6 +258,16 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 151): TRACE TAPS (junction splitting) — the maze
+  may now arrive at a TRACE of the destination component:
+  Polyline::nearest_lattice_point projects the arrival onto the
+  centerline's integer lattice (exact by construction, so
+  split_traces_at always registers the junction contact), and the
+  destination sets include all connectable items. RESULTS:
+  display 30/30 in 8.5 s with ZERO violations — FULLY COMPLETE for
+  the first time; NormalPuzzle 1.05 s; J2 24/24 (one NEW shallow
+  violation to chase — likely a tap segment edge case); interf_u
+  171/173 (VCC still open, /PC-A3). 8088sbc 104/104 (iter 150).
 - 2026-07-15 (iter 150): J2 RECOVERED (24/24, zero violations) +
   8088sbc FULLY COMPLETE (104/104 at 293 s with the optimizer — the
   first big-board full completion). The J2 regression was NOT a
