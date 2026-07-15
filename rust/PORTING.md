@@ -316,7 +316,18 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       to 24/24 (page candidates cured the GND flap). COST noted for
       the performance phase: NormalPuzzle 0.98→3.1 s, 8088sbc pass0
       11.4→17.4 s (per-net page recompute).)
-  [ ] MazeShoveTraceAlgo (in-maze shove)
+  [~] MazeShoveTraceAlgo (iter 160: the OBSTACLE EXPANSION ROOM model
+      is in and DEFAULT ON — routable foreign items become enterable
+      rooms (per (item, shape) registry, SRN creates the doors, and
+      obstacle rooms expand onward like free rooms), the maze pays
+      ripup_penalty per entered obstacle room and plain mode never
+      enters them, and the traversed items are the exact rip set at
+      insert (Java's model; FR_OBSTACLE_ROOMS=0 = old rippable-skip
+      rooms). Fleet: full completion + zero violations everywhere;
+      J2 24/24 in 83 ms (no restart churn). REMAINING: the actual
+      MazeShoveTraceAlgo line-shove check (shove instead of rip when
+      the trace can slide) — insert currently shoves via the corridor
+      shove_aside then rips what stays)
   [ ] OptViaAlgo (via optimization)
   [ ] BatchOptimizerMultiThreaded (parallel optimizer)
   [ ] Distinct-net shove stacking (ShapeTraceEntries full semantics)

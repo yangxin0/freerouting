@@ -66,6 +66,16 @@ pub fn srn() -> bool {
     })
 }
 
+/// FR_OBSTACLE_ROOMS: route ripup through obstacle expansion rooms
+/// (Java's model: items overlay rooms the maze enters at a penalty)
+/// instead of ignore-rippable room completion.
+pub fn obstacle_rooms() -> bool {
+    static C: OnceLock<bool> = OnceLock::new();
+    *C.get_or_init(|| {
+        std::env::var("FR_OBSTACLE_ROOMS").map(|v| v != "0").unwrap_or(true)
+    })
+}
+
 /// FR_ROOM_WINDOW: clip expansion seeds to this margin (board units)
 /// around the contained edge; 0 = unbounded half-planes (default 200000).
 pub fn room_window() -> i32 {

@@ -45,6 +45,9 @@ pub struct AutorouteEngine {
     /// Rooms whose completion skipped an own-net or rippable item: they
     /// cannot survive a net switch (Java: is_net_dependent).
     net_dependent: Vec<bool>,
+    /// Obstacle expansion rooms per (item, shape index) (Java:
+    /// ItemAutorouteInfo.get_expansion_room).
+    obstacle_rooms: std::collections::HashMap<(ItemId, usize), RoomId>,
     /// Drill pages for via-location candidates (Java: DrillPageArray),
     /// created on first use, cache synced against board changes.
     pub drill_pages: Option<crate::autoroute::drill_pages::DrillPageArray>,
@@ -88,6 +91,7 @@ impl AutorouteEngine {
             rippable_items: Vec::new(),
             expanded: Vec::new(),
             net_dependent: Vec::new(),
+            obstacle_rooms: std::collections::HashMap::new(),
             drill_pages: None,
             seen_log: 0,
             seen_epoch: 0,
@@ -103,6 +107,7 @@ impl AutorouteEngine {
         self.rippable_items.clear();
         self.expanded.clear();
         self.net_dependent.clear();
+        self.obstacle_rooms.clear();
         self.grid.clear();
     }
 
@@ -312,13 +317,14 @@ impl AutorouteEngine {
     /// own-net items. Returns the new room ids.
     pub fn complete_room(&mut self, board: &BasicBoard, room: IncompleteRoom) -> Vec<RoomId> {
         // restrain against the board obstacles
+        let ignore_rippable = self.allow_ripup && !crate::debug::obstacle_rooms();
         let (mut pieces, skipped_shapes) =
             crate::autoroute::room_completion::complete_shape_tracked(
                 board,
                 &room,
                 self.net_no,
                 None,
-                self.allow_ripup,
+                ignore_rippable,
                 self.trace_clearance_class,
                 self.trace_half_width,
             );
@@ -454,6 +460,45 @@ impl AutorouteEngine {
         new_rooms
     }
 
+    /// The obstacle expansion room of an item shape, created on demand
+    /// with the item's completion inflation as its shape (Java:
+    /// ObstacleExpansionRoom via ItemAutorouteInfo).
+    fn get_obstacle_room(
+        &mut self,
+        board: &BasicBoard,
+        item_id: ItemId,
+        shape_index: usize,
+        layer: usize,
+        inflated: &TileShape,
+    ) -> RoomId {
+        let _ = board;
+        if let Some(&r) = self.obstacle_rooms.get(&(item_id, shape_index)) {
+            return r;
+        }
+        let room_id = self.graph.add_room(
+            inflated.clone(),
+            layer,
+            RoomKind::Obstacle {
+                item: item_id,
+                shape_index,
+            },
+        );
+        self.target_doors.push(Vec::new());
+        self.rippable_items.push(vec![item_id]);
+        self.expanded.push(false);
+        self.net_dependent.push(true);
+        self.obstacle_rooms.insert((item_id, shape_index), room_id);
+        room_id
+    }
+
+    /// The item of an obstacle room, if it is one.
+    pub fn obstacle_room_item(&self, room: RoomId) -> Option<ItemId> {
+        match self.graph.room(room).kind {
+            RoomKind::Obstacle { item, .. } => Some(item),
+            _ => None,
+        }
+    }
+
     /// Runs the SortedRoomNeighbours gap walk for a freshly completed
     /// room: collects the touching complete rooms and (inflated) items,
     /// sorts them counterclockwise, and adds the uncovered border gaps
@@ -465,6 +510,7 @@ impl AutorouteEngine {
         let room_simplex = self.graph.room(room_id).shape.to_simplex();
         let room_bbox = self.graph.room(room_id).shape.bounding_box();
         let mut neighbours: Vec<srn::Neighbour> = Vec::new();
+        let mut obstacle_doors: Vec<(ItemId, usize, std::rc::Rc<TileShape>)> = Vec::new();
         // touching complete rooms from the grid
         for other in self.rooms_near(room_bbox.offset(4.0), layer) {
             if other == room_id || self.graph.room(other).layer != layer {
@@ -509,7 +555,7 @@ impl AutorouteEngine {
             );
             let margin = (self.trace_half_width + clearance).max(0);
             let Some(inflated) = board.inflated_shapes(item_id, margin) else { continue };
-            for (shape, bbox, l) in inflated.iter() {
+            for (si, (shape, bbox, l)) in inflated.iter().enumerate() {
                 if *l != layer || !bbox.intersects(room_bbox.offset(4.0)) {
                     continue;
                 }
@@ -518,8 +564,43 @@ impl AutorouteEngine {
                     srn::NeighbourObject::Item(item_id),
                     shape,
                 ) {
+                    // ripup via obstacle rooms: routable foreign items
+                    // touching the piece become enterable rooms (Java:
+                    // "expand the item for ripup and pushing purposes")
+                    if crate::debug::obstacle_rooms()
+                        && self.allow_ripup
+                        && item.is_routable()
+                        && nb.intersection.dimension() >= 1
+                    {
+                        obstacle_doors.push((item_id, si, shape.clone()));
+                    }
                     neighbours.push(nb);
                 }
+            }
+        }
+        for (item_id, si, shape) in obstacle_doors {
+            let ob = self.get_obstacle_room(board, item_id, si, layer, &shape);
+            if !self.graph.door_exists(room_id, ob) {
+                self.graph.add_door_with_dimension(room_id, ob, 1);
+            }
+        }
+        // make sure there is a door to every touching complete room
+        // (Java: the dim-1 branch's insert_door_ok + new ExpansionDoor)
+        let room_doors: Vec<(RoomId, i32)> = neighbours
+            .iter()
+            .filter_map(|nb| match nb.object {
+                srn::NeighbourObject::Room(r) if nb.intersection.dimension() >= 1 => {
+                    Some((r, nb.intersection.dimension()))
+                }
+                _ => None,
+            })
+            .collect();
+        for (other, dim) in room_doors {
+            if self.graph.room(other).alive
+                && !matches!(self.graph.room(other).kind, RoomKind::IncompleteFreeSpace { .. })
+                && !self.graph.door_exists(room_id, other)
+            {
+                self.graph.add_door_with_dimension(room_id, other, dim);
             }
         }
         if neighbours.is_empty() {
@@ -577,6 +658,35 @@ impl AutorouteEngine {
             return Vec::new();
         }
         self.expanded[room_id] = true;
+        if crate::debug::obstacle_rooms()
+            && matches!(self.graph.room(room_id).kind, RoomKind::Obstacle { .. })
+        {
+            // an entered obstacle room connects onward like a free room:
+            // touching complete rooms get doors, uncovered gaps become
+            // incomplete rooms (Java runs SortedRoomNeighbours on
+            // ObstacleExpansionRooms too)
+            self.create_gap_rooms(board, room_id);
+            let incomplete: Vec<RoomId> = self
+                .graph
+                .room(room_id)
+                .doors
+                .clone()
+                .into_iter()
+                .filter_map(|d| self.graph.other_room(d, room_id))
+                .filter(|&r| {
+                    self.graph.room(r).alive
+                        && matches!(
+                            self.graph.room(r).kind,
+                            RoomKind::IncompleteFreeSpace { .. }
+                        )
+                })
+                .collect();
+            let mut new_rooms = Vec::new();
+            for r in incomplete {
+                new_rooms.extend(self.complete_incomplete_room(board, r));
+            }
+            return new_rooms;
+        }
         if crate::debug::srn() {
             // faithful growth: complete the incomplete gap rooms behind
             // this room's doors (their pieces bring their own doors and

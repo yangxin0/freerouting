@@ -445,6 +445,10 @@ fn seed_room(
         let Some(other) = engine.graph.other_room(door, room) else {
             continue;
         };
+        // obstacle rooms are enterable only when ripup is allowed
+        if request.ripup_penalty <= 0.0 && engine.obstacle_room_item(other).is_some() {
+            continue;
+        }
         let segments = engine.graph.door_section_segments(door, offset);
         for (section, seg) in segments.iter().enumerate() {
             let midpoint = seg.a.middle_point(seg.b);
@@ -985,6 +989,13 @@ pub fn maze_route_with_engine(
             }
         }
         let mut to_rip: Vec<ItemId> = Vec::new();
+        // Java's exact rip set: the items whose obstacle rooms the path
+        // traversed
+        for room in result.rooms.iter().flatten() {
+            if let Some(item_id) = engine.obstacle_room_item(*room) {
+                to_rip.push(item_id);
+            }
+        }
         for window in result.corners.windows(2) {
             let ((a, layer_a), (b, layer_b)) = (window[0], window[1]);
             let (pa, pb) = (a.round(), b.round());
