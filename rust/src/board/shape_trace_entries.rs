@@ -153,6 +153,9 @@ impl ShapeTraceEntries {
                 .any(|n| item.base.contains_net(*n));
             match &item.kind {
                 ItemKind::ObstacleArea(a) => {
+                    if a.via_only {
+                        continue;
+                    }
                     if a.is_conduction && contains_own_net {
                         continue;
                     }

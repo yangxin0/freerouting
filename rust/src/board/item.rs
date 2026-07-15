@@ -117,6 +117,9 @@ pub struct ObstacleAreaItem {
     pub layer: usize,
     pub name: String,
     pub is_conduction: bool,
+    /// A via keepout (DSN `(via_keepout ...)`, Java `ViaObstacleArea`):
+    /// blocks via placement but not traces.
+    pub via_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -340,6 +343,7 @@ impl Item {
                 layer,
                 name: name.into(),
                 is_conduction,
+                via_only: false,
             }),
             cached_tile_shapes: std::sync::OnceLock::new(),
         }

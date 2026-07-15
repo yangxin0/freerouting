@@ -140,7 +140,7 @@ pub fn complete_shape_tracked(
         // foreign conduction areas (power planes) do not restrain: they
         // get clearance cutouts in fabrication (Java: ConductionArea)
         if let crate::board::ItemKind::ObstacleArea(a) = &item.kind {
-            if a.is_conduction {
+            if a.is_conduction || a.via_only {
                 continue;
             }
         }

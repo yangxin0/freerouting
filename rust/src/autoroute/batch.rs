@@ -448,6 +448,9 @@ fn violating_nets(board: &BasicBoard) -> Vec<i32> {
                     if a.is_conduction {
                         continue;
                     }
+                    if a.via_only && !matches!(item.kind, ItemKind::Via(_)) {
+                        continue;
+                    }
                 }
                 let cl = board.rules.clearance_matrix.get_value(
                     item.base.clearance_class,

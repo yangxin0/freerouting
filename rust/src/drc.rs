@@ -59,6 +59,15 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                     if a.is_conduction {
                         continue;
                     }
+                    // via keepouts constrain via placement only
+                    if a.via_only && !matches!(item.kind, ItemKind::Via(_)) {
+                        continue;
+                    }
+                }
+                if let ItemKind::ObstacleArea(a) = &item.kind {
+                    if a.via_only && !matches!(other.kind, ItemKind::Via(_)) {
+                        continue;
+                    }
                 }
                 let required = board.rules.clearance_matrix.get_value(
                     item.base.clearance_class,

@@ -569,7 +569,7 @@ impl AutorouteEngine {
                 continue;
             }
             if let crate::board::ItemKind::ObstacleArea(a) = &item.kind {
-                if a.is_conduction {
+                if a.is_conduction || a.via_only {
                     continue;
                 }
             }

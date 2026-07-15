@@ -51,9 +51,16 @@ the only genuinely open work items across the whole port:
    /MIPI_CSI_D0_P in the normalize phase). Wired into
    combine_all_traces (repeat until no cycle). J2 length improved
    486.0 -> 482.3 mm; fleet clean; unit test cycle_traces_are_removed.
-2. DSN keepout-area import ((keepout ...) scopes in structure —
-   place/via/wire keepouts; Java Structure.java parses them, the Rust
-   importer only builds boundary keepout strips).
+2. [DONE iter 192] DSN keepout-area import — (keepout ...) as full
+   obstacle areas and (via_keepout ...) as via-only obstacles
+   (ObstacleAreaItem.via_only: blocks via placement/drills but not
+   traces — exempted in room completion, engine door classification,
+   shove entries, pull-tight legality, and kind-aware in the DRC and
+   violation counts; via-context checks were already blocking).
+   Polygons exact, rect/circle/path via corner shapes; layer name or
+   signal/all -> per-layer items, SystemFixed. place_keepout affects
+   only component placement and is skipped like Java's router does.
+   J2's own 4 keepouts now import and it still routes 24/24 clean.
 3. SES library_out section (Java SesWriter emits padstack definitions;
    the Rust writer references padstack names in network_out only).
 4. Delaunay-based ratsnest airlines (Java: PlanarDelaunayTriangulation

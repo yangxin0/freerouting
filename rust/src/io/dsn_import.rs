@@ -326,6 +326,54 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
         board.insert_area(area, layer, net_name, net_nos, 1, true);
     }
 
+    // keepout areas ((keepout ...) traces+vias, (via_keepout ...) vias
+    // only; Java: Structure read scope -> insert_obstacle /
+    // insert_via_obstacle). place_keepout affects component placement
+    // only and is skipped, like routing ignores it in Java.
+    for kind in ["keepout", "via_keepout"] {
+        for node in structure.children(kind) {
+            let Some(shape_node) = node
+                .child("polygon")
+                .or_else(|| node.child("rect"))
+                .or_else(|| node.child("circle"))
+                .or_else(|| node.child("path"))
+            else {
+                continue;
+            };
+            let layer_arg = shape_node.arg().unwrap_or("signal");
+            let layers: Vec<usize> = match board.layer_structure.get_no(layer_arg) {
+                Some(l) => vec![l],
+                // "signal", "all", "pcb": every layer
+                None => (0..board.layer_structure.layer_count()).collect(),
+            };
+            let corners = keepout_corners(shape_node, &scale);
+            if corners.len() < 3 {
+                continue;
+            }
+            let area = crate::geometry::planar::PolylineArea::new(
+                crate::geometry::planar::PolygonShape::new(corners),
+                Vec::new(),
+            );
+            let name = node.arg().unwrap_or(kind);
+            for layer in layers {
+                let mut item = crate::board::Item::new_obstacle_area(
+                    crate::board::ItemBase::new(0, Vec::new(), 1),
+                    area.clone(),
+                    layer,
+                    name,
+                    false,
+                );
+                if kind == "via_keepout" {
+                    if let crate::board::ItemKind::ObstacleArea(a) = &mut item.kind {
+                        a.via_only = true;
+                    }
+                }
+                let id = board.insert_item(item);
+                board.set_fixed_state(id, crate::board::FixedState::SystemFixed);
+            }
+        }
+    }
+
     // boundary: keepout strips along the outline edges on all layers so
     // routes stay inside the board (Java: BoardOutline tree shapes)
     if let Some(boundary) = structure.child("boundary") {
@@ -611,6 +659,69 @@ fn insert_boundary_keepouts(board: &mut BasicBoard, corners: &[IntPoint], half_w
     }
 }
 
+/// The polygon corners of a keepout shape node: polygons stay exact,
+/// rects become their four corners, circles and paths their bounding
+/// octagon corners.
+fn keepout_corners(
+    node: &SExpr,
+    scale: &dyn Fn(f64) -> i32,
+) -> Vec<crate::geometry::planar::Point> {
+    use crate::geometry::planar::Point;
+    let kind = node.name().unwrap_or("");
+    let nums: Vec<f64> = node
+        .args()
+        .skip(1)
+        .filter_map(|a| a.parse().ok())
+        .collect();
+    let octagon_corners = |oct: IntOctagon| -> Vec<Point> {
+        let t = TileShape::Octagon(oct.normalize());
+        (0..t.border_line_count())
+            .map(|i| t.corner(i))
+            .collect()
+    };
+    if kind.eq_ignore_ascii_case("polygon") {
+        // (polygon LAYER aperture x1 y1 ...)
+        nums[1..]
+            .chunks_exact(2)
+            .map(|c| Point::Int(IntPoint::new(scale(c[0]), scale(c[1]))))
+            .collect()
+    } else if kind.eq_ignore_ascii_case("rect") && nums.len() >= 4 {
+        let (x0, y0) = (scale(nums[0].min(nums[2])), scale(nums[1].min(nums[3])));
+        let (x1, y1) = (scale(nums[0].max(nums[2])), scale(nums[1].max(nums[3])));
+        vec![
+            Point::Int(IntPoint::new(x0, y0)),
+            Point::Int(IntPoint::new(x1, y0)),
+            Point::Int(IntPoint::new(x1, y1)),
+            Point::Int(IntPoint::new(x0, y1)),
+        ]
+    } else if kind.eq_ignore_ascii_case("circle") && !nums.is_empty() {
+        let cx = nums.get(1).copied().unwrap_or(0.0);
+        let cy = nums.get(2).copied().unwrap_or(0.0);
+        let circle = Circle::new(
+            IntPoint::new(scale(cx), scale(cy)),
+            scale(nums[0] / 2.0).max(1),
+        );
+        octagon_corners(circle.bounding_octagon())
+    } else if kind.eq_ignore_ascii_case("path") && nums.len() >= 5 {
+        let radius = nums[0] / 2.0;
+        let mut oct: Option<IntOctagon> = None;
+        for pair in nums[1..].chunks_exact(2) {
+            let c = Circle::new(
+                IntPoint::new(scale(pair[0]), scale(pair[1])),
+                scale(radius).max(1),
+            );
+            let o = c.bounding_octagon();
+            oct = Some(match oct {
+                Some(prev) => prev.union(o),
+                None => o,
+            });
+        }
+        oct.map(octagon_corners).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
 /// Reads a single pad shape node (circle / rect / path / polygon),
 /// returning the tile shape (relative to the pad center) and its layer
 /// name.
@@ -687,6 +798,47 @@ fn read_pad_shape(node: &SExpr, scale: &dyn Fn(f64) -> i32) -> Option<(TileShape
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imports_keepout_areas() {
+        let dsn = r#"(pcb "k.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (keepout "cutout" (polygon F.Cu 0 40000 40000 60000 40000 60000 60000 40000 60000))
+    (via_keepout (rect signal 10000 10000 20000 20000))
+    (rule (width 200) (clearance 200))
+  )
+  (placement)
+  (library)
+  (network (net "N1"))
+)"#;
+        let board = import_dsn(dsn).expect("import");
+        use crate::board::ItemKind;
+        let keepouts: Vec<_> = board
+            .items()
+            .filter_map(|(_, it)| match &it.kind {
+                ItemKind::ObstacleArea(a) if !a.is_conduction && a.name != "boundary" => {
+                    Some((a.layer, a.via_only))
+                }
+                _ => None,
+            })
+            .collect();
+        // the full keepout sits on F.Cu only; the via keepout ("signal")
+        // lands on both layers
+        assert_eq!(
+            keepouts.iter().filter(|(_, via_only)| !via_only).count(),
+            1,
+            "one full keepout"
+        );
+        assert_eq!(
+            keepouts.iter().filter(|(_, via_only)| *via_only).count(),
+            2,
+            "via keepout on both signal layers"
+        );
+    }
 
     #[test]
     fn imports_real_fixture() {
