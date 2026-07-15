@@ -10,6 +10,8 @@ use crate::board::ItemKind;
 /// verbatim; the router only changes the wiring).
 pub fn export_dsn(board: &BasicBoard) -> Option<String> {
     let source = board.dsn_source.as_ref()?;
+    // board units -> file units (the importer multiplies by resolution)
+    let descale = |v: f64| -> f64 { v / board.resolution.max(1) as f64 };
     let mut wiring = String::new();
     wiring.push_str("  (wiring\n");
     for (_, item) in board.items() {
@@ -29,13 +31,13 @@ pub fn export_dsn(board: &BasicBoard) -> Option<String> {
                 wiring.push_str(&format!(
                     "    (wire\n      (path {} {}",
                     layer_name,
-                    2 * t.half_width
+                    descale(2.0 * t.half_width as f64)
                 ));
                 for corner in t.polyline.corner_approx_arr() {
                     wiring.push_str(&format!(
                         "\n        {} {}",
-                        corner.x.round() as i64,
-                        corner.y.round() as i64
+                        descale(corner.x.round()),
+                        descale(corner.y.round())
                     ));
                 }
                 wiring.push_str(&format!(
@@ -51,7 +53,9 @@ pub fn export_dsn(board: &BasicBoard) -> Option<String> {
                 };
                 wiring.push_str(&format!(
                     "    (via \"{}\" {} {}\n      (net \"{net_name}\")\n      (type route)\n    )\n",
-                    padstack.name, v.center.x, v.center.y
+                    padstack.name,
+                    descale(v.center.x as f64),
+                    descale(v.center.y as f64)
                 ));
             }
             ItemKind::ObstacleArea(_) => {}
@@ -108,7 +112,7 @@ mod tests {
         );
         let out = export_dsn(&board).expect("export");
         assert!(out.contains("(wiring"));
-        assert!(out.contains("(path F.Cu 200"));
+        assert!(out.contains("(path F.Cu 20"), "width must be in file units");
         // the exported document must re-import, with the wire present
         let board2 = import_dsn(&out).expect("re-import");
         let traces = board2
