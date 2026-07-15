@@ -294,24 +294,39 @@ impl<T> MinAreaTree<T> {
     /// The leaves of this tree whose bounding shapes overlap `shape`.
     pub fn overlaps(&self, shape: IntOctagon) -> Vec<LeafId> {
         let mut found = Vec::new();
-        let Some(root) = self.root else {
-            return found;
-        };
-        let mut stack = vec![root];
-        while let Some(curr) = stack.pop() {
-            if !self.nodes[curr].bound.intersects(shape) {
-                continue;
-            }
-            match self.nodes[curr].kind {
-                NodeKind::Leaf { .. } => found.push(LeafId(curr)),
-                NodeKind::Inner { first, second } => {
-                    stack.push(first);
-                    stack.push(second);
-                }
-                NodeKind::Free { .. } => unreachable!("free node reached"),
-            }
-        }
+        self.overlaps_with(shape, |leaf| found.push(leaf));
         found
+    }
+
+    /// Allocation-free query: calls `f` for every overlapping leaf using
+    /// a reusable traversal stack (tree queries dominated the big-board
+    /// profile largely through per-query allocations).
+    pub fn overlaps_with(&self, shape: IntOctagon, mut f: impl FnMut(LeafId)) {
+        thread_local! {
+            static STACK: std::cell::RefCell<Vec<usize>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let Some(root) = self.root else {
+            return;
+        };
+        STACK.with(|cell| {
+            let mut stack = cell.borrow_mut();
+            stack.clear();
+            stack.push(root);
+            while let Some(curr) = stack.pop() {
+                if !self.nodes[curr].bound.intersects(shape) {
+                    continue;
+                }
+                match self.nodes[curr].kind {
+                    NodeKind::Leaf { .. } => f(LeafId(curr)),
+                    NodeKind::Inner { first, second } => {
+                        stack.push(first);
+                        stack.push(second);
+                    }
+                    NodeKind::Free { .. } => unreachable!("free node reached"),
+                }
+            }
+        });
     }
 }
 

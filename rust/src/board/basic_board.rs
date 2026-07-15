@@ -389,14 +389,13 @@ impl BasicBoard {
         let Some(query) = shape.bounding_octagon() else {
             return Vec::new();
         };
-        let mut result: Vec<ItemId> = self
-            .search_tree
-            .overlaps(query)
-            .into_iter()
-            .map(|leaf| *self.search_tree.entry(leaf).object)
-            .filter(|entry| layer.is_none_or(|l| entry.layer == l))
-            .map(|entry| entry.item_id)
-            .collect();
+        let mut result: Vec<ItemId> = Vec::new();
+        self.search_tree.overlaps_with(query, |leaf| {
+            let entry = self.search_tree.entry(leaf).object;
+            if layer.is_none_or(|l| entry.layer == l) {
+                result.push(entry.item_id);
+            }
+        });
         let query_bbox = shape.bounding_box();
         for &plane_id in &self.plane_items {
             let Some(item) = self.get_item(plane_id) else {
