@@ -258,6 +258,24 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 143b): FULL JAVA 1.9 SCOREBOARD (stripped
+  wiring, router phase only, -mp 99):
+  | board        | Java 1.9 router           | Rust (pre-iter-142 nums) |
+  | J2           | 3.4 s, 3 UNROUTED         | ~1 s, 24/24, 0 viol  WIN |
+  | wavefolder   | 5.9 s, 5 UNROUTED         | ~2 s, 31/31, 1 viol  WIN |
+  | pic          | 1.2 s, 1 unr + 1 viol     | 0.8 s, 111/111, 2 v  WIN |
+  | display      | 3.3 s, 1 unrouted         | 60 s, 29/30, 0 viol  tie |
+  | NormalPuzzle | 1.2 s clean               | 3.8 s clean       Java×3 |
+  | interf_u     | 7.6 s "done", 62 VIOL     | 300 s, 170/173     split |
+  | 8088sbc      | 8.0 s clean complete      | 300 s, 103/104   JAVA×40 |
+  | coldfire     | 199 s, 11 unr + 4 viol    | 300 s, 19 nets    JAVA   |
+  Reading: Rust WINS completion+cleanliness on small boards; Java
+  wins BIG-BOARD THROUGHPUT enormously (8088sbc 8 s vs 300 s) and
+  tolerates violations to claim completion (interf_u 62!). Java's
+  optimizer phase (unported) then recovers unrouted nets and cleans
+  up. Big-board Rust numbers PREDATE the iter-142 occupy-on-push ×5
+  — fresh fleet run queued. ALIGNMENT PRIORITIES: (1) big-board
+  throughput, (2) post-processing violation pair, (3) optimizer.
 - 2026-07-15 (iter 143): RIP CORRIDOR FIXED — display's ROUTING
   phase now audits at ZERO violations, deterministically (3× identical
   runs, 29/30 nets). The residual rip-window class was the iter-139
