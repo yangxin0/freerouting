@@ -380,6 +380,43 @@ impl TileShape {
 
     // ---- nearest points and distances ----
 
+    /// The Euclidean distance between this shape's copper and `other`'s
+    /// (0 when they intersect). Convex-convex: the minimum over each
+    /// shape's corners against the other's border segments. Physical DRC
+    /// semantics — the mitered offset checks over-report diagonally at
+    /// corners (line-push reach is up to √2 × the margin), so mitered
+    /// hits are confirmed with this exact distance.
+    pub fn euclidean_distance_to(&self, other: &TileShape) -> f64 {
+        if self.intersects(other) {
+            return 0.0;
+        }
+        let ca = self.corner_approx_arr();
+        let cb = other.corner_approx_arr();
+        if ca.is_empty() || cb.is_empty() {
+            return f64::MAX;
+        }
+        let seg_dist = |p: FloatPoint, a: FloatPoint, b: FloatPoint| -> f64 {
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            let len2 = dx * dx + dy * dy;
+            if len2 <= 0.0 {
+                return p.distance(a);
+            }
+            let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0.0, 1.0);
+            p.distance(FloatPoint::new(a.x + t * dx, a.y + t * dy))
+        };
+        let mut best = f64::MAX;
+        for (corners, others) in [(&ca, &cb), (&cb, &ca)] {
+            for &p in corners.iter() {
+                for i in 0..others.len() {
+                    let a = others[i];
+                    let b = others[(i + 1) % others.len()];
+                    best = best.min(seg_dist(p, a, b));
+                }
+            }
+        }
+        best
+    }
+
     pub fn distance(&self, point: FloatPoint) -> f64 {
         self.nearest_point_approx(point).distance(point)
     }

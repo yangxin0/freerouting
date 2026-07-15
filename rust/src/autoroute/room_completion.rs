@@ -185,40 +185,35 @@ pub fn complete_shape_tracked(
                 in_region,
                 tree_view
             );
+            let contained_match = std::env::var("FR_DEBUG_CONTAINED")
+                .ok()
+                .map(|v| {
+                    let bb = room.contained_shape.bounding_box();
+                    v == format!("{},{}", bb.ll.x, bb.ll.y)
+                })
+                .unwrap_or(true);
+            if contained_match && std::env::var_os("FR_DEBUG_REGION_FULL").is_some() {
+                eprintln!("  INPUT start {:?}", start_shape.to_simplex());
+                eprintln!("  INPUT contained {:?}", room.contained_shape.to_simplex());
+                for (id, sh) in &obstacles {
+                    eprintln!("  INPUT obstacle {id} {:?}", sh.to_simplex());
+                }
+            }
         }
     }
-    for (obstacle_id, obstacle_shape) in &obstacles {
-        // cheap bounding-box separation test before the exact overlap
-        let obstacle_bbox = obstacle_shape.bounding_box();
-        let mut new_result = Vec::new();
-        for curr_room in result {
-            if !curr_room.shape.bounding_box().intersects(obstacle_bbox) {
-                new_result.push(curr_room);
-                continue;
-            }
-            let intersection = curr_room.shape.intersection(obstacle_shape);
-            if intersection.dimension() == 2 {
-                new_result.extend(restrain_shape(&curr_room, obstacle_shape));
-            } else {
-                new_result.push(curr_room);
-            }
+    result = restrain_all(result, &obstacles, |obstacle_id, obstacle_shape| {
+        if crate::debug::maze() {
+            let rippable = board
+                .get_item(obstacle_id)
+                .is_some_and(|i| is_rippable(i, net_no));
+            eprintln!(
+                "ROOM KILLED on layer {} by obstacle item {obstacle_id:?} \
+                 (bbox {:?}, ripup_mode={ignore_rippable}, rippable={rippable})",
+                room.layer,
+                obstacle_shape.bounding_box()
+            );
         }
-        result = new_result;
-        if result.is_empty() {
-            if crate::debug::maze() {
-                let rippable = board
-                    .get_item(*obstacle_id)
-                    .is_some_and(|i| is_rippable(i, net_no));
-                eprintln!(
-                    "ROOM KILLED on layer {} by obstacle item {obstacle_id:?} \
-                     (bbox {:?}, ripup_mode={ignore_rippable}, rippable={rippable})",
-                    room.layer,
-                    obstacle_shape.bounding_box()
-                );
-            }
-            break;
-        }
-    }
+    });
     if let Some(region) = watch {
         for piece in &result {
             let bb = piece.shape.bounding_box();
@@ -239,6 +234,39 @@ pub fn complete_shape(
     ignore_item: Option<ItemId>,
 ) -> Vec<IncompleteRoom> {
     complete_shape_with_ripup(board, room, net_no, ignore_item, false, 1, 0)
+}
+
+/// Restrains `pieces` against every obstacle in order (the core loop of
+/// [`complete_shape_with_ripup`], separated for exact-data replay tests).
+/// `on_killed` fires when the obstacle eliminates every piece.
+pub fn restrain_all(
+    mut result: Vec<IncompleteRoom>,
+    obstacles: &[(ItemId, std::rc::Rc<TileShape>)],
+    mut on_killed: impl FnMut(ItemId, &TileShape),
+) -> Vec<IncompleteRoom> {
+    for (obstacle_id, obstacle_shape) in obstacles {
+        // cheap bounding-box separation test before the exact overlap
+        let obstacle_bbox = obstacle_shape.bounding_box();
+        let mut new_result = Vec::new();
+        for curr_room in result {
+            if !curr_room.shape.bounding_box().intersects(obstacle_bbox) {
+                new_result.push(curr_room);
+                continue;
+            }
+            let intersection = curr_room.shape.intersection(obstacle_shape);
+            if intersection.dimension() == 2 {
+                new_result.extend(restrain_shape(&curr_room, obstacle_shape));
+            } else {
+                new_result.push(curr_room);
+            }
+        }
+        result = new_result;
+        if result.is_empty() {
+            on_killed(*obstacle_id, obstacle_shape);
+            break;
+        }
+    }
+    result
 }
 
 /// Restrains the room shape so it no longer intersects the interior of

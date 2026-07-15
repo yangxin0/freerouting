@@ -258,6 +258,23 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 146): FLEET-WIDE ZERO — every small board audits
+  at 0 violations: pic 111/111, display 29/30, wavefolder 31/31,
+  J2 24/24, NormalPuzzle 72/72. The pic "leak" was resolved by an
+  EXACT-DATA REPLAY (tests/pic_completion_replay.rs + captured
+  fixture): the suspicious room was byte-identical in replay and
+  live, and provably excludes every collected obstacle — THE ROOM
+  WAS NEVER DIRTY. The final "violations" were CHECKER ARTIFACTS:
+  our DRC inflated with mitered line-pushes, whose corner reach is
+  up to √2 × the margin — geometry that is Euclidean-legal was
+  reported as violating (miter has no false negatives, only corner
+  false positives). drc_check now confirms mitered hits with
+  TileShape::euclidean_distance_to (convex-convex corner/segment
+  distance) — physical DRC semantics, like KiCad. Diagnostics
+  (ILLEGAL INSERT / ROOM LEAK) stay mitered-conservative. Capture
+  infrastructure: FR_DEBUG_REGION_FULL + FR_DEBUG_CONTAINED dump a
+  completion's full input (start/contained/ordered obstacles) for
+  offline replay; restrain_all() extracted as the replayable core.
 - 2026-07-15 (iter 145): PIC LEAK NARROWED TO A COMPLETION PIPELINE
   CONTRADICTION. pic's 2 violations: net 21's SAME path inserts
   illegally against successive incarnations of net 14's trace

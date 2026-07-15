@@ -105,18 +105,19 @@ fn main() {
                 ) as f64;
                 let check = shape.offset(clearance);
                 checked += 1;
-                let conflict = other
-                    .tile_shapes(&board.padstacks)
-                    .iter()
-                    .any(|(s, l)| *l == layer && s.intersection(&check).dimension() >= 2);
+                // mitered pre-filter (no false negatives), confirmed with
+                // the exact Euclidean copper distance (the line-push
+                // over-reaches diagonally at corners)
+                let conflict = other.tile_shapes(&board.padstacks).iter().any(|(s, l)| {
+                    *l == layer
+                        && s.intersection(&check).dimension() >= 2
+                        && shape.euclidean_distance_to(s) < clearance - 1.0
+                });
                 // classify: deeper than 2 units = a real violation; the
                 // rest is corner-rounding epsilon on exact-touch paths
                 let hard = conflict
                     && other.tile_shapes(&board.padstacks).iter().any(|(s, l)| {
-                        *l == layer
-                            && s.intersection(&shape.offset(clearance - 2.0))
-                                .dimension()
-                                >= 2
+                        *l == layer && shape.euclidean_distance_to(s) < clearance - 2.0
                     });
                 if hard {
                     hard_violations += 1;
