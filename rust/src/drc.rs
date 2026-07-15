@@ -38,34 +38,60 @@ pub struct DrcReport {
 /// exact Euclidean copper distance and deduplicated (A-B == B-A).
 pub fn check_board(board: &BasicBoard) -> DrcReport {
     let mut report = DrcReport::default();
-    let routed: Vec<ItemId> = board
+    // Every item that carries copper OR constrains it (keepouts, board
+    // outline) must be an outer item, so a copper-vs-earlier-obstacle pair is
+    // checked from at least one side. Java's `DesignRulesChecker` scans every
+    // `board.get_items()` and dedups by sorted-id key afterward; excluding
+    // obstacles from the outer loop while keeping the `other_id <= id` skip
+    // silently dropped copper-vs-lower-id-obstacle pairs entirely.
+    let candidates: Vec<ItemId> = board
         .items()
-        .filter(|(_, it)| it.base.net_count() > 0 && !matches!(&it.kind, ItemKind::ObstacleArea(_)))
+        .filter(|(_, it)| {
+            it.base.net_count() > 0 || matches!(&it.kind, ItemKind::ObstacleArea(_))
+        })
         .map(|(id, _)| *id)
         .collect();
-    for &id in &routed {
+    for &id in &candidates {
         let Some(item) = board.get_item(id) else { continue };
+        let item_obstacle = matches!(&item.kind, ItemKind::ObstacleArea(_));
         let shapes: Vec<_> = item.tile_shapes(&board.padstacks).to_vec();
         for (shape, layer) in shapes {
-            for other_id in board.overlapping_items(&shape.offset(10_000.0), Some(layer)) {
+            // Candidate search radius must cover the largest clearance any
+            // counterpart could require on this layer; the fixed 10 000-unit
+            // radius missed clearances above 1 mm. Java sizes the search by the
+            // item's clearance class; the layer-wide maximum is a safe superset
+            // (the matrix is not guaranteed symmetric, so a per-class maximum
+            // could under-reach).
+            let search_radius = board.rules.clearance_matrix.max_value(layer) as f64;
+            for other_id in board.overlapping_items(&shape.offset(search_radius), Some(layer)) {
                 if other_id <= id {
-                    continue; // dedup: A-B equals B-A
+                    continue; // dedup: A-B equals B-A (both sides are outer items)
                 }
                 let Some(other) = board.get_item(other_id) else { continue };
                 if other.base.shares_net(&item.base) {
                     continue;
                 }
-                if let ItemKind::ObstacleArea(a) = &other.kind {
+                let other_obstacle = matches!(&other.kind, ItemKind::ObstacleArea(_));
+                // Two constraint areas do not clear against each other.
+                if item_obstacle && other_obstacle {
+                    continue;
+                }
+                // Conduction areas (power planes) are handled by the router's
+                // search tree, not this clearance pass.
+                if let ItemKind::ObstacleArea(a) = &item.kind {
                     if a.is_conduction {
                         continue;
                     }
                     // via keepouts constrain via placement only
-                    if a.via_only && !matches!(item.kind, ItemKind::Via(_)) {
+                    if a.via_only && !matches!(other.kind, ItemKind::Via(_)) {
                         continue;
                     }
                 }
-                if let ItemKind::ObstacleArea(a) = &item.kind {
-                    if a.via_only && !matches!(other.kind, ItemKind::Via(_)) {
+                if let ItemKind::ObstacleArea(a) = &other.kind {
+                    if a.is_conduction {
+                        continue;
+                    }
+                    if a.via_only && !matches!(item.kind, ItemKind::Via(_)) {
                         continue;
                     }
                 }
@@ -232,6 +258,45 @@ mod tests {
         let json = report.to_kicad_json(&board, "test.dsn");
         assert!(json.contains("schemas.kicad.org/drc.v1.json"));
         assert!(json.contains("clearance"));
+    }
+
+    #[test]
+    fn copper_against_earlier_lower_id_keepout_is_checked() {
+        use crate::geometry::planar::{PolygonShape, PolylineArea};
+        let mut board = test_board();
+        // Insert the keepout FIRST so it gets the lower item id — this is the
+        // regression: previously it was excluded from the outer loop and the
+        // `other_id <= id` skip dropped the pair entirely.
+        board.insert_area(
+            PolylineArea::new(
+                PolygonShape::from_int_points(&[
+                    IntPoint::new(0, 250),
+                    IntPoint::new(5000, 250),
+                    IntPoint::new(5000, 450),
+                    IntPoint::new(0, 450),
+                ]),
+                Vec::new(),
+            ),
+            0,
+            "keepout",
+            Vec::new(),
+            1,
+            false,
+        );
+        // Foreign-net copper 150 away (needs 200) → must be a violation.
+        board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(0, 0), IntPoint::new(5000, 0)]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        let report = check_board(&board);
+        assert_eq!(
+            report.violations.len(),
+            1,
+            "copper vs earlier lower-id keepout must be reported"
+        );
     }
 
     #[test]

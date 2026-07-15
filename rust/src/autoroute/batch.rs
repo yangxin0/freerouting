@@ -397,13 +397,23 @@ pub fn batch_route_passes(
 
 /// The request adjusted to `net_no`'s net class rules: its trace half
 /// width and via padstack when the imported rules define them.
-fn request_for_net(board: &BasicBoard, net_no: i32, base: &BatchRequest) -> BatchRequest {
+pub(crate) fn request_for_net(board: &BasicBoard, net_no: i32, base: &BatchRequest) -> BatchRequest {
     let class_half_width = board.rules.get_trace_half_width(net_no, 0);
+    // Route each net with its own trace clearance class (Java: AutorouteControl
+    // takes trace_clearance_class_no from the net class). The CLI/API base
+    // request hardcoded class 1, so nets with a tighter or looser clearance
+    // rule were routed and DRC-checked against the wrong spacing.
+    let class_clearance = board.rules.get_trace_clearance_class(net_no);
     BatchRequest {
         trace_half_width: if class_half_width > 0 {
             class_half_width
         } else {
             base.trace_half_width
+        },
+        clearance_class: if class_clearance > 0 {
+            class_clearance
+        } else {
+            base.clearance_class
         },
         via_padstack: board
             .rules

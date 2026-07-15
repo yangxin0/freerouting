@@ -65,6 +65,10 @@ pub struct BasicBoard {
     /// Board units per file coordinate unit of the imported design
     /// (DSN `resolution`); session exports must use the same factor.
     pub resolution: i32,
+    /// The physical unit token of the imported `resolution` (`um`, `mil`,
+    /// `inch`, `mm`). Session exports must echo it so a `mil`-based design is
+    /// not silently relabelled as `um`.
+    pub unit: String,
     /// The imported DSN document without its wiring section (for DSN
     /// export: the router only changes the wiring).
     pub dsn_source: Option<String>,
@@ -116,6 +120,7 @@ impl BasicBoard {
             rules,
             padstacks,
             resolution: 10,
+            unit: "um".to_string(),
             dsn_source: None,
             item_list: UndoableObjects::new(),
             search_tree: MinAreaTree::new(),
@@ -1114,6 +1119,43 @@ mod tests {
 
     fn query_box(llx: i32, lly: i32, urx: i32, ury: i32) -> TileShape {
         TileShape::Box(IntBox::from_coords(llx, lly, urx, ury))
+    }
+
+    #[test]
+    fn via_over_passthrough_trace_registers_contact_after_split() {
+        let mut board = test_board();
+        // a same-net trace running straight through (5000,0), not ending there
+        let trace = board.insert_trace(
+            trace_polyline(&[(0, 0), (10000, 0)]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        let via = board.insert_via(1, IntPoint::new(5000, 0), vec![1], 1, false);
+        // before splitting, the pass-through trace does not contact the via
+        // (contact requires a trace endpoint inside the via shape)
+        assert!(
+            !board.get_normal_contacts(via).contains(&trace),
+            "pass-through trace should not yet register a via contact"
+        );
+        // splitting at the via center cuts the trace so an endpoint lands there
+        assert!(board.split_traces_at(IntPoint::new(5000, 0), 0, 1));
+        // now the via is connected to the (split) trace pieces
+        let connected = board.get_connected_set(via, 1);
+        let trace_pieces = connected
+            .iter()
+            .filter(|&&id| {
+                matches!(
+                    board.get_item(id).map(|i| &i.kind),
+                    Some(ItemKind::PolylineTrace(_))
+                )
+            })
+            .count();
+        assert!(
+            trace_pieces >= 1,
+            "via must connect to the split trace pieces"
+        );
     }
 
     #[test]

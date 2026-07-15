@@ -37,6 +37,60 @@ should pick up the first unchecked item below.
   modes, GUI (out of scope per user directive — CLI is the
   deliverable).
 
+## Audit remediation (2026-07-16)
+
+An independent parity audit against the Java sources raised 11 findings; each
+was re-verified against the code before acting. Seven were confirmed, four
+overstated (none wholly false). Fixes landed (with regression tests):
+
+- **DRC false negatives (confirmed)** — `drc.rs` now includes obstacles/keepouts
+  in the outer iteration and sizes the candidate search by the layer's max
+  clearance instead of a fixed 10 000 units, so copper-vs-earlier-obstacle
+  pairs are checked. Same fixed-radius bug fixed in the optimizer's local DRC.
+- **CLI/settings (confirmed)** — `-mp 0` = unlimited passes; defaults aligned
+  to Java (maxPasses 9999, threads = cores−1); routing + optimization share one
+  `-tl` budget; exit status recomputed after optimization. (The nine-source
+  settings *merger* itself is still not ported.)
+- **Units/geometry (confirmed)** — the DSN unit is preserved through to SES
+  export (a `mil` design no longer exports as `um`); rect board outlines now
+  produce confining keepouts. (Window/hole parsing, exact non-box shape
+  fidelity, and arbitrary named clearance classes remain approximated.)
+- **Via move disconnects traces (confirmed)** — `move_via` now bridges the
+  contacting traces from the old to the new center (Java: `DrillItem.move_by`).
+- **Optimizer acceptance (confirmed)** — gated on board-wide incomplete count,
+  not just the target net, so a reroute that breaks another net is rejected.
+- **Design rules discarded (confirmed)** — per-net trace clearance class now
+  flows to router and optimizer instead of a hardcoded class 1. (Per-layer
+  widths, active-layer mask, directional/plane-via costs, neckdown still TODO.)
+- **Split under via (confirmed)** — the router normalize pass splits same-net
+  traces passing under a newly inserted via across its spanned layers.
+- **Electrical equivalence / completion (confirmed)** — routed trace ends that
+  stopped inside a pad are now snapped to the pin connection point with a short
+  stub, so a "complete" net's wiring is genuinely electrically equivalent (an
+  off-centre SMD end previously reloaded as a dangling track). New test asserts
+  every pin of every complete net is reached at its connection point.
+- **Tests (confirmed gap)** — added CLI end-to-end, SES-import round-trip, and
+  full-board DRC integration tests; the real-board fixture test now hard-fails
+  when the fixture is absent instead of silently passing.
+- **Ratsnest quadratic memory (perf, confirmed)** — MST now spans components
+  via C² closest-pair edges (O(P) memory) instead of materializing all O(P²)
+  point-pair edges.
+
+Deliberately NOT changed, with rationale:
+
+- **Maze relaxation occupy-on-pop (optimality)** — the Java-faithful settle-at-
+  pop variant was implemented and measured: it reintroduces the relaxation storm
+  the occupy-on-push design avoids (J2: 128 ms → 21 s, 168×). The small
+  optimality gain is not worth the catastrophic slowdown; occupy-on-push is
+  retained deliberately (see the note in `maze_search.rs`).
+- **Undo arena reclamation (perf)** — index-based `NodeId` version chains make
+  slot reuse high-risk for the critical undo/redo path; perf-only, modest gain.
+- **Multithreaded board clones** — parity with Java (`OptimizeRouteTask.deepCopy`
+  per task), not a regression; no change.
+
+Full test count after remediation: 223 (was 215). No fleet completion
+regression across J2, pic_programmer, wavefolder, display, 8088sbc, ecc83.
+
 ## OPEN ITEMS (reconciled 2026-07-15, iter 190)
 
 The early-phase checklists above are ticked with pointers; these are

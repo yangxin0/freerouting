@@ -19,15 +19,15 @@ Usage: freerouting -de <input.dsn> [options]
 Options:
   -de <file.dsn>     design file to route (required)
   -do <file.ses>     session output file (default: input file with .ses)
-  -mp <n>            maximum number of ripup passes (default 99)
-  -tl <seconds>      wall-clock time limit for routing (default 300)
+  -mp <n>            maximum number of ripup passes (default 9999; 0 = no limit)
+  -tl <seconds>      wall-clock budget shared by routing + optimization (default 300)
   --strip-wiring     remove the pre-routed wiring and route from scratch
   --fanout           fan out SMD pins to vias before routing
   --angle <mode>     trace angle restriction: none, 45, 90 (default 45)
   --drc-report <f>   write a KiCad-format DRC report (JSON) after routing
   --export-dsn <f>   write the routed design as a Specctra DSN file
   --import-ses <f>   apply an existing session file before routing
-  --threads <n>      optimizer worker threads (default 1)
+  --threads <n>      optimizer worker threads (default: CPU cores - 1)
   --rules <f>        apply a .rules file before routing
   --export-rules <f> write the design rules to a .rules file
   --api-server <p>   run the REST API server on port <p> (no routing)
@@ -85,10 +85,20 @@ fn main() -> ExitCode {
             .and_then(|v| v.as_str())
             .map(str::to_string)
     };
-    let max_passes: usize = flag_value("-mp")
-        .and_then(|v| v.parse().ok())
-        .or(prof_num("maxPasses").map(|v| v as usize))
-        .unwrap_or(99);
+    // Java `RouterSettings`: default maxPasses is 9999 and `-mp 0` means
+    // "no limit" (mapped to Integer.MAX_VALUE), with the wall clock as the
+    // real bound. Previously `-mp 0` collapsed to a single pass.
+    let max_passes: usize = {
+        let raw = flag_value("-mp")
+            .and_then(|v| v.parse::<usize>().ok())
+            .or(prof_num("maxPasses").map(|v| v as usize))
+            .unwrap_or(9999);
+        if raw == 0 {
+            usize::MAX
+        } else {
+            raw
+        }
+    };
     let limit_s: u64 = flag_value("-tl")
         .and_then(|v| v.parse().ok())
         .or(prof_num("timeLimitSeconds").map(|v| v as u64))
@@ -217,14 +227,19 @@ fn main() -> ExitCode {
         stats.incomplete_count, stats.clearance_violations, stats.via_count, stats.total_length_mm
     );
 
-    // the optimizer's recovery reroutes complete the last hard nets
-    // (coldfire: +3 nets in 30 s); scale its budget with the job
-    // instead of a flat 30 s
-    let opt_limit = TimeLimit::new((limit_s * 1000 / 5).max(30_000));
+    // Java uses a single job-wide time budget shared by routing and
+    // optimization; reusing the same `time_limit` (which counts from its
+    // creation) gives the optimizer whatever remains of `-tl` after routing,
+    // so total wall time stays bounded by `-tl` instead of stacking a second
+    // budget on top.
+    // Java default thread count is availableProcessors() - 1.
+    let default_threads = std::thread::available_parallelism()
+        .map(|n| n.get().saturating_sub(1).max(1))
+        .unwrap_or(1);
     let opt_threads: usize = flag_value("--threads")
         .and_then(|v| v.parse().ok())
         .or(profile_threads)
-        .unwrap_or(1);
+        .unwrap_or(default_threads);
     // Java defaults: GREEDY board updates with PRIORITIZED selection
     let strategy = match flag_value("--opt-strategy").unwrap_or("greedy") {
         "global" => freerouting::autoroute::BoardUpdateStrategy::GlobalOptimal,
@@ -247,7 +262,7 @@ fn main() -> ExitCode {
             &mut board,
             &request,
             opt_threads,
-            Some(&opt_limit),
+            Some(&time_limit),
             strategy,
             selection,
             hybrid_ratio,
@@ -332,7 +347,17 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     println!("session written to {output} ({} bytes)", ses.len());
-    if complete == net_count {
+    // Recompute completion after optimization/normalization: the optimizer's
+    // recovery reroutes can finish nets that were incomplete right after the
+    // routing pass, and the exit status must reflect the board that was
+    // actually written, not the pre-optimization snapshot.
+    let complete_final = (1..=net_count)
+        .filter(|&n| board.net_is_completely_connected(n as i32))
+        .count();
+    if complete_final != complete {
+        println!("final completion: {complete_final}/{net_count} nets connected");
+    }
+    if complete_final == net_count {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(2)

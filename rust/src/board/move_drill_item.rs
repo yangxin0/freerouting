@@ -78,8 +78,24 @@ pub fn move_via(
     }
     let padstack = via.padstack;
     let attach_allowed = via.attach_allowed;
+    let old_center = via.center;
     let net_nos = item.base.net_nos.clone();
     let cl_class = item.base.clearance_class;
+
+    // Record the traces contacting the via so we can bridge them to the new
+    // position after the move. Java's `DrillItem.move_by` translates the via
+    // in place and inserts old->new connecting stubs for each contacting
+    // trace; this port removes and reinserts the via, so without these
+    // bridges the contacting traces would be left dangling at the old center
+    // and the via's net would be disconnected.
+    let mut bridge_contacts: Vec<(usize, i32, usize)> = Vec::new(); // (layer, half_width, clearance_class)
+    for contact in board.get_normal_contacts(via_id) {
+        if let Some(c) = board.get_item(contact) {
+            if let ItemKind::PolylineTrace(t) = &c.kind {
+                bridge_contacts.push((t.layer, t.half_width, c.base.clearance_class));
+            }
+        }
+    }
 
     board.generate_snapshot();
     board.remove_item(via_id);
@@ -131,8 +147,15 @@ pub fn move_via(
             return false;
         }
     }
-    let new_id = board.insert_via(padstack, new_center, net_nos.clone(), cl_class, attach_allowed);
-    let _ = new_id;
+    board.insert_via(padstack, new_center, net_nos.clone(), cl_class, attach_allowed);
+    // Bridge each previously-contacting trace from the old via center to the
+    // new one, preserving connectivity (Java: DrillItem.move_by insert_trace).
+    if old_center != new_center {
+        for (layer, half_width, trace_cl_class) in bridge_contacts {
+            let bridge = crate::geometry::planar::Polyline::from_int_points(&[old_center, new_center]);
+            board.insert_trace(bridge, layer, half_width, net_nos.clone(), trace_cl_class);
+        }
+    }
     board.pop_snapshot();
     true
 }
@@ -253,6 +276,37 @@ mod tests {
                     .intersects(it.bounding_box(&board.padstacks))
         });
         assert!(found, "moved via must exist outside the corridor");
+    }
+
+    #[test]
+    fn moved_via_stays_connected_to_its_trace() {
+        use crate::geometry::planar::IntPoint;
+        let mut board = test_board();
+        let via = board.insert_via(1, IntPoint::new(0, 0), vec![2], 1, false);
+        // a same-net trace contacting the via at its center
+        let trace = board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(0, 0), IntPoint::new(0, 6000)]),
+            0,
+            100,
+            vec![2],
+            1,
+        );
+        let corridor = TileShape::Box(IntBox::from_coords(-5000, -700, 5000, 700));
+        assert!(shove_vias(&mut board, &corridor, 0, &[1], 1, 2));
+        // the original via id is gone (it was reinserted at a new position)
+        assert!(board.get_item(via).is_none(), "via should have moved");
+        // the trace must still reach a via through the inserted bridge stub;
+        // without bridging the trace would be left dangling at the old center
+        let connected = board.get_connected_set(trace, 2);
+        let reaches_via = connected.iter().any(|&id| {
+            board
+                .get_item(id)
+                .is_some_and(|it| matches!(it.kind, ItemKind::Via(_)))
+        });
+        assert!(
+            reaches_via,
+            "moved via must stay connected to its trace via the bridge"
+        );
     }
 
     #[test]

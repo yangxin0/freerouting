@@ -8,10 +8,11 @@ use freerouting::io::{export_ses, import_dsn, parse_dsn};
 fn import_route_export_real_board() {
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
     let path = format!("{root}/fixtures/Issue093-interf_u.dsn");
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        eprintln!("fixture not present; skipping");
-        return;
-    };
+    // The fixture is checked into the repository; a missing file is a real
+    // failure, not a reason to silently pass (previously this test no-oped
+    // when the fixture was absent, so a broken checkout looked green).
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("required fixture {path} missing: {e}"));
     // strip the pre-routed wiring so the test exercises actual routing
     let content = match content.find("  (wiring") {
         Some(pos) => format!("{})", &content[..pos]),

@@ -16,7 +16,9 @@ pub fn export_ses(board: &BasicBoard, design_name: &str, resolution: i32) -> Str
     out.push_str(design_name);
     out.push_str(".dsn\")\n");
     out.push_str("  (routes \n");
-    out.push_str(&format!("    (resolution um {resolution})\n"));
+    // Echo the imported physical unit (Java: SesWriter writes the design's
+    // unit); hardcoding `um` relabelled non-um designs.
+    out.push_str(&format!("    (resolution {} {resolution})\n", board.unit));
     out.push_str("    (parser\n      (host_cad \"freerouting-rs\")\n    )\n");
 
     // library_out: the via padstacks referenced by the session (Java:

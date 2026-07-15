@@ -5,6 +5,10 @@
 use crate::autoroute::batch::net_components;
 use crate::board::basic_board::BasicBoard;
 
+/// A candidate MST edge between two connected components: (distance,
+/// component i, component j, closest point in i, closest point in j).
+type CompEdge = (f64, usize, usize, (f64, f64), (f64, f64));
+
 /// One airline (Java: `RatsNest.AirLine`).
 #[derive(Debug, Clone)]
 pub struct AirLine {
@@ -64,30 +68,45 @@ pub fn ratsnest(board: &BasicBoard) -> Vec<AirLine> {
         if components.len() < 2 {
             continue;
         }
-        // every item point, tagged with its connected-set index
-        let mut points: Vec<((f64, f64), usize)> = Vec::new();
+        // item points grouped by connected-set index
+        let mut by_comp: Vec<Vec<(f64, f64)>> = vec![Vec::new(); components.len()];
         for (set_idx, comp) in components.iter().enumerate() {
             for &id in comp {
                 for pt in item_points(board, id) {
-                    points.push((pt, set_idx));
+                    by_comp[set_idx].push(pt);
                 }
             }
         }
-        // Kruskal over all cross-set point pairs, ascending by length
-        let mut edges: Vec<(f64, usize, usize)> = Vec::new();
-        for i in 0..points.len() {
-            for j in (i + 1)..points.len() {
-                if points[i].1 == points[j].1 {
-                    continue;
+        // The airlines form a minimum spanning tree over the connected
+        // COMPONENTS, where the weight between two components is their closest
+        // point-pair distance. Instead of materializing all O(P^2) point-pair
+        // edges (quadratic memory), reduce to the C^2 component-pair edges
+        // (C = number of disconnected pieces, usually tiny): scan point pairs
+        // once to find each component pair's closest points, storing only the
+        // C^2 result, then run Kruskal over those. Same airlines, O(P + C^2)
+        // memory instead of O(P^2).
+        let c = components.len();
+        let mut comp_edges: Vec<CompEdge> = Vec::new();
+        for i in 0..c {
+            for j in (i + 1)..c {
+                type Best = Option<(f64, (f64, f64), (f64, f64))>;
+                let mut best: Best = None;
+                for &pa in &by_comp[i] {
+                    for &pb in &by_comp[j] {
+                        let d = (pa.0 - pb.0).hypot(pa.1 - pb.1);
+                        if best.as_ref().is_none_or(|(bd, _, _)| d < *bd) {
+                            best = Some((d, pa, pb));
+                        }
+                    }
                 }
-                let d = (points[i].0 .0 - points[j].0 .0)
-                    .hypot(points[i].0 .1 - points[j].0 .1);
-                edges.push((d, i, j));
+                if let Some((d, from, to)) = best {
+                    comp_edges.push((d, i, j, from, to));
+                }
             }
         }
-        edges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        comp_edges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         // union-find over the connected sets
-        let mut parent: Vec<usize> = (0..components.len()).collect();
+        let mut parent: Vec<usize> = (0..c).collect();
         fn find(parent: &mut [usize], mut x: usize) -> usize {
             while parent[x] != x {
                 parent[x] = parent[parent[x]];
@@ -95,11 +114,8 @@ pub fn ratsnest(board: &BasicBoard) -> Vec<AirLine> {
             }
             x
         }
-        for (_, i, j) in edges {
-            let (a, b) = (
-                find(&mut parent, points[i].1),
-                find(&mut parent, points[j].1),
-            );
+        for (_, i, j, from, to) in comp_edges {
+            let (a, b) = (find(&mut parent, i), find(&mut parent, j));
             if a == b {
                 continue;
             }
@@ -107,8 +123,8 @@ pub fn ratsnest(board: &BasicBoard) -> Vec<AirLine> {
             result.push(AirLine {
                 net_no,
                 net_name: net_name.clone(),
-                from: points[i].0,
-                to: points[j].0,
+                from,
+                to,
             });
         }
     }

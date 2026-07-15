@@ -18,7 +18,8 @@ fn net_violations(board: &BasicBoard, net_no: i32) -> usize {
             continue;
         }
         for (s, l) in item.tile_shapes(&board.padstacks) {
-            for oid in board.overlapping_items(&s.offset(10_000.0), Some(*l)) {
+            let search_radius = board.rules.clearance_matrix.max_value(*l).max(0) as f64;
+            for oid in board.overlapping_items(&s.offset(search_radius), Some(*l)) {
                 if oid == *id {
                     continue;
                 }
@@ -71,6 +72,17 @@ fn net_route_cost(board: &BasicBoard, net_no: i32) -> (usize, f64) {
     (vias, length)
 }
 
+/// The number of nets on the board that are not completely connected
+/// (Java: `BoardStatistics.calculateIncompleteCount`). Used as the primary
+/// optimizer-acceptance gate so a reroute that pushes another net aside and
+/// fails to recover it is rejected board-wide, not just judged on the target
+/// net.
+fn count_board_incompletes(board: &BasicBoard) -> usize {
+    (1..=board.rules.nets.max_net_no())
+        .filter(|&n| !board.net_is_completely_connected(n))
+        .count()
+}
+
 fn rip_net_route_items(board: &mut BasicBoard, net_no: i32) {
     let ids: Vec<ItemId> = board
         .items()
@@ -114,6 +126,12 @@ pub fn optimize_nets_pass(
     // consecutive non-improving items; the streak resets on improvement
     // (settings.optimizer.maxConsecutiveFailures, default 50)
     let mut consecutive_failures = 0usize;
+    // Board-wide incomplete-net count, the primary acceptance gate. Cached
+    // across net-steps: a rejected step restores the board via undo, so the
+    // count is unchanged and can be reused; only an accepted step (which
+    // mutates the board) refreshes it. This keeps the board-wide scan roughly
+    // once per acceptance rather than once per net.
+    let mut board_incomplete: Option<usize> = None;
     for net_no in net_nos {
         if time_limit.is_some_and(|t| t.limit_exceeded()) {
             break;
@@ -121,6 +139,7 @@ pub fn optimize_nets_pass(
         if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
             break;
         }
+        let incomplete_before = *board_incomplete.get_or_insert_with(|| count_board_incompletes(board));
         let was_complete = board.net_is_completely_connected(net_no);
         let (vias_before, len_before) = net_route_cost(board, net_no);
         let violations_before = net_violations(board, net_no);
@@ -139,9 +158,12 @@ pub fn optimize_nets_pass(
             .map(|t| t.remaining_ms())
             .unwrap_or(u64::MAX)
             .min(cap);
+        // Reroute with the net's own class rules (width, clearance class, via
+        // padstack), not the base request, so the optimizer does not relay
+        // traces under the wrong clearance.
         let net_request = BatchRequest {
             deadline: Some(crate::datastructures::TimeLimit::new(budget_ms)),
-            ..*request
+            ..crate::autoroute::batch::request_for_net(board, net_no, request)
         };
         crate::board::basic_board::set_birth_tag(1);
         if was_complete {
@@ -154,17 +176,30 @@ pub fn optimize_nets_pass(
         }
         let complete_now = board.net_is_completely_connected(net_no);
         let (vias_after, len_after) = net_route_cost(board, net_no);
-        let keep = complete_now
+        let local_keep = complete_now
             && net_violations(board, net_no) <= violations_before
             && (!was_complete
                 || vias_after < vias_before
                 || (vias_after == vias_before && len_after + min_gain < len_before));
+        // Board-wide gate (Java `ItemRouteResult.improved`): never accept a
+        // reroute that increases the total number of incomplete nets, even if
+        // the target net itself improved. Only scanned when the local
+        // condition already holds, so rejects stay cheap.
+        let inc_after = if local_keep {
+            Some(count_board_incompletes(board))
+        } else {
+            None
+        };
+        let keep = local_keep && inc_after.unwrap() <= incomplete_before;
         if keep {
             board.pop_snapshot();
+            // board changed; the freshly measured count is the new baseline
+            board_incomplete = inc_after;
             improved += 1;
             consecutive_failures = 0;
         } else {
             board.undo();
+            // board restored to its pre-step state; cached count still valid
             consecutive_failures += 1;
         }
     }

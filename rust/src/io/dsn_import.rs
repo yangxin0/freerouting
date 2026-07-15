@@ -65,10 +65,16 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     }
     let structure = pcb.child("structure").ok_or_else(|| err("no structure"))?;
 
-    // resolution: file coordinates are multiplied by this factor to get
-    // integer board units
-    let resolution: f64 = pcb
-        .child("resolution")
+    // resolution: `(resolution <unit> <value>)`. File coordinates are
+    // multiplied by <value> to get integer board units; <unit> is the
+    // physical unit, which must be preserved for a faithful SES round-trip
+    // (a `mil` design was previously relabelled `um` on export).
+    let resolution_node = pcb.child("resolution");
+    let unit: String = resolution_node
+        .and_then(|r| r.args().next())
+        .map(|a| a.to_string())
+        .unwrap_or_else(|| "um".to_string());
+    let resolution: f64 = resolution_node
         .and_then(|r| r.args().nth(1))
         .and_then(|a| a.parse().ok())
         .unwrap_or(1.0);
@@ -286,6 +292,7 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
 
     let mut board = BasicBoard::new(layer_structure, rules, padstacks);
     board.resolution = resolution.round() as i32;
+    board.unit = unit;
 
     // power planes: conduction areas connecting their net's pins
     // ((plane NET (polygon LAYER aperture x y ...)))
@@ -388,6 +395,23 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 .map(|c| IntPoint::new(scale(c[0]), scale(c[1])))
                 .collect();
             insert_boundary_keepouts(&mut board, &corners, default_clearance / 2);
+        } else if let Some(rect) = boundary.child("rect") {
+            // (boundary (rect <layer> x1 y1 x2 y2)): a rectangular outline.
+            // Previously only `path` boundaries produced keepouts, so
+            // rect-outline boards were unconfined and routes could escape the
+            // board. Java reads `rect` as a first-class boundary shape.
+            let coords: Vec<f64> = rect.args().skip(1).filter_map(|a| a.parse().ok()).collect();
+            if coords.len() >= 4 {
+                let (xmin, xmax) = (coords[0].min(coords[2]), coords[0].max(coords[2]));
+                let (ymin, ymax) = (coords[1].min(coords[3]), coords[1].max(coords[3]));
+                let corners = vec![
+                    IntPoint::new(scale(xmin), scale(ymin)),
+                    IntPoint::new(scale(xmax), scale(ymin)),
+                    IntPoint::new(scale(xmax), scale(ymax)),
+                    IntPoint::new(scale(xmin), scale(ymax)),
+                ];
+                insert_boundary_keepouts(&mut board, &corners, default_clearance / 2);
+            }
         }
     }
 
@@ -837,6 +861,16 @@ mod tests {
             keepouts.iter().filter(|(_, via_only)| *via_only).count(),
             2,
             "via keepout on both signal layers"
+        );
+        // the rect boundary must produce confining keepout strips (previously
+        // only `path` boundaries did, leaving rect-outline boards unconfined)
+        let boundary_strips = board
+            .items()
+            .filter(|(_, it)| matches!(&it.kind, ItemKind::ObstacleArea(a) if a.name == "boundary"))
+            .count();
+        assert!(
+            boundary_strips > 0,
+            "rect boundary must produce confining keepouts"
         );
     }
 

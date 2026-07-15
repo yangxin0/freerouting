@@ -501,12 +501,21 @@ fn seed_room(
                     * section_discount
             };
             let cost = base_cost + location.distance(midpoint) + ripup_cost;
-            // occupy ON PUSH (Java: expand_to_door_section sets
-            // is_occupied when the element is inserted): each section
-            // enters the queue exactly once, from the cheapest frontier
-            // element known at that time. Occupy-on-pop instead lets
-            // every re-entry of a room re-seed all its sections — a
-            // relaxation storm (69M pushes on NormalPuzzle).
+            // occupy ON PUSH (Java: expand_to_door_section sets is_occupied
+            // when the element is inserted): each section enters the queue
+            // exactly once, from the cheapest frontier element known at that
+            // time.
+            //
+            // NOTE: Java actually settles the section at POP, which is
+            // theoretically more optimal (an expensive first discovery can
+            // block a cheaper later path here). That correct variant was tried
+            // — competing candidates queued, cheapest settled at pop, with a
+            // strictly-cheaper prune to bound re-pushes — but occupy-on-push is
+            // load-bearing as a frontier pruner, not just a micro-optimization:
+            // removing it exploded the search on J2 from ~125 ms to ~21 s
+            // (168x; NormalPuzzle earlier hit 69M pushes). The optimality gap
+            // is small in practice while the slowdown is catastrophic, so the
+            // occupy-on-push tradeoff is retained deliberately.
             match engine.graph.door_mut(door).sections.get_mut(section) {
                 Some(s) if !s.is_occupied => {
                     s.is_occupied = true;
@@ -1539,6 +1548,86 @@ fn insert_connection(
         .collect();
     for (point, layer) in endpoints {
         board.split_traces_at(point, layer, request.net_no);
+    }
+
+    // also split a same-net trace that runs *underneath* a newly inserted via
+    // (no trace endpoint at the via center), on every layer the via spans, so
+    // the via registers a contact with the pass-through trace (Java:
+    // insert_via calls split_traces across the via's spanned layers). Without
+    // this, a via dropped on a pass-through trace leaves the net's connectivity
+    // unregistered and completion is over-counted.
+    let via_splits: Vec<(IntPoint, usize)> = new_items
+        .iter()
+        .filter_map(|id| board.get_item(*id).cloned())
+        .filter_map(|item| match item.kind {
+            crate::board::ItemKind::Via(v) => Some(v),
+            _ => None,
+        })
+        .flat_map(|v| {
+            let (from, to) = board
+                .padstacks
+                .get_by_no(v.padstack)
+                .map(|p| (p.from_layer(), p.to_layer()))
+                .unwrap_or((0, 0));
+            (from..=to).map(move |l| (v.center, l)).collect::<Vec<_>>()
+        })
+        .collect();
+    for (point, layer) in via_splits {
+        board.split_traces_at(point, layer, request.net_no);
+    }
+
+    // Land a routed trace end that stopped inside a same-net pad exactly on
+    // that pad's connection point (its drill center) with a short stub. The
+    // maze search terminates a connection anywhere inside the target pad, so a
+    // trace can end 50 um off a small SMD pin while still being "inside" it.
+    // The lenient in-pad containment rule counts that as connected, but the
+    // exported SES is not electrically equivalent — reloaded, the off-centre
+    // end reads as a dangling track. The stub, a straight segment between two
+    // points of the convex pad, stays inside the (same-net) pad, so it adds no
+    // clearance cost while making the pin connection point genuinely reached.
+    let mut pad_stubs: Vec<(IntPoint, IntPoint, usize, i32)> = Vec::new();
+    for id in &new_items {
+        let Some(item) = board.get_item(*id) else { continue };
+        let crate::board::ItemKind::PolylineTrace(t) = &item.kind else { continue };
+        let layer = t.layer;
+        let hw = t.half_width;
+        for corner in [t.first_corner(), t.last_corner()] {
+            let cp = corner.to_float().round();
+            let query = TileShape::Box(IntBox::from_coords(cp.x - 1, cp.y - 1, cp.x + 1, cp.y + 1));
+            for oid in board.overlapping_items(&query, Some(layer)) {
+                if oid == *id {
+                    continue;
+                }
+                let Some(other) = board.get_item(oid) else { continue };
+                if !other.base.contains_net(request.net_no) {
+                    continue;
+                }
+                let crate::board::ItemKind::Via(ov) = &other.kind else { continue };
+                if ov.center == cp {
+                    continue; // already at the connection point
+                }
+                let inside_pad = other
+                    .tile_shapes(&board.padstacks)
+                    .iter()
+                    .any(|(s, l)| {
+                        *l == layer && s.contains(&crate::geometry::planar::Point::Int(cp))
+                    });
+                if inside_pad {
+                    pad_stubs.push((cp, ov.center, layer, hw));
+                    break;
+                }
+            }
+        }
+    }
+    pad_stubs.sort_by_key(|(a, b, l, _)| (a.x, a.y, b.x, b.y, *l));
+    pad_stubs.dedup_by_key(|(a, b, l, _)| (a.x, a.y, b.x, b.y, *l));
+    for (from, to, layer, hw) in pad_stubs {
+        if from != to {
+            let stub = Polyline::from_int_points(&[from, to]);
+            let stub_id =
+                board.insert_trace(stub, layer, hw, vec![request.net_no], request.clearance_class);
+            new_items.push(stub_id);
+        }
     }
     Some(new_items)
 }

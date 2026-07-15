@@ -86,6 +86,18 @@ impl BoardRules {
         self.net_classes.get(net.get_class()).get_trace_half_width(layer)
     }
 
+    /// The trace clearance class of `net_no`'s net class (Java:
+    /// `NetClass.get_trace_clearance_class`, used to build `AutorouteControl`).
+    /// Falls back to the default clearance class when the net is unknown.
+    pub fn get_trace_clearance_class(&self, net_no: i32) -> usize {
+        let Some(net) = self.nets.get_by_no(net_no) else {
+            return Self::default_clearance_class();
+        };
+        self.net_classes
+            .get(net.get_class())
+            .get_trace_clearance_class()
+    }
+
     /// True if the trace widths for `net_no` differ between layers.
     pub fn trace_widths_are_layer_dependent(&self, net_no: i32) -> bool {
         let compare_width = self.get_trace_half_width(net_no, 0);
