@@ -258,6 +258,19 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 138): RIPUP QUALITY — interf_u 172/173 (from
+  170), recovering /MA11 and /MA14; only VCC remains. Three changes:
+  (1) 1-for-1 swap tolerance in route_net_with_ripup victim
+  recovery — at most one victim net may stay broken when the target
+  completes, so completion stays monotone while hard failures become
+  failure-set rotations later passes can attack from the other side
+  (reported as a failure so the pass loop keeps running);
+  (2) ripup penalty now ESCALATES per pass (base × pass number,
+  Java-faithful) so churny swaps converge; (3) the restart fallback
+  allows up to min(#failures, 3) dry rounds — the rotation makes each
+  round genuinely different when several nets fail. No regressions:
+  NormalPuzzle 14.5s 72/72, DRC unchanged (wavefolder/J2 0,
+  display 12).
 - 2026-07-15 (iter 137): PERFORMANCE RECOVERED after the miter fix,
   two wins: (1) getenv in hot loops — the debug-flag env reads
   (FR_ASTAR_WEIGHT per A* estimate!, FR_DEBUG_* per completion) took

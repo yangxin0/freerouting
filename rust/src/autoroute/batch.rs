@@ -236,14 +236,19 @@ pub fn route_net_with_ripup(
     let mut extra_routed = retry.routed_connections;
     let mut success =
         retry.failed_connections == 0 && board.net_is_completely_connected(net_no);
+    let mut broken_victims = 0usize;
     if success {
-        // Reroute the victims immediately without further ripup; all must
-        // recover before the transaction commits. (A bounded cascading
-        // variant was benchmarked at iterations 55-58 and consistently
-        // regressed completion by time starvation: 161/173 vs 166/173.)
+        // Reroute the victims immediately without further ripup. At most
+        // ONE victim net may stay broken (a 1-for-1 swap): completion
+        // stays monotone while a hard failure becomes a failure-set
+        // rotation that later passes and the restart fallback can attack
+        // from the other side. (A bounded cascading variant was
+        // benchmarked at iterations 55-58 and consistently regressed
+        // completion by time starvation: 161/173 vs 166/173.)
         for &ripped in &retry.ripped_nets {
             if request.deadline.is_some_and(|t| t.limit_exceeded()) {
-                success = false;
+                // half-done victim recovery must not commit
+                broken_victims = usize::MAX;
                 break;
             }
             if board.net_is_completely_connected(ripped) {
@@ -252,14 +257,19 @@ pub fn route_net_with_ripup(
             let r = route_net(board, ripped, request);
             extra_routed += r.routed_connections;
             if r.failed_connections > 0 || !board.net_is_completely_connected(ripped) {
-                success = false;
-                break;
+                broken_victims += 1;
+                if broken_victims > 1 {
+                    break;
+                }
             }
         }
+        success = broken_victims <= 1;
     }
     if success {
         result.routed_connections += extra_routed;
-        result.failed_connections = 0;
+        // a swap leaves one net broken: report it so the pass loop keeps
+        // running; only a full recovery clears the failure count
+        result.failed_connections = broken_victims;
         board.pop_snapshot();
     } else {
         board.undo();
@@ -462,11 +472,14 @@ pub fn batch_route_passes_with_time_limit(
             ..*request
         };
         let mut failed_this_pass = 0usize;
-        // in-search ripup is allowed from the second pass on
+        // in-search ripup is allowed from the second pass on, with the
+        // penalty escalating per pass (Java: the ripup costs increase
+        // with the pass number, so churny swaps become ever more
+        // expensive and the passes converge)
         let ripup_penalty = if pass == 0 {
             0.0
         } else {
-            request.via_cost.max(20_000.0)
+            request.via_cost.max(20_000.0) * pass as f64
         };
         let mut out_of_time = false;
         for &net_no in &net_nos {
@@ -512,7 +525,8 @@ pub fn batch_route_passes_with_time_limit(
     // complete (transactional via snapshot), so completion is monotonic.
     let mut dry_rounds = 0usize;
     let mut round = 0usize;
-    while dry_rounds < 1 && !time_limit.is_some_and(|t| t.limit_exceeded()) {
+    let mut max_dry = 1usize;
+    while dry_rounds < max_dry && !time_limit.is_some_and(|t| t.limit_exceeded()) {
         let mut incomplete: Vec<i32> = net_nos
             .iter()
             .copied()
@@ -521,6 +535,11 @@ pub fn batch_route_passes_with_time_limit(
         if incomplete.is_empty() {
             break;
         }
+        // with several failures the rotation gives each round a genuinely
+        // different order, so more dry rounds are worth the time; with a
+        // single failure the restart is deterministic and one dry round
+        // settles it
+        max_dry = incomplete.len().min(3);
         round += 1;
         let rot = round % incomplete.len();
         incomplete.rotate_left(rot);
