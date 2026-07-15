@@ -1422,6 +1422,26 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   not pad shapes; back-side placement still mirrors offsets without
   mirroring pad shapes or flipping their layers.
 
+- 2026-07-15 (iter 187): DETERMINISTIC ROUTING + benchmark
+  methodology. datastructures/fx_hash.rs (zero-dep Fx multiply-mix
+  hasher) swapped into the routing hot paths (engine grid +
+  obstacle_rooms, drill pages, maze drilled set, board inflation
+  cache): std's per-process SipHash seed randomized HashMap order and
+  every room shape downstream. PROVEN: two 8088sbc runs byte-identical
+  except elapsed-time digits (104/104, 3513 pair checks). FR_STATS now
+  prints SLOW NET lines (net, pass, wall clock ≥ 15 s).
+  create_start_rooms clips seed rooms to room_window like the
+  expansion path (board-sized seeds were ~18% of a coldfire profile);
+  deterministic caffeinated 240 s A/B: clip 263/278 + 1 deep violation
+  vs no-clip 266/278 + 12 — perf-neutral (PASS 0 38.7 vs 37.7 s),
+  much cleaner board, kept. METHODOLOGY: this Mac SLEEPS during idle
+  waits and macOS Instant (hence TimeLimit) freezes during sleep —
+  several "deadline leak"/"12x variance" observations were sleep
+  artifacts. ALL timed runs: `caffeinate -is`, validate CPU ≈ wall
+  time, never build/test concurrently. Coldfire canonical
+  (deterministic, 240 s): 263/278, 1 deep violation, PASS 0 38.7 s,
+  PASS 1 129.3 s. Fresh 600 s canonical run pending.
+
 ## Notes / decisions log
 
 - 2026-07-14: crate scaffolded on branch `rust`; no external deps yet.

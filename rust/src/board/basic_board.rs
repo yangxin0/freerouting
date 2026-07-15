@@ -92,9 +92,9 @@ pub struct BasicBoard {
     change_epoch: u64,
     #[allow(clippy::type_complexity)]
     inflation_cache: std::cell::RefCell<
-        std::collections::HashMap<
+        crate::datastructures::FxHashMap<
             ItemId,
-            std::collections::HashMap<
+            crate::datastructures::FxHashMap<
                 i32,
                 std::sync::Arc<Vec<(std::sync::Arc<TileShape>, IntBox, usize)>>,
             >,

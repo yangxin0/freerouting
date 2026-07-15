@@ -609,6 +609,7 @@ pub fn batch_route_passes_with_time_limit(
             let cross_net = std::env::var("FR_CROSS_NET")
                 .map(|v| v != "0")
                 .unwrap_or_else(|_| board.item_count() >= 400);
+            let net_start = std::time::Instant::now();
             let result = if ripup_penalty > 0.0 {
                 route_net_with_ripup(board, net_no, &net_request, ripup_penalty)
             } else if cross_net {
@@ -616,6 +617,14 @@ pub fn batch_route_passes_with_time_limit(
             } else {
                 route_net(board, net_no, &net_request)
             };
+            if crate::debug::stats() && net_start.elapsed().as_secs() >= 15 {
+                eprintln!(
+                    "SLOW NET {net_no} pass {pass}: {:.1?} ({} routed, {} failed)",
+                    net_start.elapsed(),
+                    result.routed_connections,
+                    result.failed_connections
+                );
+            }
             total.routed_connections += result.routed_connections;
             failed_this_pass += result.failed_connections;
         }

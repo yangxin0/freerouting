@@ -41,7 +41,7 @@ struct DrillPage {
 pub struct DrillPageArray {
     page_width: i32,
     bounding: IntBox,
-    pages: std::collections::HashMap<(i32, i32), DrillPage>,
+    pages: crate::datastructures::FxHashMap<(i32, i32), DrillPage>,
     /// Consumed prefix of the board change log (invalidation).
     seen_log: usize,
     seen_epoch: u64,
@@ -59,7 +59,7 @@ impl DrillPageArray {
         DrillPageArray {
             page_width: (5 * via_extent).max(10_000),
             bounding: board.bounding_box(),
-            pages: std::collections::HashMap::new(),
+            pages: crate::datastructures::FxHashMap::default(),
             seen_log: board.change_log().len(),
             seen_epoch: board.change_epoch(),
         }

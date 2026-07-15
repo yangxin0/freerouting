@@ -47,7 +47,7 @@ pub struct AutorouteEngine {
     net_dependent: Vec<bool>,
     /// Obstacle expansion rooms per (item, shape index) (Java:
     /// ItemAutorouteInfo.get_expansion_room).
-    obstacle_rooms: std::collections::HashMap<(ItemId, usize), RoomId>,
+    obstacle_rooms: crate::datastructures::FxHashMap<(ItemId, usize), RoomId>,
     /// Drill pages for via-location candidates (Java: DrillPageArray),
     /// created on first use, cache synced against board changes.
     pub drill_pages: Option<crate::autoroute::drill_pages::DrillPageArray>,
@@ -59,7 +59,7 @@ pub struct AutorouteEngine {
     /// the phase-2 restrains, door creation and containment lookups were
     /// linear scans over all rooms, which made room reuse quadratic on
     /// many-pin nets (the reason the first reuse attempt was reverted).
-    grid: std::collections::HashMap<(i32, i32, usize), Vec<RoomId>>,
+    grid: crate::datastructures::FxHashMap<(i32, i32, usize), Vec<RoomId>>,
 }
 
 /// Grid cell edge in board units (coarse: cells only prune candidates).
@@ -91,11 +91,11 @@ impl AutorouteEngine {
             rippable_items: Vec::new(),
             expanded: Vec::new(),
             net_dependent: Vec::new(),
-            obstacle_rooms: std::collections::HashMap::new(),
+            obstacle_rooms: crate::datastructures::FxHashMap::default(),
             drill_pages: None,
             seen_log: 0,
             seen_epoch: 0,
-            grid: std::collections::HashMap::new(),
+            grid: crate::datastructures::FxHashMap::default(),
         }
     }
 
@@ -825,8 +825,20 @@ impl AutorouteEngine {
         contained_shape: TileShape,
         layer: usize,
     ) -> Vec<RoomId> {
+        // clip the seed to the room window like the expansion path does:
+        // completing a board-sized room restrains against nearly every
+        // item on the board and dominated the coldfire profile (~18%)
+        let window = crate::debug::room_window();
+        let bound = if window > 0 {
+            board
+                .bounding_box()
+                .offset(1000.0)
+                .intersection(contained_shape.bounding_box().offset(window as f64))
+        } else {
+            board.bounding_box().offset(1000.0)
+        };
         let start = IncompleteRoom {
-            shape: TileShape::Box(board.bounding_box().offset(1000.0)),
+            shape: TileShape::Box(bound),
             layer,
             contained_shape,
         };

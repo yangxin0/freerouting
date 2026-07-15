@@ -12,7 +12,8 @@
 //! node chain and inserted as per-layer polyline traces joined by vias.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashSet};
+use crate::datastructures::FxHashSet as HashSet;
+use std::collections::BinaryHeap;
 
 thread_local! {
     /// Cumulative search statistics (FR_STATS diagnostics).
@@ -208,7 +209,7 @@ pub fn find_connection(
 
     let mut nodes: Vec<BacktrackNode> = Vec::new();
     let mut open: BinaryHeap<Reverse<QueueEntry>> = BinaryHeap::new();
-    let mut drilled: HashSet<(i32, i32, usize)> = HashSet::new();
+    let mut drilled: HashSet<(i32, i32, usize)> = HashSet::default();
 
     // create and seed the start rooms on every layer of the start item
     for (start_shape, layer) in &start_shapes {
