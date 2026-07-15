@@ -258,6 +258,22 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 172): PERFORMANCE PHASE round 1. (a) Drill pages:
+  two-level cache (net-independent base drills computed once per
+  invalidation; per-net recompute only for pages actually containing
+  that net's items) + ExpansionDrill reduced to (location, bbox) —
+  cloning free-area shapes per room entry was ~30% of NormalPuzzle:
+  3.5 s → 2.0 s. (b) SRN make_neighbour bbox precheck (neutral —
+  candidates were already filtered). (c) CROSS-NET ROOM REUSE now
+  PAYS on big boards since SRN + obstacle rooms: 8088sbc pass 0
+  18.9 s/5-failed → 9.8 s/1-failed, 2.6× fewer completions, and the
+  cross-net drc run reached 104/104 with ZERO violations, routing
+  done in ~12 s. Default now by board size (item_count ≥ 1000;
+  FR_CROSS_NET overrides). OPEN: 300 s route_board runs on 8088sbc
+  show run-to-run variance (one run completes at pass 1 in ~12 s,
+  another churns to 281 s / 103-104) — order-effect sensitivity to
+  chase first next iteration; the old path also shows 8 violations
+  on this board in some runs (pre-existing, cross-net run was clean).
 - 2026-07-15 (iter 153): DIRECTIVE CHANGE — feature completeness
   FIRST, performance alignment second; ALL routing algorithms must be
   faithful ports, not approximations. FEATURE CHECKLIST (non-GUI):

@@ -9,19 +9,29 @@ use crate::board::basic_board::BasicBoard;
 use crate::geometry::planar::{IntBox, IntPoint, TileShape};
 use std::sync::Arc;
 
-/// A possible via location (Java: `ExpansionDrill`).
-#[derive(Debug, Clone)]
+/// A possible via location (Java: `ExpansionDrill`). The free-area
+/// shape is reduced to its bounding box at construction: the queries
+/// only need the location and a cheap area filter, and cloning shapes
+/// per room entry dominated the routing profile.
+#[derive(Debug, Clone, Copy)]
 pub struct ExpansionDrill {
-    /// The convex free area the drill was derived from.
-    pub shape: TileShape,
+    pub bbox: IntBox,
     pub location: IntPoint,
 }
 
 #[derive(Debug)]
 struct DrillPage {
     shape: IntBox,
-    /// Cached drills, valid for `net_no` (Java caches per net).
-    drills: Option<Vec<ExpansionDrill>>,
+    /// Net-independent drills: every item treated as a hole. Valid for
+    /// any net with NO items in this page — the overwhelmingly common
+    /// case, computed once per invalidation.
+    base_drills: Option<Vec<ExpansionDrill>>,
+    /// The nets of the items whose holes cut this page (drillability is
+    /// net-dependent only for these).
+    nets_present: Vec<i32>,
+    /// Per-net drills for nets present in the page (Java's semantics:
+    /// own-net items are drillable).
+    net_drills: Option<Vec<ExpansionDrill>>,
     net_no: i32,
 }
 
@@ -79,7 +89,8 @@ impl DrillPageArray {
             for x in x0..=x1 {
                 for y in y0..=y1 {
                     if let Some(page) = self.pages.get_mut(&(x, y)) {
-                        page.drills = None;
+                        page.base_drills = None;
+                        page.net_drills = None;
                     }
                 }
             }
@@ -124,18 +135,36 @@ impl DrillPageArray {
                     .entry(key)
                     .or_insert_with(|| DrillPage {
                         shape: page_box,
-                        drills: None,
+                        base_drills: None,
+                        nets_present: Vec::new(),
+                        net_drills: None,
                         net_no: -1,
                     });
-                if page.drills.is_none() || page.net_no != net_no {
-                    page.net_no = net_no;
-                    page.drills = Some(calculate_page_drills(
-                        board, page.shape, net_no, via_margin,
-                    ));
+                if page.base_drills.is_none() {
+                    let (drills, nets) =
+                        calculate_page_drills(board, page.shape, -1, via_margin);
+                    page.base_drills = Some(drills);
+                    page.nets_present = nets;
+                    page.net_drills = None;
+                    page.net_no = -1;
                 }
-                for d in page.drills.as_ref().unwrap() {
-                    if d.shape.bounding_box().intersects(*area) {
-                        result.push(d.clone());
+                let drills: &Vec<ExpansionDrill> = if page.nets_present.contains(&net_no) {
+                    // this net has items here: own-net items are
+                    // drillable, so the drill set differs (Java's
+                    // per-net cache, now only where it matters)
+                    if page.net_drills.is_none() || page.net_no != net_no {
+                        page.net_no = net_no;
+                        page.net_drills = Some(
+                            calculate_page_drills(board, page.shape, net_no, via_margin).0,
+                        );
+                    }
+                    page.net_drills.as_ref().unwrap()
+                } else {
+                    page.base_drills.as_ref().unwrap()
+                };
+                for d in drills {
+                    if d.bbox.intersects(*area) {
+                        result.push(*d);
                     }
                 }
             }
@@ -153,12 +182,14 @@ fn calculate_page_drills(
     page: IntBox,
     net_no: i32,
     via_margin: i32,
-) -> Vec<ExpansionDrill> {
+) -> (Vec<ExpansionDrill>, Vec<i32>) {
     let page_shape = TileShape::Box(page);
     let query = page_shape.offset(via_margin as f64);
     let mut holes: Vec<(i32, Arc<TileShape>)> = Vec::new();
+    let mut nets_present: Vec<i32> = Vec::new();
     for item_id in board.overlapping_items_coarse(&query, None) {
         let Some(item) = board.get_item(item_id) else { continue };
+        nets_present.extend(item.base.net_nos.iter().copied());
         // drillable for this net: own-net items and conduction planes
         if item.base.contains_net(net_no) {
             continue;
@@ -184,14 +215,19 @@ fn calculate_page_drills(
         contained_shape: page_shape,
     };
     let pieces = restrain_all(vec![start], &holes, |_, _| {});
-    pieces
-        .into_iter()
-        .filter(|p| p.shape.dimension() == 2)
-        .map(|p| ExpansionDrill {
-            location: p.shape.centre_of_gravity().round(),
-            shape: p.shape,
-        })
-        .collect()
+    nets_present.sort_unstable();
+    nets_present.dedup();
+    (
+        pieces
+            .into_iter()
+            .filter(|p| p.shape.dimension() == 2)
+            .map(|p| ExpansionDrill {
+                location: p.shape.centre_of_gravity().round(),
+                bbox: p.shape.bounding_box(),
+            })
+            .collect(),
+        nets_present,
+    )
 }
 
 #[cfg(test)]
@@ -229,6 +265,7 @@ mod tests {
         let drills = pages.drills_overlapping(&board, &area, 1, 600);
         assert!(!drills.is_empty(), "free space must yield drills");
         for d in &drills {
+            let _ = d.bbox;
             // no drill center inside a foreign via's inflated shape
             for (_, it) in board.items() {
                 if it.base.contains_net(1) {

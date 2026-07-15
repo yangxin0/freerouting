@@ -583,14 +583,14 @@ pub fn batch_route_passes_with_time_limit(
                 continue;
             }
             let net_request = request_for_net(board, net_no, &pass_request);
-            // cross-net room reuse (Java: maintain_database) is opt-in
-            // for now: on small dense boards the net-switch invalidation
-            // churn outweighs the saved completions (NormalPuzzle 17.4s
-            // vs 13.9s); it recovered display to 30/30 though — tune
-            // before defaulting on
+            // cross-net room reuse (Java: maintain_database): a clear
+            // win on big boards since SRN + obstacle rooms (8088sbc
+            // pass 0: 18.9s → 9.8s, 2.6× fewer completions), a small
+            // cost on tiny ones — default by board size, FR_CROSS_NET
+            // overrides
             let cross_net = std::env::var("FR_CROSS_NET")
                 .map(|v| v != "0")
-                .unwrap_or(false);
+                .unwrap_or_else(|_| board.item_count() >= 1000);
             let result = if ripup_penalty > 0.0 {
                 route_net_with_ripup(board, net_no, &net_request, ripup_penalty)
             } else if cross_net {

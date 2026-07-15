@@ -144,7 +144,16 @@ pub fn make_neighbour(
     object: NeighbourObject,
     neighbour_shape: &TileShape,
 ) -> Option<Neighbour> {
+    // touching requires intersecting bounding boxes: the exact
+    // (simplifying) intersection dominated big-board completion when
+    // run on every coarse grid candidate
     let room_tile = TileShape::Simplex(room_shape.clone());
+    if !room_tile
+        .bounding_box()
+        .intersects(neighbour_shape.bounding_box())
+    {
+        return None;
+    }
     let intersection = room_tile.intersection_with_simplify(neighbour_shape);
     let dim = intersection.dimension();
     if dim >= 2 || dim < 0 {
