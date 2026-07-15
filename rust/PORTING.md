@@ -258,6 +258,17 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 144): BIDIRECTIONAL PULL-TIGHT GATE — FOUR
+  boards at ZERO violations with FULL post-processing: display
+  (29/30), NormalPuzzle (72/72), wavefolder (31/31), J2 (24/24);
+  pic 111/111 with 2 left. The post-processing pair was MITER
+  ASYMMETRY: inflation is a mitered line-push, so miter(a,cl)∩b=∅
+  does not imply miter(b,cl)∩a=∅ at diagonal corners — pull-tight
+  validated only its own direction while the DRC audit checks both.
+  polyline_keeps_clearance() now gates the rebuilt polyline exactly
+  in both directions (reusing the board inflation cache for the
+  partner direction). interf_u re-benchmark post-occupy-on-push:
+  170/173 @300 s (unchanged completion; VCC + 2 mid nets).
 - 2026-07-15 (iter 143b): FULL JAVA 1.9 SCOREBOARD (stripped
   wiring, router phase only, -mp 99):
   | board        | Java 1.9 router           | Rust (pre-iter-142 nums) |

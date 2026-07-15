@@ -73,17 +73,12 @@ pub fn pull_tight_trace(board: &mut BasicBoard, id: ItemId) -> (ItemId, usize) {
     // ill-conditioned corners (e.g. combine junctions between nearly
     // collinear traces) can drift 10+ units, moving segments the bypass
     // checks never validated into foreign clearance. Validate the whole
-    // rebuilt polyline; keep the original geometry when anything is
-    // blocked (unchanged geometry = unchanged DRC status).
+    // rebuilt polyline EXACTLY (both miter directions, like the DRC
+    // audit); keep the original geometry when anything is blocked
+    // (unchanged geometry = unchanged DRC status).
     let rebuilt = Polyline::from_int_points(&corners);
-    let max_cl = board.rules.clearance_matrix.max_value(layer).max(0);
     let rebuilt_free = !rebuilt.is_empty()
-        && (0..rebuilt.corner_count().saturating_sub(1)).all(|i| {
-            rebuilt
-                .offset_shape(half_width + max_cl, i)
-                .map(|shape: TileShape| !board.is_blocked(&shape, layer, net_no))
-                .unwrap_or(false)
-        });
+        && polyline_keeps_clearance(board, &rebuilt, half_width, layer, net_no, clearance_class);
     let (polyline, removed) = if rebuilt_free {
         (rebuilt, removed)
     } else {
@@ -101,38 +96,11 @@ pub fn pull_tight_trace(board: &mut BasicBoard, id: ItemId) -> (ItemId, usize) {
         board.set_birth(new_id, original_birth);
     }
     if crate::debug::maze() {
-        // post-insert audit: the inserted geometry must keep pairwise
-        // clearance to every foreign item
-        if let Some(item) = board.get_item(new_id).cloned() {
-            for (s, l) in item.tile_shapes(&board.padstacks) {
-                for oid in board.overlapping_items(&s.offset(10_000.0), Some(*l)) {
-                    let Some(other) = board.get_item(oid) else { continue };
-                    if oid == new_id || other.base.shares_net(&item.base) {
-                        continue;
-                    }
-                    if let ItemKind::ObstacleArea(a) = &other.kind {
-                        if a.is_conduction {
-                            continue;
-                        }
-                    }
-                    let cl = board.rules.clearance_matrix.get_value(
-                        item.base.clearance_class,
-                        other.base.clearance_class,
-                        *l,
-                        false,
-                    ) as f64;
-                    let check = s.offset(cl - 2.0);
-                    if other.tile_shapes(&board.padstacks).iter().any(|(os, ol)| {
-                        ol == l && os.intersection(&check).dimension() >= 2
-                    }) {
-                        eprintln!(
-                            "TIGHT VIOLATION trace {new_id} (rebuilt-free {rebuilt_free}, \
-                             removed {removed}) vs item {oid} layer {l}"
-                        );
-                    }
-                }
-            }
-        }
+        audit_foreign_clearance(
+            board,
+            new_id,
+            &format!("TIGHT(rebuilt-free {rebuilt_free}, removed {removed})"),
+        );
     }
     (new_id, removed)
 }
@@ -185,6 +153,65 @@ pub fn combine_all_traces(board: &mut BasicBoard) -> usize {
     before.saturating_sub(board.items().count())
 }
 
+/// True if every segment of `poly` (at `half_width` on `layer`) keeps
+/// the pairwise clearance to every foreign item, in BOTH miter
+/// directions: inflation is a mitered line-push, so miter(a, cl)
+/// missing b does not imply miter(b, cl) misses a at diagonal corners —
+/// the DRC audit checks both, so must the pull-tight gate.
+fn polyline_keeps_clearance(
+    board: &BasicBoard,
+    poly: &Polyline,
+    half_width: i32,
+    layer: usize,
+    net_no: i32,
+    clearance_class: usize,
+) -> bool {
+    let max_cl = board.rules.clearance_matrix.max_value(layer).max(0);
+    for i in 0..poly.corner_count().saturating_sub(1) {
+        let Some(seg) = poly.offset_shape(half_width, i) else {
+            return false;
+        };
+        let query = seg.offset(2.0 * max_cl as f64);
+        for oid in board.overlapping_items(&query, Some(layer)) {
+            let Some(other) = board.get_item(oid) else { continue };
+            if other.base.contains_net(net_no) {
+                continue;
+            }
+            if let ItemKind::ObstacleArea(a) = &other.kind {
+                if a.is_conduction {
+                    continue;
+                }
+            }
+            let cl = board.rules.clearance_matrix.get_value(
+                clearance_class,
+                other.base.clearance_class,
+                layer,
+                false,
+            );
+            // direction a: our inflated segment vs their copper
+            let check = seg.offset(cl.max(0) as f64);
+            if other
+                .tile_shapes(&board.padstacks)
+                .iter()
+                .any(|(os, ol)| *ol == layer && os.intersection(&check).dimension() >= 2)
+            {
+                return false;
+            }
+            // direction b: their inflated copper vs our segment
+            if let Some(inflated) = board.inflated_shapes(oid, cl.max(0)) {
+                if inflated.iter().any(|(os, obb, ol)| {
+                    *ol == layer
+                        && obb.intersects(seg.bounding_box())
+                        && os.intersection(&seg).dimension() >= 2
+                }) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 /// Debug audit: report every foreign item within pairwise clearance of
 /// `id`'s copper (used to attribute post-processing DRC violations).
 #[doc(hidden)]
@@ -215,7 +242,22 @@ pub fn audit_foreign_clearance(board: &BasicBoard, id: ItemId, tag: &str) {
                 .iter()
                 .any(|(os, ol)| ol == l && os.intersection(&check).dimension() >= 2)
             {
-                eprintln!("{tag} VIOLATION item {id} vs item {oid} layer {l}");
+                let kind = |it: &crate::board::Item| match &it.kind {
+                    ItemKind::Via(_) => "via",
+                    ItemKind::PolylineTrace(_) => "trace",
+                    ItemKind::ObstacleArea(_) => "area",
+                };
+                eprintln!(
+                    "{tag} VIOLATION {} {id} (nets {:?}, bbox {:?}) vs {} {oid} \
+                     (nets {:?}, birth {}, bbox {:?}) layer {l}",
+                    kind(&item),
+                    item.base.net_nos,
+                    item.bounding_box(&board.padstacks),
+                    kind(other),
+                    other.base.net_nos,
+                    other.base.birth,
+                    other.bounding_box(&board.padstacks),
+                );
             }
         }
     }
