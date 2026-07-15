@@ -604,9 +604,12 @@ pub fn maze_route_with_engine(
                     request.net_no, a.x, a.y, result.rooms[k]
                 );
             }
-            if la != lb {
-                continue;
-            }
+            // the segment a→b always runs on corner a's layer inside the
+            // room entered at a: when b is a drill node (lb != la), the
+            // travel to the drill point still happens on la and the via
+            // sits at b. (Skipping la != lb pairs hid the drill-segment
+            // class of illegal inserts entirely.)
+            let _ = lb;
             let Some(room) = result.rooms[k] else {
                 eprintln!(
                     "INVARIANT SKIP net {} corner {k}: no room for segment \
@@ -624,9 +627,18 @@ pub fn maze_route_with_engine(
             };
             if !ok(&pa) || !ok(&pb) {
                 eprintln!(
-                    "INVARIANT BROKEN at corner {k}: segment ({:?})→({:?}) \
-                     layer {la} room {room} does not contain both endpoints",
-                    a, b
+                    "INVARIANT BROKEN net {} at corner {k}: segment ({:?})→({:?}) \
+                     layer {la} room {room} (bbox {:?}, layer {}) a-in {} b-in {} \
+                     layers ({} -> {})",
+                    request.net_no,
+                    a,
+                    b,
+                    shape.bounding_box(),
+                    engine.graph.room(room).layer,
+                    ok(&pa),
+                    ok(&pb),
+                    result.corners[k].1,
+                    result.corners[k + 1].1,
                 );
             } else {
                 // cross-check: the room contains the segment, so the
@@ -674,6 +686,34 @@ pub fn maze_route_with_engine(
                                 item.base.birth,
                                 item.bounding_box(&board.padstacks),
                             );
+                            // decisive probe: recomplete the room's shape
+                            // against the live board; a still-dirty result
+                            // means a live collection/restrain bug, a clean
+                            // one means the room predates this obstacle
+                            let re = crate::autoroute::room_completion::complete_shape_with_ripup(
+                                board,
+                                &crate::autoroute::room_completion::IncompleteRoom {
+                                    shape: engine.graph.room(room).shape.clone(),
+                                    layer: la,
+                                    contained_shape: engine.graph.room(room).shape.clone(),
+                                },
+                                request.net_no,
+                                None,
+                                false,
+                                request.clearance_class,
+                                request.trace_half_width,
+                            );
+                            let cl_m = cl + request.trace_half_width as f64 - 2.0;
+                            let still = re.iter().any(|p| {
+                                item.tile_shapes(&board.padstacks).iter().any(|(s, l)| {
+                                    *l == la
+                                        && s.offset(cl_m)
+                                            .intersection(&p.shape)
+                                            .dimension()
+                                            >= 2
+                                })
+                            });
+                            eprintln!("  RECOMPLETE pieces {} still-dirty {still}", re.len());
                         }
                     }
                 }
@@ -974,16 +1014,24 @@ fn insert_connection(
     for (corner, layer) in &result.corners {
         let p = corner.round();
         if *layer != run_layer {
-            let via_location = *run.last().unwrap_or(&p);
+            // the drill NODE's location is the via site: the travel from
+            // the previous corner to the drill point happened on the OLD
+            // layer, so finish that run at p before switching. (Putting
+            // the via at the previous corner instead moved that segment
+            // to the new layer where it was never searched — the display
+            // illegal-insert class, exposed by grid-sampled drills.)
+            if run.last() != Some(&p) {
+                run.push(p);
+            }
             flush(board, &mut run, run_layer, &mut new_items);
             new_items.push(board.insert_via(
                 request.via_padstack,
-                via_location,
+                p,
                 vec![request.net_no],
                 request.clearance_class,
                 false,
             ));
-            run = vec![via_location];
+            run = vec![p];
             run_layer = *layer;
         }
         if run.last() != Some(&p) {

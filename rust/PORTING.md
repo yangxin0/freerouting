@@ -258,6 +258,27 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 139): THE VIA-PLACEMENT BUG — display reaches
+  ZERO violations (FR_NO_POST audit; 0-5 across runs with post, was
+  12): insert_connection placed the via at the corner BEFORE the
+  drill node and moved the old-layer travel (door → drill point,
+  legally searched on the old layer) onto the NEW layer where it was
+  never searched. Latent while drills only happened at entry corners;
+  the drill GRID SAMPLING made drill points far from the previous
+  corner and turned every such via into a cross-board illegal
+  segment. Found by extending the birth invariant to la≠lb corner
+  pairs (they were silently skipped — a diagnostic blind spot that
+  hid the whole class), which exposed a-in=false b-in=true with the
+  via point 50k+ outside the checked room. Also fixed on the way:
+  rooms_containing's fallback returned created pieces that did NOT
+  contain the drill point (the piece holding it can be killed while
+  others survive) — now filtered. ILLEGAL INSERTs 63 → 4. COSTS:
+  interf_u 170/173 (the 2 recovered nets were riding illegal drill
+  segments), display sometimes 29/30 — honest geometry is slightly
+  harder. NormalPuzzle 72/72 in 14.3s unchanged. Diagnostics: ROOM
+  LEAK false-alarms on ripup searches by design (rooms ignore
+  rippable), RECOMPLETE probe distinguishes stale rooms from live
+  collection bugs.
 - 2026-07-15 (iter 138): RIPUP QUALITY — interf_u 172/173 (from
   170), recovering /MA11 and /MA14; only VCC remains. Three changes:
   (1) 1-for-1 swap tolerance in route_net_with_ripup victim

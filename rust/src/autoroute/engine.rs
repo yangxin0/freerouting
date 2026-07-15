@@ -265,11 +265,20 @@ impl AutorouteEngine {
         if !existing.is_empty() {
             return existing;
         }
-        self.create_start_rooms(
+        // completion may produce pieces that do NOT contain the point:
+        // the piece holding it can be killed by an obstacle while other
+        // pieces survive. Returning those let the maze "enter" a room far
+        // from the drill location and insert a connecting segment straight
+        // through everything in between (the display illegal-insert class)
+        let created = self.create_start_rooms(
             board,
             TileShape::Box(crate::geometry::planar::IntBox::new(point, point)),
             layer,
-        )
+        );
+        created
+            .into_iter()
+            .filter(|&r| self.graph.room(r).shape.contains(&p))
+            .collect()
     }
 
     /// Creates and completes the start rooms around a point-like shape
