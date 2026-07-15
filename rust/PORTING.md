@@ -258,6 +258,28 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 140): NEW DIRECTIVE + JAVA BASELINE. User:
+  "Fix the gaps with java then align with performance and
+  correctness with java." The loop's goal is now closing the Java
+  gap list and benchmarking against the actual Java router. Java
+  jars build via `./gradlew buildBothVersions --no-configuration-cache`
+  (settings.gradle foojay plugin bumped 0.8.0 → 1.0.0 for JDK 26).
+  FIRST BASELINE: Java 1.9 routes NormalPuzzle in 1.08 s / 2 passes
+  (plus a separate optimizer phase scoring 999.99); Rust needs
+  ~13.7 s — a ~13× throughput gap. Biggest known lever: Java
+  completes rooms ONCE and reuses them across connections and nets
+  (ShapeSearchTree compensated shapes + SortedRoomNeighbours
+  invalidation); Rust rebuilds the room graph per connection.
+  Post-via-fix fleet (Rust): 8088sbc 103/104 (+5V), coldfire
+  259/278 @300 s — the honest-geometry cost is visible fleet-wide.
+  Also this iteration: pull-tight hardening (whole rebuilt polyline
+  validated, original kept when blocked) + debug clearance audits
+  after combine/pull-tight (both passes proven clean; the residual
+  NormalPuzzle pair predates post-processing — rip-window class).
+  ALIGNMENT PLAN: (1) room reuse + SortedRoomNeighbours [perf ×10],
+  (2) rip-window correctness (last ~4 illegal inserts), (3) optimizer
+  phase (Java improves length ~50% after routing), (4) MoveDrillItemAlgo,
+  shove stacking, fanout, 45/90.
 - 2026-07-15 (iter 139): THE VIA-PLACEMENT BUG — display reaches
   ZERO violations (FR_NO_POST audit; 0-5 across runs with post, was
   12): insert_connection placed the via at the corner BEFORE the
