@@ -1300,6 +1300,48 @@ fn via_site_is_clear(board: &BasicBoard, request: &MazeRouteRequest, p: IntPoint
     true
 }
 
+/// True when a trace run of the request's width keeps the exact
+/// pairwise clearance to every foreign item on `layer` (mitered
+/// pre-filter + Euclidean confirm, like the via-site gate).
+fn trace_run_is_clear(
+    board: &BasicBoard,
+    request: &MazeRouteRequest,
+    polyline: &Polyline,
+    layer: usize,
+) -> bool {
+    let matrix = &board.rules.clearance_matrix;
+    let max_cl = matrix.max_value(layer).max(0) as f64;
+    for seg in polyline.offset_shapes(request.trace_half_width) {
+        for other_id in board.overlapping_items(&seg.offset(max_cl), Some(layer)) {
+            let Some(other) = board.get_item(other_id) else { continue };
+            if other.base.contains_net(request.net_no) {
+                continue;
+            }
+            if let crate::board::ItemKind::ObstacleArea(a) = &other.kind {
+                if a.is_conduction || a.via_only {
+                    continue;
+                }
+            }
+            let cl = matrix
+                .get_value(
+                    request.clearance_class,
+                    other.base.clearance_class,
+                    layer,
+                    false,
+                )
+                .max(0) as f64;
+            if other.tile_shapes(&board.padstacks).iter().any(|(os, ol)| {
+                *ol == layer
+                    && os.intersection(&seg.offset(cl)).dimension() >= 2
+                    && seg.euclidean_distance_to(os) < cl - 1.0
+            }) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn insert_connection(
     board: &mut BasicBoard,
     request: &MazeRouteRequest,
@@ -1311,10 +1353,35 @@ fn insert_connection(
     let mut run: Vec<IntPoint> = Vec::new();
     let mut run_layer = result.corners.first()?.1;
     let flush =
-        |board: &mut BasicBoard, run: &mut Vec<IntPoint>, layer: usize, items: &mut Vec<ItemId>| {
+        |board: &mut BasicBoard, run: &mut Vec<IntPoint>, layer: usize, items: &mut Vec<ItemId>| -> bool {
             run.dedup();
             if run.len() > 1 {
                 let polyline = Polyline::from_int_points(run);
+                // corridor runs bypass room geometry where foreign items
+                // were ripped or shovable: a conflicted run first shoves
+                // the offenders aside (traces and vias), and fails the
+                // insert when even that cannot clear it (coldfire: maze
+                // traces 998 from pre-existing vias at required 1500)
+                if !trace_run_is_clear(board, request, &polyline, layer) {
+                    let max_cl = board
+                        .rules
+                        .clearance_matrix
+                        .max_value(layer)
+                        .max(0) as f64;
+                    for seg in polyline.offset_shapes(request.trace_half_width) {
+                        let _ = crate::board::shove_trace_algo::shove_aside(
+                            board,
+                            &seg.offset(max_cl),
+                            layer,
+                            &[request.net_no],
+                            request.clearance_class,
+                            &[],
+                        );
+                    }
+                    if !trace_run_is_clear(board, request, &polyline, layer) {
+                        return false;
+                    }
+                }
                 // birth-site validation: the post-rip board must leave
                 // every inserted segment its full clearance
                 if crate::debug::maze() {
@@ -1367,6 +1434,7 @@ fn insert_connection(
                 }
                 items.push(new_id);
             }
+            true
         };
     for (corner, layer) in &result.corners {
         let p = corner.round();
@@ -1380,7 +1448,12 @@ fn insert_connection(
             if run.last() != Some(&p) {
                 run.push(p);
             }
-            flush(board, &mut run, run_layer, &mut new_items);
+            if !flush(board, &mut run, run_layer, &mut new_items) {
+                for id in new_items {
+                    board.remove_item(id);
+                }
+                return None;
+            }
             // Drill-page-validated sites are inserted plainly (the vast
             // majority). Rip-corridor sites bypass the drill-page
             // exclusion and could land too close to surviving foreign
@@ -1423,7 +1496,12 @@ fn insert_connection(
             run.push(p);
         }
     }
-    flush(board, &mut run, run_layer, &mut new_items);
+    if !flush(board, &mut run, run_layer, &mut new_items) {
+        for id in new_items {
+            board.remove_item(id);
+        }
+        return None;
+    }
     if new_items.is_empty() {
         // nothing was inserted (degenerate/coincident corners): reporting
         // success would let the caller loop forever on "routed"

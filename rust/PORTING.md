@@ -79,9 +79,16 @@ the only genuinely open work items across the whole port:
    ratsnest sizes; the triangulation is a performance device and is
    deliberately not ported. Verified: coldfire stripped @5 s gives
    292 airlines across exactly the 67 incomplete nets.
-5. Corridor-trace clearance at insert (iter 190 residue: 2 coldfire
-   deep violations — maze traces through rip corridors pass surviving
-   foreign vias closer than the pair clearance).
+5. [DONE iter 195] Corridor-trace clearance at insert — every trace
+   run is exactly checked at insert (mitered pre-filter + Euclidean
+   confirm, trace_run_is_clear, symmetric to the via-site gate);
+   conflicted runs first shove the offenders aside (shove_aside per
+   offset segment, vias included), and the insert fails
+   transactionally when even that cannot clear the corridor. Clear
+   runs insert through the old path. Coldfire @600 s: 0 deep
+   violations (was 2; was 12 before iter 190), completion 267/278 =
+   Java-equivalent completion with a violation-free board (Java ships
+   violations at this scale). Fleet clean, 215 tests.
 6. Byte-exact MazeShoveTraceAlgo diagonal/polar door-segment
    derivation (behaviorally covered by insert-time validation).
 7. Coldfire wall clock vs Java at equal completion (~1.5-2x).
