@@ -74,11 +74,21 @@ fn main() -> ExitCode {
         }
     }
     let t0 = Instant::now();
-    let mut board = match import_dsn(&content) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
+    let mut board = if design.ends_with(".json") {
+        match freerouting::io::import_kicad_json(&content) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        match import_dsn(&content) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
         }
     };
     board.rules.set_trace_angle_restriction(match angle_mode.as_str() {

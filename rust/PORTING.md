@@ -364,8 +364,13 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       width/clearance rule, per-class width rules; CLI --rules /
       --export-rules; round-trip tested. Java's full via-info/
       via-rule serialization simplified — noted.)
-  [ ] KiCad direct file I/O (KiCadJsonReader — 559 lines, Gson-based
-      board JSON; next I/O item)
+  [x] KiCad board JSON reader (iter 168: io/kicad_json.rs on a
+      hand-rolled zero-dependency JSON parser (io/json.rs) — layers,
+      net classes (clearance/width/via geometry), nets, components
+      with rotated pad offsets (through-hole vs SMD layers),
+      pre-routed traces/vias; mm/mil/µm units at Java's 0.1 µm
+      default resolution. CLI: -de file.json. Writer + conduction
+      areas + custom clearance rules simplified — noted.)
   [x] DRC report (iter 162: src/drc.rs — DesignRulesChecker port:
       check_board collects deduplicated clearance violations (mitered
       pre-filter + exact Euclidean confirm, worst actual distance) and
