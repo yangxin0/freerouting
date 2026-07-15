@@ -322,7 +322,12 @@ fn restrain_shape_prepared(
         unreachable!("caller converts to simplex");
     };
     let room_shape = &room.shape;
-    let shape_to_be_contained = TileShape::Simplex(room.contained_shape.to_simplex());
+    // already-simplex contained shapes skip the conversion (the restrain
+    // loop calls this once per obstacle for the same room)
+    let shape_to_be_contained = match &room.contained_shape {
+        s @ TileShape::Simplex(_) => s.clone(),
+        other => TileShape::Simplex(other.to_simplex()),
+    };
     if shape_to_be_contained.is_empty() {
         return result;
     }

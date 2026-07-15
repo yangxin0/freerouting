@@ -137,6 +137,9 @@ pub struct Item {
     /// Lazily computed tile shapes: items are immutable once inserted,
     /// and recomputing trace offset shapes dominated the routing profile.
     cached_tile_shapes: std::sync::OnceLock<Vec<(TileShape, usize)>>,
+    /// Cached bounding box (items are immutable once inserted, like the
+    /// tile-shape cache; excluded from PartialEq the same way).
+    cached_bounding_box: std::sync::OnceLock<IntBox>,
 }
 
 impl PartialEq for Item {
@@ -161,6 +164,7 @@ impl Item {
                 attach_allowed,
             }),
             cached_tile_shapes: std::sync::OnceLock::new(),
+            cached_bounding_box: std::sync::OnceLock::new(),
         }
     }
 
@@ -178,6 +182,7 @@ impl Item {
                 polyline,
             }),
             cached_tile_shapes: std::sync::OnceLock::new(),
+            cached_bounding_box: std::sync::OnceLock::new(),
         }
     }
 
@@ -311,9 +316,10 @@ impl Item {
         }
     }
 
-    /// The bounding box of this item.
+    /// The bounding box of this item (computed once; ~5% of a coldfire
+    /// profile was recomputing trace boxes from corner approximations).
     pub fn bounding_box(&self, padstacks: &Padstacks) -> IntBox {
-        match &self.kind {
+        *self.cached_bounding_box.get_or_init(|| match &self.kind {
             ItemKind::Via(_) => {
                 let mut result = IntBox::EMPTY;
                 for (shape, _) in self.tile_shapes(padstacks) {
@@ -326,7 +332,7 @@ impl Item {
                 .bounding_box()
                 .offset(trace.half_width as f64),
             ItemKind::ObstacleArea(area) => area.area.bounding_box(),
-        }
+        })
     }
 
     pub fn new_obstacle_area(
@@ -346,6 +352,7 @@ impl Item {
                 via_only: false,
             }),
             cached_tile_shapes: std::sync::OnceLock::new(),
+            cached_bounding_box: std::sync::OnceLock::new(),
         }
     }
 }

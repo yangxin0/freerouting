@@ -1558,6 +1558,19 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   nearer than the trace-pair clearance). NEXT: validate corridor
   trace runs against surviving foreign drill items at insert.
 
+- 2026-07-15 (iter 196): wall-clock work — Item::bounding_box is now
+  cached per item (OnceLock, same immutability invariant as the
+  tile-shape cache; ~5% of the coldfire profile was recomputing trace
+  boxes from corner approximations), and restrain_shape skips the
+  to_simplex conversion for already-simplex contained shapes (the
+  restrain loop converts once per obstacle for the same room).
+  Coldfire PASS 0: 37.5 s -> 31.5 s (-16%), zero violations held,
+  fleet clean. NOTE: the hoist skips to_simplex's normalization for
+  simplex inputs, which legitimately shifts restrain outcomes — a new
+  deterministic baseline (15 failed in PASS 0, was 16). Remaining
+  hot spots per the profile: Simplex::remove_redundant_lines in the
+  half-plane intersections (~12%), the completion tree walks.
+
 ## Notes / decisions log
 
 - 2026-07-14: crate scaffolded on branch `rust`; no external deps yet.
