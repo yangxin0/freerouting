@@ -256,8 +256,113 @@ fn route(
                 ),
             }
         }
+        ("POST", ["v1", "mcp"]) => {
+            let text = String::from_utf8_lossy(body).to_string();
+            (
+                "200 OK",
+                "application/json",
+                mcp_dispatch(&text, jobs, route_seconds),
+            )
+        }
         _ => not_found,
     }
+}
+
+/// The MCP JSON-RPC 2.0 endpoint (Java: `McpControllerV1`): initialize,
+/// tools/list and tools/call over the job API.
+fn mcp_dispatch(request: &str, jobs: &Jobs, route_seconds: u64) -> String {
+    use crate::io::json::{parse_json, Json};
+    let Ok(req) = parse_json(request) else {
+        return mcp_error(Json::Null, -32700, "Parse error");
+    };
+    let id = req.get("id").cloned().unwrap_or(Json::Null);
+    let method = req.str_or("method", "");
+    match method.as_str() {
+        "initialize" => mcp_result(
+            &id,
+            &format!(
+                "{{\"protocolVersion\": \"2024-11-05\", \"capabilities\": {{\"tools\": {{}}}},                  \"serverInfo\": {{\"name\": \"freerouting-rs\", \"version\": \"{}\"}}}}",
+                env!("CARGO_PKG_VERSION")
+            ),
+        ),
+        "notifications/initialized" => String::new(),
+        "tools/list" => mcp_result(
+            &id,
+            r#"{"tools": [
+              {"name": "enqueue_job", "description": "Create a new routing job", "inputSchema": {"type": "object", "properties": {}}},
+              {"name": "set_job_input", "description": "Upload the Specctra DSN design of a job", "inputSchema": {"type": "object", "properties": {"job_id": {"type": "number"}, "dsn": {"type": "string"}}, "required": ["job_id", "dsn"]}},
+              {"name": "start_job", "description": "Start routing a job", "inputSchema": {"type": "object", "properties": {"job_id": {"type": "number"}}, "required": ["job_id"]}},
+              {"name": "get_job_details", "description": "The state and score of a job", "inputSchema": {"type": "object", "properties": {"job_id": {"type": "number"}}, "required": ["job_id"]}},
+              {"name": "get_job_output", "description": "The routed session file of a completed job", "inputSchema": {"type": "object", "properties": {"job_id": {"type": "number"}}, "required": ["job_id"]}},
+              {"name": "system_status", "description": "Server health and version", "inputSchema": {"type": "object", "properties": {}}}
+            ]}"#,
+        ),
+        "tools/call" => {
+            let params = req.get("params").cloned().unwrap_or(Json::Null);
+            let name = params.str_or("name", "");
+            let args = params.get("arguments").cloned().unwrap_or(Json::Null);
+            let job_id = args.num("job_id") as u64;
+            let (verb, path, payload): (&str, String, Vec<u8>) = match name.as_str() {
+                "enqueue_job" => ("POST", "/v1/jobs/enqueue".into(), Vec::new()),
+                "set_job_input" => (
+                    "POST",
+                    format!("/v1/jobs/{job_id}/input"),
+                    args.str_or("dsn", "").into_bytes(),
+                ),
+                "start_job" => ("PUT", format!("/v1/jobs/{job_id}/start"), Vec::new()),
+                "get_job_details" => ("GET", format!("/v1/jobs/{job_id}"), Vec::new()),
+                "get_job_output" => ("GET", format!("/v1/jobs/{job_id}/output"), Vec::new()),
+                "system_status" => ("GET", "/v1/system/status".into(), Vec::new()),
+                _ => return mcp_error(id, -32602, "Unknown tool"),
+            };
+            let (_, _, out) = route(verb, &path, &payload, jobs, route_seconds);
+            mcp_result(
+                &id,
+                &format!(
+                    "{{\"content\": [{{\"type\": \"text\", \"text\": {}}}]}}",
+                    json_string(&out)
+                ),
+            )
+        }
+        _ => mcp_error(id, -32601, "Unknown method"),
+    }
+}
+
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn mcp_result(id: &crate::io::json::Json, result: &str) -> String {
+    let id_s = match id {
+        crate::io::json::Json::Num(n) => format!("{n}"),
+        crate::io::json::Json::Str(s) => format!("\"{s}\""),
+        _ => "null".to_string(),
+    };
+    format!("{{\"jsonrpc\": \"2.0\", \"id\": {id_s}, \"result\": {result}}}")
+}
+
+fn mcp_error(id: crate::io::json::Json, code: i32, message: &str) -> String {
+    let id_s = match id {
+        crate::io::json::Json::Num(n) => format!("{n}"),
+        crate::io::json::Json::Str(s) => format!("\"{s}\""),
+        _ => "null".to_string(),
+    };
+    format!(
+        "{{\"jsonrpc\": \"2.0\", \"id\": {id_s}, \"error\": {{\"code\": {code}, \"message\": \"{message}\"}}}}"
+    )
 }
 
 fn run_job(

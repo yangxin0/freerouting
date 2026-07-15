@@ -397,8 +397,17 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       GET /v1/system/status; includes the core RoutingJob/JobState
       model. CLI --api-server <port>. E2E verified: enqueue→input→
       start→COMPLETED score 999.97→SES fetch.)
-  [ ] MCP server endpoint (McpControllerV1 — JSON-RPC wrapper over
-      the job API; last remaining feature)
+  [x] MCP server endpoint (iter 171: POST /v1/mcp — JSON-RPC 2.0
+      initialize / tools/list / tools/call with six tools mapped onto
+      the job API (enqueue_job, set_job_input, start_job,
+      get_job_details, get_job_output, system_status); protocol
+      2024-11-05; e2e verified with an enqueue through MCP.
+      === THE NON-GUI FEATURE CHECKLIST IS COMPLETE. Remaining
+      precise refinements: MazeShoveTraceAlgo section-alignment
+      geometry, OptViaAlgo plane-via branch, GREEDY optimizer merge,
+      KiCad JSON writer, rules via-serialization. NEXT PHASE:
+      PERFORMANCE (drill-page per-net recompute, big-board wall
+      clock vs Java 8 s), then correctness re-validation. ===)
   DONE (faithful): AutorouteEngine, MazeSearchAlgo core,
   BatchAutorouter, BatchOptimizer (single-thread), ShoveTraceAlgo +
   ShapeTraceEntries (single family), PullTightAlgoAnyAngle (core),
