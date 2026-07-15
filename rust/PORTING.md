@@ -68,8 +68,17 @@ the only genuinely open work items across the whole port:
    board units. Verified: J2 session re-imports through --import-ses
    at 24/24 / 999.94. (Java's `(attach off)` flag has no Rust
    padstack field — omitted.)
-4. Delaunay-based ratsnest airlines (Java: PlanarDelaunayTriangulation
-   + MST in NetIncompletes; Rust uses MST over component centers).
+4. [DONE iter 194] Ratsnest airlines with Java's NetIncompletes
+   semantics — Kruskal's MST over the net items' representative
+   points (via/pin centers, both trace endpoints, area centroids),
+   edges ascending, one airline per cross-set edge, endpoints at the
+   actual nearest item points (was: component centers). Java's
+   975-line PlanarDelaunayTriangulation only PRUNES Kruskal's
+   candidate edges — a Delaunay triangulation always contains the
+   Euclidean MST, so the complete graph yields identical airlines at
+   ratsnest sizes; the triangulation is a performance device and is
+   deliberately not ported. Verified: coldfire stripped @5 s gives
+   292 airlines across exactly the 67 incomplete nets.
 5. Corridor-trace clearance at insert (iter 190 residue: 2 coldfire
    deep violations — maze traces through rip corridors pass surviving
    foreign vias closer than the pair clearance).

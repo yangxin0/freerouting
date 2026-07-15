@@ -14,8 +14,40 @@ pub struct AirLine {
     pub to: (f64, f64),
 }
 
-/// The airlines of all incomplete nets (Java: `RatsNest`'s incompletes,
-/// computed with the minimum-spanning chain over component centers).
+/// A representative point of an item for airline computation: via/pin
+/// centers, both trace endpoints, area centroids (Java: the corners the
+/// Delaunay triangulation stores per NetItem).
+fn item_points(board: &BasicBoard, id: crate::board::basic_board::ItemId) -> Vec<(f64, f64)> {
+    use crate::board::ItemKind;
+    let Some(item) = board.get_item(id) else {
+        return Vec::new();
+    };
+    match &item.kind {
+        ItemKind::Via(v) => vec![(v.center.x as f64, v.center.y as f64)],
+        ItemKind::PolylineTrace(t) => {
+            let f = t.polyline.corner_approx(0);
+            let l = t.polyline.corner_approx(t.polyline.corner_count() - 1);
+            vec![(f.x, f.y), (l.x, l.y)]
+        }
+        ItemKind::ObstacleArea(_) => {
+            let bb = item.bounding_box(&board.padstacks);
+            vec![(
+                (bb.ll.x as f64 + bb.ur.x as f64) / 2.0,
+                (bb.ll.y as f64 + bb.ur.y as f64) / 2.0,
+            )]
+        }
+    }
+}
+
+/// The airlines of all incomplete nets, exactly Java's
+/// `NetIncompletes` semantics: Kruskal's MST over the net items'
+/// representative points, edges ascending by length, one airline per
+/// edge joining two different connected sets, endpoints at the actual
+/// nearest item points. (Java prunes the candidate edges with a
+/// Delaunay triangulation before Kruskal; the triangulation always
+/// contains the Euclidean MST, so the complete graph yields the same
+/// airlines at ratsnest sizes — the 975-line triangulation is a pure
+/// performance device and is not ported.)
 pub fn ratsnest(board: &BasicBoard) -> Vec<AirLine> {
     let mut result = Vec::new();
     for net_no in 1..=board.rules.nets.max_net_no() {
@@ -32,51 +64,51 @@ pub fn ratsnest(board: &BasicBoard) -> Vec<AirLine> {
         if components.len() < 2 {
             continue;
         }
-        // component centers
-        let centers: Vec<(f64, f64)> = components
-            .iter()
-            .map(|c| {
-                let mut x = 0.0;
-                let mut y = 0.0;
-                let mut n: f64 = 0.0;
-                for id in c {
-                    if let Some(item) = board.get_item(*id) {
-                        let bb = item.bounding_box(&board.padstacks);
-                        x += (bb.ll.x as f64 + bb.ur.x as f64) / 2.0;
-                        y += (bb.ll.y as f64 + bb.ur.y as f64) / 2.0;
-                        n += 1.0;
-                    }
-                }
-                (x / n.max(1.0), y / n.max(1.0))
-            })
-            .collect();
-        // minimum-spanning chain: connect each unvisited component to the
-        // nearest visited one (Prim's algorithm, like Java's incompletes)
-        let mut visited = vec![false; centers.len()];
-        visited[0] = true;
-        for _ in 1..centers.len() {
-            let mut best: Option<(f64, usize, usize)> = None;
-            for (i, &vi) in visited.iter().enumerate() {
-                if !vi {
-                    continue;
-                }
-                for (j, &vj) in visited.iter().enumerate() {
-                    if vj {
-                        continue;
-                    }
-                    let d = (centers[i].0 - centers[j].0).hypot(centers[i].1 - centers[j].1);
-                    if best.is_none_or(|(bd, _, _)| d < bd) {
-                        best = Some((d, i, j));
-                    }
+        // every item point, tagged with its connected-set index
+        let mut points: Vec<((f64, f64), usize)> = Vec::new();
+        for (set_idx, comp) in components.iter().enumerate() {
+            for &id in comp {
+                for pt in item_points(board, id) {
+                    points.push((pt, set_idx));
                 }
             }
-            let Some((_, i, j)) = best else { break };
-            visited[j] = true;
+        }
+        // Kruskal over all cross-set point pairs, ascending by length
+        let mut edges: Vec<(f64, usize, usize)> = Vec::new();
+        for i in 0..points.len() {
+            for j in (i + 1)..points.len() {
+                if points[i].1 == points[j].1 {
+                    continue;
+                }
+                let d = (points[i].0 .0 - points[j].0 .0)
+                    .hypot(points[i].0 .1 - points[j].0 .1);
+                edges.push((d, i, j));
+            }
+        }
+        edges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        // union-find over the connected sets
+        let mut parent: Vec<usize> = (0..components.len()).collect();
+        fn find(parent: &mut [usize], mut x: usize) -> usize {
+            while parent[x] != x {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            x
+        }
+        for (_, i, j) in edges {
+            let (a, b) = (
+                find(&mut parent, points[i].1),
+                find(&mut parent, points[j].1),
+            );
+            if a == b {
+                continue;
+            }
+            parent[a] = b;
             result.push(AirLine {
                 net_no,
                 net_name: net_name.clone(),
-                from: centers[i],
-                to: centers[j],
+                from: points[i].0,
+                to: points[j].0,
             });
         }
     }
