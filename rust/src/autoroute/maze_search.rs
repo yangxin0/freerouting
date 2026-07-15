@@ -446,9 +446,15 @@ fn seed_room(
             continue;
         };
         // obstacle rooms are enterable only when ripup is allowed
-        if request.ripup_penalty <= 0.0 && engine.obstacle_room_item(other).is_some() {
+        let other_item = engine.obstacle_room_item(other);
+        if request.ripup_penalty <= 0.0 && other_item.is_some() {
             continue;
         }
+        // Java's ALREADY_RIPPED_COSTS: moving between obstacle rooms of
+        // the SAME item (consecutive segments of one trace) is free —
+        // the rip was charged at first entry
+        let already_ripped =
+            other_item.is_some() && other_item == engine.obstacle_room_item(room);
         let segments = engine.graph.door_section_segments(door, offset);
         // shovable traces cost a fraction of the rip penalty (Java:
         // MazeShoveTraceAlgo passages carry no ripup cost; the corridor
@@ -478,9 +484,13 @@ fn seed_room(
             } else {
                 1.0
             };
-            let ripup_cost = request.ripup_penalty
-                * engine.rippable_items(other).len() as f64
-                * section_discount;
+            let ripup_cost = if already_ripped {
+                0.0
+            } else {
+                request.ripup_penalty
+                    * engine.rippable_items(other).len() as f64
+                    * section_discount
+            };
             let cost = base_cost + location.distance(midpoint) + ripup_cost;
             // occupy ON PUSH (Java: expand_to_door_section sets
             // is_occupied when the element is inserted): each section

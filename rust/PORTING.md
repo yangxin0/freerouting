@@ -402,6 +402,10 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       are charged 0.25× the rip penalty, so the maze prefers
       slide-friendly corridors, and the insert-time corridor shove
       slides them like Java's maze shove (rip only what stays).
+      Iter 181 also ports ALREADY_RIPPED_COSTS: moving between
+      obstacle rooms of the SAME item (consecutive segments of one
+      trace) is free — the rip was charged at first entry (traversal
+      along a rippable trace no longer costs per segment).
       Iter 181 adds Java's section_ok gate: the slide discount
       applies only when entering through the FIRST or LAST door
       section (interior entries cannot slide the trace past the
