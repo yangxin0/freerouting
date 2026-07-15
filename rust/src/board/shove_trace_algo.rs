@@ -227,6 +227,53 @@ mod tests {
     }
 
     #[test]
+    fn shoves_stacked_traces_of_distinct_nets() {
+        // two parallel traces of DIFFERENT nets crossing the shove shape:
+        // both must be shoved and both nets stay connected (Java's
+        // multi-net stack levels in ShapeTraceEntries)
+        let mut board = test_board();
+        board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(-10000, -200), IntPoint::new(10000, -200)]),
+            0,
+            80,
+            vec![2],
+            1,
+        );
+        board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(-10000, 300), IntPoint::new(10000, 300)]),
+            0,
+            80,
+            vec![3],
+            1,
+        );
+        let shape = TileShape::Box(IntBox::from_coords(-1500, -1500, 1500, 1500));
+        assert!(
+            shove_aside(&mut board, &shape, 0, &[1], 1, &[]),
+            "stacked distinct-net shove must succeed"
+        );
+        for net in [2, 3] {
+            assert!(
+                board.net_is_completely_connected(net),
+                "net {net} must stay connected after the stacked shove"
+            );
+        }
+        // and nothing may remain inside the cleared shape
+        for oid in board.overlapping_items(&shape, Some(0)) {
+            let it = board.get_item(oid).unwrap();
+            assert!(
+                it.base.contains_net(1) || {
+                    let overlap = it
+                        .tile_shapes(&board.padstacks)
+                        .iter()
+                        .any(|(s, l)| *l == 0 && s.intersection(&shape).dimension() >= 2);
+                    !overlap
+                },
+                "item {oid} still overlaps the cleared shape"
+            );
+        }
+    }
+
+    #[test]
     fn shoves_a_crossing_trace_and_keeps_it_connected() {
         let mut board = test_board();
         let polyline = Polyline::from_int_points(&[

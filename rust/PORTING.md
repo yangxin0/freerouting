@@ -402,7 +402,12 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       shape caches, OnceCell→OnceLock in Simplex/Item). CLI
       --threads <n>. Java's GREEDY merge strategy and the
       random/prioritized item selection strategies not ported.)
-  [ ] Distinct-net shove stacking (ShapeTraceEntries full semantics)
+  [x] Distinct-net shove stacking (iter 178: VERIFIED ALREADY
+      COMPLETE — calculate_stack_levels' level raise/lower across
+      foreign net sets is the full Java multi-net semantics; a new
+      regression test shoves two stacked traces of different nets and
+      proves both stay connected with the shape cleared. The old
+      "single family" note was stale.)
   I/O & TOOLING:
   [x] DSN export (iter 163: io/dsn_export.rs — the imported document
       is retained without its wiring (board.dsn_source) and re-emitted
