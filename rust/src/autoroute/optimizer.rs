@@ -67,10 +67,13 @@ pub fn optimize_route_pass(
         // reroute with a modest per-net budget; in-search ripup enabled
         // so the reroute may push others aside (their recovery is part
         // of the same transaction inside route_net_with_ripup)
+        // recovery attempts on incomplete nets warrant a bigger budget
+        // than improvement reroutes of already-complete nets
+        let cap = if was_complete { 5_000 } else { 20_000 };
         let budget_ms = time_limit
             .map(|t| t.remaining_ms())
             .unwrap_or(u64::MAX)
-            .min(5_000);
+            .min(cap);
         let net_request = BatchRequest {
             deadline: Some(crate::datastructures::TimeLimit::new(budget_ms)),
             ..*request

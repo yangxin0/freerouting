@@ -98,6 +98,11 @@ pub struct MazeRouteRequest {
     pub net_no: i32,
     pub start_item: ItemId,
     pub dest_item: ItemId,
+    /// All items of the start/destination connected sets (Java routes
+    /// component to component: autoroute_connection takes p_start_set
+    /// and p_dest_set). Empty = fall back to the single items above.
+    pub start_items: Vec<ItemId>,
+    pub dest_items: Vec<ItemId>,
     pub trace_half_width: i32,
     pub clearance_class: usize,
     /// 1-based padstack for layer-change vias.
@@ -117,6 +122,30 @@ pub struct MazeRouteRequest {
     pub deadline: Option<crate::datastructures::TimeLimit>,
 }
 
+impl MazeRouteRequest {
+    fn start_set(&self) -> Vec<ItemId> {
+        if self.start_items.is_empty() {
+            vec![self.start_item]
+        } else {
+            self.start_items.clone()
+        }
+    }
+    fn dest_set(&self) -> Vec<ItemId> {
+        if self.dest_items.is_empty() {
+            vec![self.dest_item]
+        } else {
+            self.dest_items.clone()
+        }
+    }
+    fn is_dest(&self, item: ItemId) -> bool {
+        if self.dest_items.is_empty() {
+            item == self.dest_item
+        } else {
+            self.dest_items.contains(&item)
+        }
+    }
+}
+
 /// Runs the maze expansion from the start item towards the destination
 /// item. Returns the corner list of the found connection.
 pub fn find_connection(
@@ -124,8 +153,12 @@ pub fn find_connection(
     engine: &mut AutorouteEngine,
     request: &MazeRouteRequest,
 ) -> Option<MazeSearchResult> {
-    let start = board.get_item(request.start_item)?;
-    let start_shapes: Vec<(TileShape, usize)> = start.tile_shapes(&board.padstacks).to_vec();
+    let mut start_shapes: Vec<(TileShape, usize)> = Vec::new();
+    for id in request.start_set() {
+        if let Some(item) = board.get_item(id) {
+            start_shapes.extend(item.tile_shapes(&board.padstacks).iter().cloned());
+        }
+    }
     if start_shapes.is_empty() {
         return None;
     }
@@ -141,15 +174,17 @@ pub fn find_connection(
     // coldfire by 2 nets — do not "fix" the admissibility again).
     // When the destination has no shape on the queried layer, one via is
     // unavoidable and its cost joins the estimate.
-    let dest_centers: Vec<(FloatPoint, usize)> = board
-        .get_item(request.dest_item)
-        .map(|item| {
+    let dest_centers: Vec<(FloatPoint, usize)> = request
+        .dest_set()
+        .iter()
+        .filter_map(|id| board.get_item(*id))
+        .flat_map(|item| {
             item.tile_shapes(&board.padstacks)
                 .iter()
                 .map(|(s, l)| (s.centre_of_gravity(), *l))
-                .collect()
+                .collect::<Vec<_>>()
         })
-        .unwrap_or_default();
+        .collect();
     let via_cost_for_estimate = request.via_cost;
     let estimate_to_dest = move |p: FloatPoint, layer: usize| -> f64 {
         let dist = dest_centers
@@ -202,22 +237,27 @@ pub fn find_connection(
             } else {
                 start_center
             };
-            if engine
+            if let Some(t) = engine
                 .target_doors(room)
                 .iter()
-                .any(|t| t.item == request.dest_item)
+                .find(|t| request.is_dest(t.item))
             {
                 let dest_point = destination_point(
                     board,
-                    request.dest_item,
+                    t.item,
                     *layer,
                     Some(&room_shape),
                     start_point,
                 );
-                return Some(MazeSearchResult {
-                    corners: vec![(start_point, *layer), (dest_point, *layer)],
-                    rooms: vec![Some(room), None],
-                });
+                // coincident points would insert nothing (stacked pads of
+                // one net whose contact never registers): fall through to
+                // the search instead of returning a degenerate route
+                if dest_point.round() != start_point.round() {
+                    return Some(MazeSearchResult {
+                        corners: vec![(start_point, *layer), (dest_point, *layer)],
+                        rooms: vec![Some(room), None],
+                    });
+                }
             }
             engine.expand_room(board, room);
             let root = nodes.len();
@@ -249,7 +289,8 @@ pub fn find_connection(
     // room touching the dest pad, leaving no room with a target door to
     // arrive at. Like start rooms, these keep (a sliver of) the dest
     // shape by the contained-shape privilege and carry its target door.
-    if let Some(dest) = board.get_item(request.dest_item) {
+    for dest_id in request.dest_set() {
+        let Some(dest) = board.get_item(dest_id) else { continue };
         let dest_shapes: Vec<(TileShape, usize)> =
             dest.tile_shapes(&board.padstacks).to_vec();
         for (dest_shape, layer) in dest_shapes {
@@ -285,11 +326,12 @@ pub fn find_connection(
 
         engine.expand_room(board, room);
 
-        if engine
+        let arrival_target = engine
             .target_doors(room)
             .iter()
-            .any(|t| t.item == request.dest_item)
-        {
+            .find(|t| request.is_dest(t.item))
+            .map(|t| t.item);
+        if let Some(arrival_target) = arrival_target {
             // backtrack through the node chain
             let mut corners: Vec<(FloatPoint, usize)> = Vec::new();
             let mut rooms: Vec<Option<RoomId>> = Vec::new();
@@ -304,7 +346,7 @@ pub fn find_connection(
             let arrival_shape = engine.graph.room(room).shape.clone();
             let dest_point = destination_point(
                 board,
-                request.dest_item,
+                arrival_target,
                 layer,
                 Some(&arrival_shape),
                 entry.location,
@@ -338,7 +380,7 @@ pub fn find_connection(
                 engine
                     .target_doors(r)
                     .iter()
-                    .any(|t| t.item == request.dest_item)
+                    .any(|t| request.is_dest(t.item))
             })
             .count();
         let dest_kind = board
@@ -1091,6 +1133,12 @@ fn insert_connection(
         }
     }
     flush(board, &mut run, run_layer, &mut new_items);
+    if new_items.is_empty() {
+        // nothing was inserted (degenerate/coincident corners): reporting
+        // success would let the caller loop forever on "routed"
+        // connections that change nothing
+        return None;
+    }
 
     // normalize junctions: if an inserted trace endpoint lands in the
     // middle of an existing trace of the net, split that trace so the
@@ -1147,6 +1195,8 @@ mod tests {
     fn request(start: ItemId, dest: ItemId) -> MazeRouteRequest {
         MazeRouteRequest {
             net_no: 1,
+            start_items: Vec::new(),
+            dest_items: Vec::new(),
             start_item: start,
             dest_item: dest,
             trace_half_width: 100,

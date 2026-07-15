@@ -258,6 +258,25 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 149): SET-TO-SET ROUTING (Java: p_start_set/
+  p_dest_set) — the maze now starts from and arrives at ANY
+  endpoint-capable item (drills/pads via endpoint_candidates; traces
+  excluded until junction splitting: arriving mid-trace registers no
+  contact) of the two components, not one closest pair. RESULTS:
+  NormalPuzzle 72/72 in 1.04 s — FASTER THAN JAVA 1.9 (1.22 s);
+  display routing 46 s → 18 s and GND (the long-standing holdout)
+  COMPLETES — 29/30 with Net-(K1-Pad4) the new last net; interf_u
+  171/173 (window clip, new best). DEFENSES added: empty inserts
+  (coincident corners) return None; no-progress connections get
+  their junk items removed; degenerate direct-arrivals fall through
+  to the search; single-pair retry on no-progress. OPEN REGRESSION:
+  J2 23/24 (/MIPI_CSI_D0_N — 296 identical no-progress attempts
+  pre-defense; suspected stacked same-net pads whose pad-pad contact
+  never registers — connectivity model gap; single-pair fallback
+  did not recover it, needs contact forensics). Optimizer recovery
+  budget raised to 20 s for incomplete nets. Window verdict:
+  8088sbc full runs — 200k: 103/104 @232 s, 100k: 102/104 @259 s —
+  default stays 200k.
 - 2026-07-15 (iter 147): BIG-BOARD THROUGHPUT ROUND 1 — 8088sbc
   pass 0: 21.9 s → 7.0 s. Work accounting (FR_STATS + new per-phase
   timing): 188k room completions for 420 searches — every frontier

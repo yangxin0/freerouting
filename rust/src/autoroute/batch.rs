@@ -134,6 +134,8 @@ pub fn route_net_with_store(
 ) -> BatchResult {
     let mut result = BatchResult::default();
     let mut prev_component_count = usize::MAX;
+    let mut last_items: Vec<ItemId> = Vec::new();
+    let mut use_sets = true;
     loop {
         if request.deadline.is_some_and(|t| t.limit_exceeded()) {
             result.failed_connections += 1;
@@ -145,7 +147,17 @@ pub fn route_net_with_store(
         }
         if components.len() >= prev_component_count {
             // a routed connection did not reduce the component count:
-            // treat as failure to avoid looping forever
+            // remove its items (junk that only obstructs other nets)
+            for id in last_items.drain(..) {
+                board.remove_item(id);
+            }
+            if use_sets {
+                // retry the connection single-pair: set arrivals can pick
+                // a target whose contact never registers (stacked pads)
+                use_sets = false;
+                prev_component_count = usize::MAX;
+                continue;
+            }
             result.failed_connections += 1;
             break;
         }
@@ -176,6 +188,20 @@ pub fn route_net_with_store(
         let Some((start, dest)) = best else {
             break;
         };
+        // route component to component (Java: p_start_set/p_dest_set):
+        // the maze may start from and arrive at ANY endpoint-capable item
+        // of the two sets (drills/pads — arriving mid-trace does not
+        // register a contact until junction splitting is ported)
+        let start_component = candidate_sets
+            .iter()
+            .find(|c| c.contains(&start))
+            .cloned()
+            .unwrap_or_default();
+        let dest_component = candidate_sets
+            .iter()
+            .find(|c| c.contains(&dest))
+            .cloned()
+            .unwrap_or_default();
         if crate::debug::maze() {
             eprintln!(
                 "ROUTE net {net_no}: connect item {start:?} -> item {dest:?} \
@@ -187,6 +213,8 @@ pub fn route_net_with_store(
             net_no,
             start_item: start,
             dest_item: dest,
+            start_items: if use_sets { start_component } else { Vec::new() },
+            dest_items: if use_sets { dest_component } else { Vec::new() },
             trace_half_width: request.trace_half_width,
             clearance_class: request.clearance_class,
             via_padstack: request.via_padstack,
@@ -222,6 +250,7 @@ pub fn route_net_with_store(
         };
         if let Some(connection) = connection {
             result.routed_connections += 1;
+            last_items = connection.new_items.clone();
             result.ripped_nets.extend(connection.ripped_nets);
         } else {
             result.failed_connections += 1;
