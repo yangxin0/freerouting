@@ -148,6 +148,11 @@ pub fn route_net_with_store(
         if components.len() >= prev_component_count {
             // a routed connection did not reduce the component count:
             // remove its items (junk that only obstructs other nets)
+            if std::env::var_os("FR_KEEP_JUNK").is_some() {
+                last_items.clear();
+                result.failed_connections += 1;
+                break;
+            }
             for id in last_items.drain(..) {
                 board.remove_item(id);
             }
@@ -640,7 +645,7 @@ pub fn batch_route_passes_with_time_limit(
         // different order, so more dry rounds are worth the time; with a
         // single failure the restart is deterministic and one dry round
         // settles it
-        max_dry = incomplete.len().min(3);
+        max_dry = (incomplete.len() + 1).min(4);
         round += 1;
         let round_start = std::time::Instant::now();
         let rot = round % incomplete.len();
@@ -682,6 +687,11 @@ pub fn batch_route_passes_with_time_limit(
             .iter()
             .filter(|&&n| board.net_is_completely_connected(n))
             .count();
+        let incomplete_after: Vec<i32> = net_nos
+            .iter()
+            .copied()
+            .filter(|&n| !board.net_is_completely_connected(n))
+            .collect();
         if crate::debug::stats() {
             eprintln!(
                 "RESTART round {round} in {:.1?}: complete {} -> {}",
@@ -690,16 +700,20 @@ pub fn batch_route_passes_with_time_limit(
                 complete_after
             );
         }
-        if complete_after > complete_before {
+        // a tie that CHANGES the failing-net set is worth taking once:
+        // the next round attacks a different net first (with a single
+        // stuck net the restart is otherwise deterministic and dry)
+        let changed_set = complete_after == complete_before && incomplete_after != incomplete;
+        if complete_after > complete_before || (changed_set && dry_rounds + 1 < max_dry) {
             board.pop_snapshot();
             total.routed_connections += restart.routed_connections;
             total.failed_connections = net_nos.len() - complete_after;
-            dry_rounds = 0;
+            if complete_after > complete_before {
+                dry_rounds = 0;
+            } else {
+                dry_rounds += 1;
+            }
         } else {
-            // NOTE: accepting ties (failure set rotates) was tried and
-            // won nothing: with a single failure the rotation is a no-op
-            // and the deterministic restart reproduces the same outcome,
-            // burning a full extra round.
             board.undo();
             dry_rounds += 1;
         }

@@ -258,6 +258,22 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 150): J2 RECOVERED (24/24, zero violations) +
+  8088sbc FULLY COMPLETE (104/104 at 293 s with the optimizer — the
+  first big-board full completion). The J2 regression was NOT a
+  contact bug (net probe: two ordinary SMD pads; contacts symmetric)
+  but congestion musical-chairs: set-to-set rerouted the OTHER MIPI
+  nets differently, pass-0 walls net 2 in, and every restart round
+  that fixed it broke another net — a TIE, which the fallback
+  discarded. Restart now ACCEPTS a tie when it CHANGES the
+  failing-net set (bounded by max_dry = min(#failures+1, 4)); the
+  next round attacks a different net first and completes. The old
+  do-not-retry note on tie-accepting is superseded: with rotation +
+  1-for-1 swaps + set-to-set, ties genuinely change the state.
+  Diagnostics: examples/net_probe.rs (--route) dumps a net's items,
+  shapes, endpoints, contacts and connected sets; FR_KEEP_JUNK
+  preserves no-progress inserts for autopsy. Fleet: ALL FIVE small
+  boards zero violations; NormalPuzzle 1.0 s; display 29/30.
 - 2026-07-15 (iter 149): SET-TO-SET ROUTING (Java: p_start_set/
   p_dest_set) — the maze now starts from and arrives at ANY
   endpoint-capable item (drills/pads via endpoint_candidates; traces
