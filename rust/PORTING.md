@@ -1590,6 +1590,21 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   cache. That is the next big lever; scoped as a future multi-
   iteration task.
 
+- 2026-07-15 (iter 199): THE WALL-CLOCK BREAKTHROUGH — tree-query
+  counters (FR_STATS now prints per-pass query/node counts) showed
+  43 MILLION search-tree queries in one coldfire PASS 0. Attribution:
+  seed_room re-ran the exact 4-layer via_free clearance check for the
+  same frontier drill points on EVERY room pop. A per-search memo
+  ((x, y) -> via_free result; sound because the board is immutable
+  during find_connection) cuts queries 43M -> 1.77M (24x) and PASS 0
+  36.7 s -> 11.3 s (3.2x) with identical routing outcomes. The
+  contact cache added along the way (get_normal_contacts_cached,
+  invalidated by change epoch + log length) helps the connectivity
+  walks but was NOT the query source. The compensated-search-tree
+  refactor is shelved: the walk count, not the walk cost, was the
+  story. Java comparison: this brings big-board pass times to the
+  same order as Java's.
+
 ## Notes / decisions log
 
 - 2026-07-14: crate scaffolded on branch `rust`; no external deps yet.

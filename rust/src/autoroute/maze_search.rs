@@ -210,6 +210,11 @@ pub fn find_connection(
     let mut nodes: Vec<BacktrackNode> = Vec::new();
     let mut open: BinaryHeap<Reverse<QueueEntry>> = BinaryHeap::new();
     let mut drilled: HashSet<(i32, i32, usize)> = HashSet::default();
+    // via_free memo: neighbouring room pops re-list the same frontier
+    // drill points; the exact 4-layer clearance check ran per pop and
+    // reached tens of millions of tree queries per pass
+    let mut via_ok: crate::datastructures::FxHashMap<(i32, i32), bool> =
+        crate::datastructures::FxHashMap::default();
 
     // create and seed the start rooms on every layer of the start item
     for (start_shape, layer) in &start_shapes {
@@ -284,6 +289,7 @@ pub fn find_connection(
                 offset,
                 &mut open,
                 &mut drilled,
+                &mut via_ok,
                 &estimate_to_dest,
             );
         }
@@ -392,6 +398,7 @@ pub fn find_connection(
             offset,
             &mut open,
             &mut drilled,
+            &mut via_ok,
             &estimate_to_dest,
         );
     }
@@ -434,6 +441,7 @@ fn seed_room(
     offset: f64,
     open: &mut BinaryHeap<Reverse<QueueEntry>>,
     drilled: &mut HashSet<(i32, i32, usize)>,
+    via_ok: &mut crate::datastructures::FxHashMap<(i32, i32), bool>,
     estimate_to_dest: &dyn Fn(FloatPoint, usize) -> f64,
 ) {
     let layer = engine.graph.room(room).layer;
@@ -562,7 +570,10 @@ fn seed_room(
         }
     }
     for drill_point in drill_points {
-        if !via_free(board, request, drill_point) {
+        let free = *via_ok
+            .entry((drill_point.x, drill_point.y))
+            .or_insert_with(|| via_free(board, request, drill_point));
+        if !free {
             continue;
         }
         let drill_cost = base_cost + location.distance(drill_point.to_float());

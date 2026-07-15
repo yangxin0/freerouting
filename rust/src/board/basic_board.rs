@@ -90,6 +90,13 @@ pub struct BasicBoard {
     /// instead, telling consumers to drop everything.
     change_log: Vec<(usize, IntBox)>,
     change_epoch: u64,
+    /// Contact cache for the connectivity walks: net completeness and
+    /// component checks run get_normal_contacts per item per call, which
+    /// reached 43M search-tree queries in one coldfire pass. Any board
+    /// change invalidates the whole cache (checks come in bursts between
+    /// changes). Not cloned: a cloned board starts cold.
+    contact_cache: std::cell::RefCell<crate::datastructures::FxHashMap<ItemId, std::sync::Arc<Vec<ItemId>>>>,
+    contact_cache_log: std::cell::Cell<(u64, usize)>,
     #[allow(clippy::type_complexity)]
     inflation_cache: std::cell::RefCell<
         crate::datastructures::FxHashMap<
@@ -116,6 +123,8 @@ impl BasicBoard {
             plane_items: Vec::new(),
             next_id_no: 0,
             change_log: Vec::new(),
+            contact_cache: std::cell::RefCell::new(crate::datastructures::FxHashMap::default()),
+            contact_cache_log: std::cell::Cell::new((0, 0)),
             change_epoch: 0,
             inflation_cache: Default::default(),
         }
@@ -533,6 +542,24 @@ impl BasicBoard {
     /// All contacts of the item `id` (Java: `get_normal_contacts`): for a
     /// trace the contacts at its two end corners, for a via the contacts
     /// at its center.
+    /// [`Self::get_normal_contacts`] through the contact cache: valid
+    /// while the board is unchanged (epoch + log length).
+    pub fn get_normal_contacts_cached(&self, id: ItemId) -> std::sync::Arc<Vec<ItemId>> {
+        let stamp = (self.change_epoch, self.change_log.len());
+        if self.contact_cache_log.get() != stamp {
+            self.contact_cache.borrow_mut().clear();
+            self.contact_cache_log.set(stamp);
+        }
+        if let Some(hit) = self.contact_cache.borrow().get(&id) {
+            return hit.clone();
+        }
+        let computed = std::sync::Arc::new(self.get_normal_contacts(id));
+        self.contact_cache
+            .borrow_mut()
+            .insert(id, computed.clone());
+        computed
+    }
+
     pub fn get_normal_contacts(&self, id: ItemId) -> Vec<ItemId> {
         let Some(item) = self.get_item(id) else {
             return Vec::new();
@@ -677,7 +704,7 @@ impl BasicBoard {
             if ends.contains(&cur) {
                 return true;
             }
-            for next in self.get_normal_contacts(cur) {
+            for &next in self.get_normal_contacts_cached(cur).iter() {
                 if next == id || visited.contains(&next) || skip(self, next) {
                     continue;
                 }
@@ -804,7 +831,7 @@ impl BasicBoard {
         let mut visited = vec![id];
         let mut queue = vec![id];
         while let Some(curr) = queue.pop() {
-            for contact in self.get_normal_contacts(curr) {
+            for &contact in self.get_normal_contacts_cached(curr).iter() {
                 if visited.contains(&contact) {
                     continue;
                 }

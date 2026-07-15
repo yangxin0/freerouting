@@ -648,10 +648,15 @@ pub fn batch_route_passes_with_time_limit(
             failed_this_pass += result.failed_connections;
         }
         if crate::debug::stats() {
+            let ts = crate::datastructures::min_area_tree::take_tree_stats();
             eprintln!(
-                "PASS {pass} done in {:.1?}: {} failed (penalty {ripup_penalty})",
+                "PASS {pass} done in {:.1?}: {} failed (penalty {ripup_penalty}); \
+                 tree {} queries, {} nodes ({:.1} nodes/query)",
                 pass_start.elapsed(),
-                failed_this_pass
+                failed_this_pass,
+                ts.queries,
+                ts.nodes_visited,
+                ts.nodes_visited as f64 / ts.queries.max(1) as f64
             );
         }
         if out_of_time {

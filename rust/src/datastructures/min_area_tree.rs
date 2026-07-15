@@ -40,6 +40,23 @@ pub struct TreeEntry<T> {
     pub shape_index_in_object: usize,
 }
 
+thread_local! {
+    /// Traversal statistics (FR_STATS diagnostics).
+    pub static TREE_STATS: std::cell::RefCell<TreeStats> =
+        const { std::cell::RefCell::new(TreeStats { queries: 0, nodes_visited: 0 }) };
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TreeStats {
+    pub queries: u64,
+    pub nodes_visited: u64,
+}
+
+/// Takes and resets the traversal statistics.
+pub fn take_tree_stats() -> TreeStats {
+    TREE_STATS.with(|s| std::mem::replace(&mut *s.borrow_mut(), TreeStats { queries: 0, nodes_visited: 0 }))
+}
+
 #[derive(Debug, Clone)]
 pub struct MinAreaTree<T> {
     nodes: Vec<Node<T>>,
@@ -306,6 +323,7 @@ impl<T> MinAreaTree<T> {
             static STACK: std::cell::RefCell<Vec<usize>> =
                 const { std::cell::RefCell::new(Vec::new()) };
         }
+        TREE_STATS.with(|s| s.borrow_mut().queries += 1);
         let Some(root) = self.root else {
             return;
         };
@@ -314,6 +332,7 @@ impl<T> MinAreaTree<T> {
             stack.clear();
             stack.push(root);
             while let Some(curr) = stack.pop() {
+                TREE_STATS.with(|s| s.borrow_mut().nodes_visited += 1);
                 if !self.nodes[curr].bound.intersects(shape) {
                     continue;
                 }
