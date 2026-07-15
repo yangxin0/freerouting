@@ -20,7 +20,7 @@ pub use engine::{AutorouteEngine, TargetDoor};
 pub use expansion_room::{
     ExpansionDoor, ExpansionRoom, MazeSearchElement, RoomGraph, RoomKind,
 };
-pub use maze_search::{
+pub use maze_search::{take_stats, 
     find_connection, maze_route, maze_route_with_ripup, MazeSearchResult, RoutedConnection,
 };
 pub use pull_tight::{combine_all_traces, pull_tight_all, pull_tight_trace, total_trace_length};

@@ -124,6 +124,13 @@ fn main() {
         }
     );
 
+    if std::env::var_os("FR_STATS").is_some() {
+        let st = freerouting::autoroute::take_stats();
+        println!(
+            "search stats: {} searches, {} expansions, {} pushes, {} rooms completed",
+            st.searches, st.expansions, st.pushes, st.rooms_completed
+        );
+    }
     let ses = export_ses(&board, "routed_board", 10);
     let out = "routed_board.ses";
     std::fs::write(out, &ses).expect("cannot write session");

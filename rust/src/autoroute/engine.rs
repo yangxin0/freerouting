@@ -374,6 +374,8 @@ impl AutorouteEngine {
                     }
                 }
             }
+            crate::autoroute::maze_search::STATS
+                .with(|s| s.borrow_mut().rooms_completed += 1);
             self.complete_rooms.push(room_id);
             self.grid_insert(room_id, piece_bbox, piece.layer);
             self.target_doors.push(targets);

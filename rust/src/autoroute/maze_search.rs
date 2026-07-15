@@ -14,6 +14,24 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashSet};
 
+thread_local! {
+    /// Cumulative search statistics (FR_STATS diagnostics).
+    pub static STATS: std::cell::RefCell<SearchStats> =
+        std::cell::RefCell::new(SearchStats::default());
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SearchStats {
+    pub searches: u64,
+    pub expansions: u64,
+    pub pushes: u64,
+    pub rooms_completed: u64,
+}
+
+pub fn take_stats() -> SearchStats {
+    STATS.with(|s| std::mem::take(&mut *s.borrow_mut()))
+}
+
 use crate::autoroute::engine::AutorouteEngine;
 use crate::autoroute::expansion_room::{DoorId, RoomId};
 use crate::board::basic_board::{BasicBoard, ItemId};
@@ -239,8 +257,10 @@ pub fn find_connection(
         }
     }
 
+    STATS.with(|s| s.borrow_mut().searches += 1);
     let mut expansions = 0usize;
     while let Some(Reverse(entry)) = open.pop() {
+        STATS.with(|s| s.borrow_mut().expansions += 1);
         expansions += 1;
         if expansions > request.max_expansions {
             return None; // budget exhausted
@@ -248,16 +268,10 @@ pub fn find_connection(
         if expansions.is_multiple_of(1024) && request.deadline.is_some_and(|t| t.limit_exceeded()) {
             return None; // out of time
         }
-        // occupy the step
-        match entry.step {
-            Step::Door { door, section } => {
-                let sections = &mut engine.graph.door_mut(door).sections;
-                if section >= sections.len() || sections[section].is_occupied {
-                    continue;
-                }
-                sections[section].is_occupied = true;
-            }
-            Step::Drill => {}
+        // sections are occupied at push time: every door pop is unique
+        if let Step::Door { door, section } = entry.step {
+            let sections = &engine.graph.door(door).sections;
+            debug_assert!(section < sections.len() && sections[section].is_occupied);
         }
         let room = entry.room_to_enter;
         let layer = engine.graph.room(room).layer;
@@ -375,16 +389,21 @@ fn seed_room(
             let ripup_cost =
                 request.ripup_penalty * engine.rippable_items(other).len() as f64;
             let cost = base_cost + location.distance(midpoint) + ripup_cost;
-            // prune: skip occupied sections and pushes that cannot improve
-            // the section's best queued cost (duplicate pushes otherwise
-            // dominate the open heap)
+            // occupy ON PUSH (Java: expand_to_door_section sets
+            // is_occupied when the element is inserted): each section
+            // enters the queue exactly once, from the cheapest frontier
+            // element known at that time. Occupy-on-pop instead lets
+            // every re-entry of a room re-seed all its sections — a
+            // relaxation storm (69M pushes on NormalPuzzle).
             match engine.graph.door_mut(door).sections.get_mut(section) {
-                Some(s) if !s.is_occupied && cost < s.best_cost => {
+                Some(s) if !s.is_occupied => {
+                    s.is_occupied = true;
                     s.best_cost = cost;
                 }
                 _ => continue,
             }
             let other_layer = engine.graph.room(other).layer;
+            STATS.with(|s| s.borrow_mut().pushes += 1);
             open.push(Reverse(QueueEntry {
                 cost,
                 estimate: cost + estimate_to_dest(midpoint, other_layer),

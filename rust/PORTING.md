@@ -258,6 +258,23 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 142): OCCUPY-ON-PUSH — the ×5 search fix.
+  FR_STATS counters exposed a relaxation storm: NormalPuzzle spent
+  22M expansions / 69M heap pushes on 150 searches (~460k pushes per
+  search on a 72-net board) because sections were occupied on POP:
+  every re-entry of a room re-seeded all its door sections with
+  marginally improved costs. Java occupies a section when it is
+  INSERTED into the expansion list (each section queues exactly
+  once, from the cheapest frontier element known at the time) —
+  ported: NormalPuzzle 17.4 s → 3.5 s (measured UNDER cpu
+  contention), 390k expansions / 494k pushes (56× / 139× less),
+  72/72 with ZERO violations; J2 0 violations. Path quality is
+  first-push-wins (Java-identical): display's rip-window violations
+  amplified to 11 with 29/30 — that class is the next correctness
+  front. JAVA BASELINE (stripped wiring, router phase): J2 3.42 s,
+  wavefolder 5.94 s — RUST IS ALREADY FASTER on those; NormalPuzzle
+  Java 1.08 s vs Rust 3.5 s contended. interf_u cross-net A/B: same
+  completion as per-net (170/173) — cross-net reuse stays opt-in.
 - 2026-07-15 (iter 141): ROOM PERSISTENCE INFRASTRUCTURE (Java:
   maintain_database) — the full machinery is in: rooms carry
   alive/net_dependent flags, RoomGraph::remove_room detaches doors
