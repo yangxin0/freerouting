@@ -18,6 +18,54 @@ pub fn export_ses(board: &BasicBoard, design_name: &str, resolution: i32) -> Str
     out.push_str("  (routes \n");
     out.push_str(&format!("    (resolution um {resolution})\n"));
     out.push_str("    (parser\n      (host_cad \"freerouting-rs\")\n    )\n");
+
+    // library_out: the via padstacks referenced by the session (Java:
+    // SesWriter.writeLibrary), shapes written per layer in board units
+    // like the rest of this writer
+    let mut via_padstacks: Vec<usize> = board
+        .items()
+        .filter(|(_, it)| it.base.component_no == 0 && it.base.net_count() > 0)
+        .filter_map(|(_, it)| match &it.kind {
+            ItemKind::Via(v) => Some(v.padstack),
+            _ => None,
+        })
+        .collect();
+    for info_id in 0..board.rules.via_infos.count() {
+        via_padstacks.push(board.rules.via_infos.get(info_id).get_padstack());
+    }
+    via_padstacks.sort_unstable();
+    via_padstacks.dedup();
+    out.push_str("    (library_out \n");
+    for ps_no in via_padstacks {
+        let Some(ps) = board.padstacks.get_by_no(ps_no) else { continue };
+        out.push_str(&format!("      (padstack \"{}\"\n", ps.name));
+        for layer in 0..board.layer_structure.layer_count() {
+            let Some(shape) = ps.get_shape(layer) else { continue };
+            let layer_name = &board.layer_structure.arr[layer].name;
+            match shape {
+                crate::geometry::planar::TileShape::Box(b) => {
+                    out.push_str(&format!(
+                        "        (shape (rect {} {} {} {} {}))\n",
+                        layer_name, b.ll.x, b.ll.y, b.ur.x, b.ur.y
+                    ));
+                }
+                other => {
+                    out.push_str(&format!("        (shape (polygon {} 0", layer_name));
+                    for i in 0..other.border_line_count() {
+                        let c = other.corner_approx(i);
+                        out.push_str(&format!(
+                            " {} {}",
+                            c.x.round() as i64,
+                            c.y.round() as i64
+                        ));
+                    }
+                    out.push_str("))\n");
+                }
+            }
+        }
+        out.push_str("      )\n");
+    }
+    out.push_str("    )\n");
     out.push_str("    (network_out \n");
 
     for net_no in 1..=board.rules.nets.max_net_no() {
@@ -118,6 +166,11 @@ mod tests {
         let parsed = parse_dsn(&ses).expect("SES not parseable");
         assert_eq!(parsed.name(), Some("session"));
         let routes = parsed.child("routes").expect("routes");
+        // the library_out carries the via padstack definitions
+        let library = routes.child("library_out").expect("library_out");
+        let padstack = library.child("padstack").expect("padstack");
+        assert_eq!(padstack.arg(), Some("Via[0-1]_800:400_um"));
+        assert!(padstack.child("shape").is_some(), "per-layer shapes");
         let network_out = routes.child("network_out").expect("network_out");
         let net = network_out.child("net").expect("net");
         assert_eq!(net.arg(), Some("GND"));

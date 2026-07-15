@@ -61,8 +61,13 @@ the only genuinely open work items across the whole port:
    signal/all -> per-layer items, SystemFixed. place_keepout affects
    only component placement and is skipped like Java's router does.
    J2's own 4 keepouts now import and it still routes 24/24 clean.
-3. SES library_out section (Java SesWriter emits padstack definitions;
-   the Rust writer references padstack names in network_out only).
+3. [DONE iter 193] SES library_out section — the writer now emits
+   (library_out (padstack NAME (shape ...) ...)) for every via
+   padstack referenced by session vias or the via rules; boxes as
+   rect, octagons/simplices as polygon corner lists, per layer in
+   board units. Verified: J2 session re-imports through --import-ses
+   at 24/24 / 999.94. (Java's `(attach off)` flag has no Rust
+   padstack field — omitted.)
 4. Delaunay-based ratsnest airlines (Java: PlanarDelaunayTriangulation
    + MST in NetIncompletes; Rust uses MST over component centers).
 5. Corridor-trace clearance at insert (iter 190 residue: 2 coldfire
