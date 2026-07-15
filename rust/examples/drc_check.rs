@@ -54,7 +54,9 @@ fn main() {
     batch_route_passes_with_time_limit(&mut board, &request, 99, Some(&limit));
     if std::env::var_os("FR_NO_POST").is_none() {
         combine_all_traces(&mut board);
-        pull_tight_all(&mut board, 3);
+        if std::env::var_os("FR_NO_TIGHT").is_none() {
+            pull_tight_all(&mut board, 3);
+        }
     }
 
     // audit: routed items (component 0) vs everything foreign
