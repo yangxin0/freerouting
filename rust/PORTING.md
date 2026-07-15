@@ -258,6 +258,35 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 153): DIRECTIVE CHANGE — feature completeness
+  FIRST, performance alignment second; ALL routing algorithms must be
+  faithful ports, not approximations. FEATURE CHECKLIST (non-GUI):
+  ROUTING ALGORITHMS (priority order):
+  [ ] BatchFanout (pin→via escape; Java autoroute/BatchFanout.java)
+  [ ] ForcedViaAlgo + MoveDrillItemAlgo (shove-capable via insertion)
+  [ ] 45°/90° AngleRestriction: LocateFoundConnectionAlgo45Degree,
+      PullTightAlgo45, PullTightAlgo90
+  [ ] SortedRoomNeighbours (replace simplified frontier expansion)
+  [ ] DrillPageArray/DrillPage (replace in-room grid sampling)
+  [ ] MazeShoveTraceAlgo (in-maze shove)
+  [ ] OptViaAlgo (via optimization)
+  [ ] BatchOptimizerMultiThreaded (parallel optimizer)
+  [ ] Distinct-net shove stacking (ShapeTraceEntries full semantics)
+  I/O & TOOLING:
+  [ ] DSN export (specctra writer)
+  [ ] SES import
+  [ ] KiCad direct file I/O
+  [ ] DRC report (drc/ package: DrcReport, ClearanceViolation, ...)
+  [ ] RatsNest export (non-GUI part)
+  CORE/INFRA:
+  [ ] Scoring (core/scoring, RouterCounters)
+  [ ] RoutingJob/Session/RoutingStage job model
+  [ ] RouterSettings/profiles (settings/ package, non-GUI)
+  [ ] API server (api/ package) + MCP server
+  DONE (faithful): AutorouteEngine, MazeSearchAlgo core,
+  BatchAutorouter, BatchOptimizer (single-thread), ShoveTraceAlgo +
+  ShapeTraceEntries (single family), PullTightAlgoAnyAngle (core),
+  rules, DSN import, SES export, planes, snapshots/undo.
 - 2026-07-15 (iter 151): TRACE TAPS (junction splitting) — the maze
   may now arrive at a TRACE of the destination component:
   Polyline::nearest_lattice_point projects the arrival onto the
