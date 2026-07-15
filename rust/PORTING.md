@@ -265,7 +265,12 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   [x] BatchFanout (iter 153: fanout.rs — maze is_fanout mode completes
       at the first drill like Java's MazeSearchAlgo; passes over SMD
       pins outer-first; CLI --fanout, default off like Java)
-  [ ] ForcedViaAlgo + MoveDrillItemAlgo (shove-capable via insertion)
+  [x] MoveDrillItemAlgo (iter 154: board/move_drill_item.rs —
+      try_shove_via_points border projections, transactional move_via
+      with destination shoves, shove_vias wired into shove_aside like
+      Java's forced_pad; deeper via-recursion still shallow)
+  [ ] ForcedViaAlgo (forced via insertion for interactive/fanout
+      quality; check_layer/check on top of the pad machinery)
   [ ] 45°/90° AngleRestriction: LocateFoundConnectionAlgo45Degree,
       PullTightAlgo45, PullTightAlgo90
   [ ] SortedRoomNeighbours (replace simplified frontier expansion)

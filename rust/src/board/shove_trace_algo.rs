@@ -37,6 +37,16 @@ pub fn shove_aside(
     forbidden: &[(TileShape, usize)],
 ) -> bool {
     board.generate_snapshot();
+    // shove blocking vias out first (Java: ForcedPadAlgo.forced_pad
+    // starts with MoveDrillItemAlgo.shove_vias)
+    crate::board::move_drill_item::shove_vias(
+        board,
+        shove_shape,
+        layer,
+        own_net_nos,
+        cl_class,
+        2,
+    );
     if shove_insert(
         board,
         shove_shape,
