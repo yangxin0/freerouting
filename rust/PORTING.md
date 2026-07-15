@@ -1605,6 +1605,19 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   story. Java comparison: this brings big-board pass times to the
   same order as Java's.
 
+- 2026-07-15 (iter 199 canonical @600 s, post-memo): coldfire
+  267/278, ZERO violations — identical quality to the pre-memo
+  canonical, but the result now CONVERGES by ~200 s: PASS 0 11.4 s
+  (was 37), passes 1-5 ~78-94 s each (was ~130-180), restart rounds
+  ~59 s (was ~180); six passes + three restart rounds fit where four
+  passes did. The remaining 11 nets are plateaued (passes 3-5 all
+  stay at 11 failed; every restart round regresses and rolls back) —
+  more wall clock does not help them; they need a different strategy
+  (future work). WALL-CLOCK GOAL EFFECTIVELY MET: at equal
+  completion the Rust router now reaches its final coldfire state in
+  roughly a third of the budget, in the same range as Java, with a
+  violation-free board where Java ships violations.
+
 ## Notes / decisions log
 
 - 2026-07-14: crate scaffolded on branch `rust`; no external deps yet.
