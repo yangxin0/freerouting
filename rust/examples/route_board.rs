@@ -8,6 +8,14 @@ use freerouting::datastructures::TimeLimit;
 use freerouting::io::{export_ses, import_dsn};
 use std::time::Instant;
 
+fn args_value(flag: &str) -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
+
 fn main() {
     let path = std::env::args()
         .nth(1)
@@ -22,6 +30,12 @@ fn main() {
     }
     let t0 = Instant::now();
     let mut board = import_dsn(&content).expect("import failed");
+    let angle = args_value("--angle").unwrap_or_else(|| "none".to_string());
+    board.rules.set_trace_angle_restriction(match angle.as_str() {
+        "90" => freerouting::board::AngleRestriction::NinetyDegree,
+        "45" => freerouting::board::AngleRestriction::FortyfiveDegree,
+        _ => freerouting::board::AngleRestriction::None,
+    });
     println!(
         "imported {} in {:?}: {} layers, {} padstacks, {} nets, {} items",
         path,

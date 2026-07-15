@@ -23,6 +23,7 @@ Options:
   -tl <seconds>      wall-clock time limit for routing (default 300)
   --strip-wiring     remove the pre-routed wiring and route from scratch
   --fanout           fan out SMD pins to vias before routing
+  --angle <mode>     trace angle restriction: none, 45, 90 (default 45)
   -h, --help         show this help";
 
 fn main() -> ExitCode {
@@ -52,6 +53,7 @@ fn main() -> ExitCode {
     let max_passes: usize = flag_value("-mp").and_then(|v| v.parse().ok()).unwrap_or(99);
     let limit_s: u64 = flag_value("-tl").and_then(|v| v.parse().ok()).unwrap_or(300);
     let strip_wiring = args.iter().any(|a| a == "--strip-wiring");
+    let angle_mode = flag_value("--angle").unwrap_or("45").to_string();
 
     let mut content = match std::fs::read_to_string(design) {
         Ok(c) => c,
@@ -73,6 +75,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    board.rules.set_trace_angle_restriction(match angle_mode.as_str() {
+        "none" | "any" => freerouting::board::AngleRestriction::None,
+        "90" => freerouting::board::AngleRestriction::NinetyDegree,
+        _ => freerouting::board::AngleRestriction::FortyfiveDegree,
+    });
     println!(
         "imported {design} in {:?}: {} layers, {} nets, {} items",
         t0.elapsed(),

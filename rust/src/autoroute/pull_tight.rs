@@ -51,6 +51,25 @@ pub fn pull_tight_trace(board: &mut BasicBoard, id: ItemId) -> (ItemId, usize) {
                 continue;
             }
             let bypass = Polyline::from_two_points(a, c);
+            // under an angle restriction only compliant bypasses are
+            // allowed (Java: PullTightAlgo45/90 keep the restriction)
+            let restriction = board.rules.get_trace_angle_restriction();
+            if restriction != crate::board::AngleRestriction::None {
+                let (fa, fc) = (
+                    crate::geometry::planar::FloatPoint::new(a.x as f64, a.y as f64),
+                    crate::geometry::planar::FloatPoint::new(c.x as f64, c.y as f64),
+                );
+                let dx = (fc.x - fa.x).abs();
+                let dy = (fc.y - fa.y).abs();
+                let compliant = match restriction {
+                    crate::board::AngleRestriction::NinetyDegree => dx == 0.0 || dy == 0.0,
+                    _ => dx == 0.0 || dy == 0.0 || dx == dy,
+                };
+                if !compliant {
+                    i += 1;
+                    continue;
+                }
+            }
             // the bypass must keep the clearance, not merely avoid
             // touching (zero-margin bypasses were a DRC leak)
             let max_cl = board.rules.clearance_matrix.max_value(layer).max(0);

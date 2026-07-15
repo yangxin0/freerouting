@@ -1064,7 +1064,9 @@ pub fn maze_route_with_engine(
         ripped_nets.dedup();
     }
 
-    let new_items = insert_connection(board, request, &result)?;
+    let restriction = board.rules.get_trace_angle_restriction();
+    let restricted = restrict_corners(engine, &result, restriction);
+    let new_items = insert_connection(board, request, &restricted)?;
     // rooms are reused across a net's connections: make the new items
     // reachable as destinations
     engine.register_new_targets(board, &new_items);
@@ -1085,6 +1087,116 @@ pub fn maze_route(board: &mut BasicBoard, request: &MazeRouteRequest) -> Option<
     );
     let result = find_connection(board, &mut engine, request)?;
     insert_connection(board, request, &result)
+}
+
+/// The intermediate corner making from→to compliant with the angle
+/// restriction (Java: `LocateFoundConnectionAlgo.calculate_additional_corner`
+/// with `ninety_degree_corner` / `fortyfive_degree_corner`).
+fn calculate_additional_corner(
+    from: FloatPoint,
+    to: FloatPoint,
+    horizontal_first: bool,
+    restriction: crate::board::AngleRestriction,
+) -> FloatPoint {
+    use crate::board::AngleRestriction::*;
+    match restriction {
+        None => to,
+        NinetyDegree => {
+            if horizontal_first {
+                FloatPoint::new(to.x, from.y)
+            } else {
+                FloatPoint::new(from.x, to.y)
+            }
+        }
+        FortyfiveDegree => {
+            let abs_dx = (to.x - from.x).abs();
+            let abs_dy = (to.y - from.y).abs();
+            if abs_dx <= abs_dy {
+                if horizontal_first {
+                    let y = if to.y >= from.y { from.y + abs_dx } else { from.y - abs_dx };
+                    FloatPoint::new(to.x, y)
+                } else {
+                    let y = if to.y > from.y { to.y - abs_dx } else { to.y + abs_dx };
+                    FloatPoint::new(from.x, y)
+                }
+            } else if horizontal_first {
+                let x = if to.x > from.x { to.x - abs_dy } else { to.x + abs_dy };
+                FloatPoint::new(x, from.y)
+            } else {
+                let x = if to.x > from.x { from.x + abs_dy } else { from.x - abs_dy };
+                FloatPoint::new(x, to.y)
+            }
+        }
+    }
+}
+
+/// True if from→to satisfies the restriction (axis-parallel for 90°,
+/// axis-parallel or diagonal for 45°).
+pub(crate) fn segment_is_compliant(
+    from: FloatPoint,
+    to: FloatPoint,
+    restriction: crate::board::AngleRestriction,
+) -> bool {
+    use crate::board::AngleRestriction::*;
+    let dx = (to.x - from.x).round();
+    let dy = (to.y - from.y).round();
+    match restriction {
+        None => true,
+        NinetyDegree => dx == 0.0 || dy == 0.0,
+        FortyfiveDegree => dx == 0.0 || dy == 0.0 || dx.abs() == dy.abs(),
+    }
+}
+
+/// Rewrites the found corners so every segment satisfies the angle
+/// restriction, inserting intermediate corners chosen to stay inside the
+/// segment's room when possible (Java:
+/// `LocateFoundConnectionAlgo45Degree.calculate_next_trace_corners`).
+fn restrict_corners(
+    engine: &AutorouteEngine,
+    result: &MazeSearchResult,
+    restriction: crate::board::AngleRestriction,
+) -> MazeSearchResult {
+    if restriction == crate::board::AngleRestriction::None {
+        return MazeSearchResult {
+            corners: result.corners.clone(),
+            rooms: result.rooms.clone(),
+        };
+    }
+    let mut corners: Vec<(FloatPoint, usize)> = Vec::new();
+    let mut rooms: Vec<Option<RoomId>> = Vec::new();
+    for k in 0..result.corners.len() {
+        let (b, lb) = result.corners[k];
+        if let Some(&(a, la)) = corners.last().map(|c| c).filter(|_| k > 0) {
+            if la == lb && !segment_is_compliant(a, b, restriction) {
+                // choose horizontal_first so the extra corner stays in
+                // the segment's room (try true, then false, like Java)
+                let room = result.rooms[k - 1].or(result.rooms[k]);
+                let mut extra = calculate_additional_corner(a, b, true, restriction);
+                if let Some(r) = room {
+                    let shape = &engine.graph.room(r).shape;
+                    let inside = |p: FloatPoint| {
+                        let ip = crate::geometry::planar::Point::Int(p.round());
+                        shape.contains(&ip)
+                            || shape.to_simplex().offset(2.0).contains(&ip)
+                    };
+                    if !inside(extra) {
+                        let alt = calculate_additional_corner(a, b, false, restriction);
+                        if inside(alt) {
+                            extra = alt;
+                        }
+                    }
+                }
+                let rounded = extra.round().to_float();
+                if rounded != a && rounded != b {
+                    corners.push((rounded, lb));
+                    rooms.push(result.rooms[k - 1]);
+                }
+            }
+        }
+        corners.push((b, lb));
+        rooms.push(result.rooms[k]);
+    }
+    MazeSearchResult { corners, rooms }
 }
 
 /// Inserts the found connection as per-layer polyline traces joined by

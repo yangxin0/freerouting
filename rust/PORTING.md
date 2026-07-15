@@ -274,8 +274,17 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       wider-trace-pen shapes shoved free then the via inserted,
       transactional; check leaves the board unchanged. Maze/fanout
       integration lands with MazeShoveTraceAlgo)
-  [ ] 45°/90° AngleRestriction: LocateFoundConnectionAlgo45Degree,
-      PullTightAlgo45, PullTightAlgo90
+  [x] 45°/90° AngleRestriction (iter 156: calculate_additional_corner
+      + fortyfive/ninety corner constructors ported exactly;
+      restrict_corners rewrites the found path room-aware
+      (horizontal-first preferred, alternative when outside the room,
+      like LocateFoundConnectionAlgo45Degree); pull-tight only takes
+      compliant bypasses. CLI --angle none|45|90 (default 45 like
+      Java), route_board/drc_check keep any-angle default for
+      benchmark continuity (FR_ANGLE knob). 45° fleet: display 30/30,
+      J2 24/24, wavefolder 31/31, pic 111/111, NormalPuzzle 72/72 —
+      ALL ZERO violations. PullTight45's full corner-reduction
+      remains simplified: bypass gating only)
   [ ] SortedRoomNeighbours (replace simplified frontier expansion)
   [ ] DrillPageArray/DrillPage (replace in-room grid sampling)
   [ ] MazeShoveTraceAlgo (in-maze shove)
