@@ -442,9 +442,127 @@ impl AutorouteEngine {
             self.expanded.push(false);
             self.net_dependent.push(net_dependent || !self.target_doors[room_id].is_empty());
             debug_assert_eq!(self.target_doors.len(), self.graph.room_count());
+            if crate::debug::srn() {
+                self.create_gap_rooms(board, room_id);
+            }
             new_rooms.push(room_id);
         }
         new_rooms
+    }
+
+    /// Runs the SortedRoomNeighbours gap walk for a freshly completed
+    /// room: collects the touching complete rooms and (inflated) items,
+    /// sorts them counterclockwise, and adds the uncovered border gaps
+    /// as INCOMPLETE rooms in the graph, each with a door to the piece
+    /// (Java: SortedRoomNeighbours.calculate).
+    fn create_gap_rooms(&mut self, board: &BasicBoard, room_id: RoomId) {
+        use crate::autoroute::sorted_room_neighbours as srn;
+        let layer = self.graph.room(room_id).layer;
+        let room_simplex = self.graph.room(room_id).shape.to_simplex();
+        let room_bbox = self.graph.room(room_id).shape.bounding_box();
+        let mut neighbours: Vec<srn::Neighbour> = Vec::new();
+        // touching complete rooms from the grid
+        for other in self.rooms_near(room_bbox.offset(4.0), layer) {
+            if other == room_id || self.graph.room(other).layer != layer {
+                continue;
+            }
+            let shape = self.graph.room(other).shape.clone();
+            if let Some(nb) =
+                srn::make_neighbour(&room_simplex, srn::NeighbourObject::Room(other), &shape)
+            {
+                neighbours.push(nb);
+            }
+        }
+        // touching board items, at their completion inflation
+        let matrix = &board.rules.clearance_matrix;
+        for item_id in board
+            .overlapping_items_coarse(&TileShape::Box(room_bbox.offset(
+                2.0 * (self.trace_half_width
+                    + matrix.max_value(layer).max(0)
+                    + crate::rules::clearance_matrix::CLEARANCE_SAFETY_MARGIN)
+                    as f64,
+            )), Some(layer))
+        {
+            let Some(item) = board.get_item(item_id) else { continue };
+            if item.base.contains_net(self.net_no) {
+                continue;
+            }
+            if let crate::board::ItemKind::ObstacleArea(a) = &item.kind {
+                if a.is_conduction {
+                    continue;
+                }
+            }
+            if self.allow_ripup
+                && crate::autoroute::room_completion::is_rippable(item, self.net_no)
+            {
+                continue;
+            }
+            let clearance = matrix.get_value(
+                item.base.clearance_class,
+                self.trace_clearance_class,
+                layer,
+                true,
+            );
+            let margin = (self.trace_half_width + clearance).max(0);
+            let Some(inflated) = board.inflated_shapes(item_id, margin) else { continue };
+            for (shape, bbox, l) in inflated.iter() {
+                if *l != layer || !bbox.intersects(room_bbox.offset(4.0)) {
+                    continue;
+                }
+                if let Some(nb) = srn::make_neighbour(
+                    &room_simplex,
+                    srn::NeighbourObject::Item(item_id),
+                    shape,
+                ) {
+                    neighbours.push(nb);
+                }
+            }
+        }
+        if neighbours.is_empty() {
+            return;
+        }
+        srn::sort_neighbours(&room_simplex, &mut neighbours);
+        let mut completed_shape = self.graph.room(room_id).shape.clone();
+        let contained = self.graph.room(room_id).shape.clone();
+        let gaps = srn::calculate_new_incomplete_rooms(
+            &room_simplex,
+            &mut completed_shape,
+            &contained,
+            &neighbours,
+        );
+        for gap in gaps {
+            let gap_id = self.graph.add_room(
+                gap.shape,
+                layer,
+                RoomKind::IncompleteFreeSpace {
+                    contained_shape: gap.contained_shape,
+                },
+            );
+            // parallel bookkeeping arrays cover every graph room
+            self.target_doors.push(Vec::new());
+            self.rippable_items.push(Vec::new());
+            self.expanded.push(false);
+            self.net_dependent.push(false);
+            self.graph.add_door_with_dimension(room_id, gap_id, 1);
+        }
+    }
+
+    /// Completes an INCOMPLETE graph room in place: removes it and
+    /// completes its shape, producing complete pieces (whose SRN walk
+    /// queues further gaps). Returns the new complete rooms.
+    fn complete_incomplete_room(&mut self, board: &BasicBoard, room_id: RoomId) -> Vec<RoomId> {
+        let RoomKind::IncompleteFreeSpace { contained_shape } =
+            self.graph.room(room_id).kind.clone()
+        else {
+            return Vec::new();
+        };
+        let incomplete = IncompleteRoom {
+            shape: self.graph.room(room_id).shape.clone(),
+            layer: self.graph.room(room_id).layer,
+            contained_shape,
+        };
+        self.graph.remove_room(room_id);
+        self.complete_room(board, incomplete)
     }
 
     /// Expands the frontier of a room: seeds an incomplete room beyond
@@ -455,6 +573,31 @@ impl AutorouteEngine {
             return Vec::new();
         }
         self.expanded[room_id] = true;
+        if crate::debug::srn() {
+            // faithful growth: complete the incomplete gap rooms behind
+            // this room's doors (their pieces bring their own doors and
+            // further gap rooms)
+            let incomplete: Vec<RoomId> = self
+                .graph
+                .room(room_id)
+                .doors
+                .clone()
+                .into_iter()
+                .filter_map(|d| self.graph.other_room(d, room_id))
+                .filter(|&r| {
+                    self.graph.room(r).alive
+                        && matches!(
+                            self.graph.room(r).kind,
+                            RoomKind::IncompleteFreeSpace { .. }
+                        )
+                })
+                .collect();
+            let mut new_rooms = Vec::new();
+            for r in incomplete {
+                new_rooms.extend(self.complete_incomplete_room(board, r));
+            }
+            return new_rooms;
+        }
         let room_shape = self.graph.room(room_id).shape.clone();
         let layer = self.graph.room(room_id).layer;
         let mut new_rooms = Vec::new();

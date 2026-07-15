@@ -285,7 +285,18 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       J2 24/24, wavefolder 31/31, pic 111/111, NormalPuzzle 72/72 —
       ALL ZERO violations. PullTight45's full corner-reduction
       remains simplified: bypass gating only)
-  [~] SortedRoomNeighbours (iter 157: autoroute/sorted_room_neighbours.rs
+  [x] SortedRoomNeighbours (iters 157-158: core + ENGINE INTEGRATION,
+      DEFAULT ON — completion runs the SRN walk per piece, uncovered
+      border gaps become INCOMPLETE rooms in the graph with doors,
+      and entering a room lazily completes the gap rooms behind its
+      doors (Java's growth model exactly; FR_SRN=0 keeps the interim
+      frontier expansion). Fleet: NormalPuzzle 72/72 @0.98 s (faster
+      than frontier), display 30/30, wavefolder 31/31, pic 111/111 —
+      all zero violations; 8088sbc pass 0: 11.4 s/2-failed vs
+      15.0 s/5-failed — SRN better everywhere. J2's last net (GND)
+      flaps in BOTH modes since the via-shove change — order
+      sensitivity, tracked separately.)
+  [~] (superseded note)
       — Neighbour records with exact first/last corners, the
       counterclockwise comparator (tolerance 1), touching_sides /
       equals_corner classification for dim-1 and dim-0 touches, and

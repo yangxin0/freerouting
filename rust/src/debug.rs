@@ -56,6 +56,16 @@ pub fn stats() -> bool {
     flag(&C, "FR_STATS")
 }
 
+/// FR_SRN: the SortedRoomNeighbours growth model (gap rooms + lazy
+/// completion) — the faithful Java algorithm, default ON; FR_SRN=0
+/// falls back to the interim frontier expansion.
+pub fn srn() -> bool {
+    static C: OnceLock<bool> = OnceLock::new();
+    *C.get_or_init(|| {
+        std::env::var("FR_SRN").map(|v| v != "0").unwrap_or(true)
+    })
+}
+
 /// FR_ROOM_WINDOW: clip expansion seeds to this margin (board units)
 /// around the contained edge; 0 = unbounded half-planes (default 200000).
 pub fn room_window() -> i32 {
