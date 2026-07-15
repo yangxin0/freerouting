@@ -137,7 +137,7 @@ fn shove_insert(
     if !entries.shove_via_list.is_empty() {
         return false;
     }
-    if std::env::var_os("FR_DEBUG_SHOVE").is_some() {
+    if crate::debug::shove() {
         eprintln!(
             "SHOVE layer {layer} obstacles {} pieces {} depth {depth}",
             obstacles.len(),

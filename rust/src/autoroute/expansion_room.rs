@@ -27,7 +27,7 @@ pub enum Adjustment {
 }
 
 /// The maze-search state of one section of an expandable object.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct MazeSearchElement {
     /// True if this section is already occupied by the maze expansion.
     pub is_occupied: bool,
@@ -39,6 +39,23 @@ pub struct MazeSearchElement {
     /// The ripup cost paid to enter this door's room; zero when
     /// `room_ripped` is false.
     pub ripup_cost: i32,
+    /// The best path cost this section was queued with so far; pushes
+    /// that cannot improve it are pruned (the duplicate pushes otherwise
+    /// dominate the open heap).
+    pub best_cost: f64,
+}
+
+impl Default for MazeSearchElement {
+    fn default() -> Self {
+        MazeSearchElement {
+            is_occupied: false,
+            backtrack_door: None,
+            room_ripped: false,
+            adjustment: Adjustment::default(),
+            ripup_cost: 0,
+            best_cost: f64::INFINITY,
+        }
+    }
 }
 
 impl MazeSearchElement {

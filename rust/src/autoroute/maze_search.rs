@@ -141,10 +141,7 @@ pub fn find_connection(
             .min(1e12);
         // explicit weighting on top (the center distance already behaves
         // like weighted A*; FR_ASTAR_WEIGHT tunes the trade-off)
-        let weight = std::env::var("FR_ASTAR_WEIGHT")
-            .ok()
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(1.0);
+        let weight = crate::debug::astar_weight();
         if dest_centers.iter().any(|(_, l)| *l == layer) {
             dist * weight
         } else {
@@ -168,7 +165,7 @@ pub fn find_connection(
                 engine.rooms_containing(start_center.round(), *layer, board);
         }
         // set FR_DEBUG_MAZE=1 to diagnose instantly failing connections
-        if std::env::var_os("FR_DEBUG_MAZE").is_some() {
+        if crate::debug::maze() {
             eprintln!(
                 "MAZE start item {:?} layer {layer}: {} start rooms",
                 request.start_item,
@@ -321,7 +318,7 @@ pub fn find_connection(
             &estimate_to_dest,
         );
     }
-    if std::env::var_os("FR_DEBUG_MAZE").is_some() {
+    if crate::debug::maze() {
         let rooms_with_dest_door = (0..engine.graph.room_count())
             .filter(|&r| {
                 engine
@@ -374,19 +371,19 @@ fn seed_room(
         };
         let segments = engine.graph.door_section_segments(door, offset);
         for (section, seg) in segments.iter().enumerate() {
-            if engine
-                .graph
-                .door(door)
-                .sections
-                .get(section)
-                .is_some_and(|s| s.is_occupied)
-            {
-                continue;
-            }
             let midpoint = seg.a.middle_point(seg.b);
             let ripup_cost =
                 request.ripup_penalty * engine.rippable_items(other).len() as f64;
             let cost = base_cost + location.distance(midpoint) + ripup_cost;
+            // prune: skip occupied sections and pushes that cannot improve
+            // the section's best queued cost (duplicate pushes otherwise
+            // dominate the open heap)
+            match engine.graph.door_mut(door).sections.get_mut(section) {
+                Some(s) if !s.is_occupied && cost < s.best_cost => {
+                    s.best_cost = cost;
+                }
+                _ => continue,
+            }
             let other_layer = engine.graph.room(other).layer;
             open.push(Reverse(QueueEntry {
                 cost,
@@ -597,11 +594,11 @@ pub fn maze_route_with_engine(
     // invariant check (diagnostics): the segment between consecutive
     // same-layer corners must lie inside the room entered at the FIRST
     // corner (convex ⇒ checking both endpoints suffices)
-    if std::env::var_os("FR_DEBUG_MAZE").is_some() {
+    if crate::debug::maze() {
         for k in 0..result.corners.len().saturating_sub(1) {
             let (a, la) = result.corners[k];
             let (b, lb) = result.corners[k + 1];
-            if std::env::var_os("FR_DEBUG_PATH").is_some() {
+            if crate::debug::path() {
                 eprintln!(
                     "PATH net {} corner {k} ({:.0},{:.0}) layer {la} room {:?}",
                     request.net_no, a.x, a.y, result.rooms[k]
@@ -686,7 +683,7 @@ pub fn maze_route_with_engine(
 
     // room-vs-board consistency audit (expensive, FR_AUDIT_ROOMS): every
     // completed room must be clear of every foreign item's inflated shape
-    if std::env::var_os("FR_AUDIT_ROOMS").is_some() && !allow_ripup {
+    if crate::debug::audit_rooms() && !allow_ripup {
         for &room_id in engine.complete_rooms() {
             let r = engine.graph.room(room_id);
             let room_bbox = r.shape.bounding_box();
@@ -923,7 +920,7 @@ fn insert_connection(
                 let polyline = Polyline::from_int_points(run);
                 // birth-site validation: the post-rip board must leave
                 // every inserted segment its full clearance
-                if std::env::var_os("FR_DEBUG_MAZE").is_some() {
+                if crate::debug::maze() {
                     for seg in polyline.offset_shapes(request.trace_half_width) {
                         let cl = board
                             .rules
@@ -968,7 +965,7 @@ fn insert_connection(
                     vec![request.net_no],
                     request.clearance_class,
                 );
-                if std::env::var_os("FR_DEBUG_MAZE").is_some() {
+                if crate::debug::maze() {
                     eprintln!("INSERTED trace {new_id} net {} layer {layer}", request.net_no);
                 }
                 items.push(new_id);

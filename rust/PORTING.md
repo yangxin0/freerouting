@@ -258,6 +258,22 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 137): PERFORMANCE RECOVERED after the miter fix,
+  two wins: (1) getenv in hot loops — the debug-flag env reads
+  (FR_ASTAR_WEIGHT per A* estimate!, FR_DEBUG_* per completion) took
+  ~25%+ of samples via the getenv global lock; now cached in
+  src/debug.rs OnceLock getters. (2) A* duplicate-push pruning — the
+  open heap dominated profiles (60% in BinaryHeap::pop): every room
+  entry re-pushed all door sections (O(D²) pushes). MazeSearchElement
+  now carries best_cost; pushes that cannot improve a section's best
+  queued cost are pruned (Java-equivalent discipline). NormalPuzzle
+  48.9s → 13.7s (beats the pre-fix 16s), 72/72 restored. interf_u
+  stays 170/173 (/MA11, /MA14, VCC — gives up at ~283s with dry
+  restart rounds): those need better ripup/shove, not throughput.
+  DRC unchanged: wavefolder/J2 0 violations, display 12,
+  NormalPuzzle 2, FR_AUDIT_ROOMS clean. Also: cheap pre-cut on cached
+  uninflated bboxes before inflating obstacle candidates, and the
+  completion query is now a grown bbox instead of an offset simplex.
 - 2026-07-15 (iter 136): THE MITER-REACH LEAK — the deep-violation
   class found, reproduced, and fixed. Chain: exact-overlap validators
   (bbox-noise removed) → invariant cross-check → FR_AUDIT_ROOMS

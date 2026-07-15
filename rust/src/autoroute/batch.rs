@@ -48,7 +48,7 @@ fn net_components(board: &BasicBoard, net_no: i32) -> Vec<Vec<ItemId>> {
             continue;
         }
         let component = board.get_connected_set(item, net_no);
-        if std::env::var_os("FR_DEBUG_MAZE").is_some() {
+        if crate::debug::maze() {
             for member in &component {
                 if assigned.contains(member) {
                     eprintln!(
@@ -168,7 +168,7 @@ pub fn route_net(board: &mut BasicBoard, net_no: i32, request: &BatchRequest) ->
         let Some((start, dest)) = best else {
             break;
         };
-        if std::env::var_os("FR_DEBUG_MAZE").is_some() {
+        if crate::debug::maze() {
             eprintln!(
                 "ROUTE net {net_no}: connect item {start:?} -> item {dest:?} \
                  ({} components)",
@@ -442,7 +442,7 @@ pub fn batch_route_passes_with_time_limit(
 ) -> BatchResult {
     let mut net_nos: Vec<i32> = (1..=board.rules.nets.max_net_no()).collect();
     net_nos.sort_by_key(|&n| net_extent(board, n));
-    if std::env::var_os("FR_ROUTE_ORDER_DESC").is_some() {
+    if crate::debug::route_order_desc() {
         net_nos.reverse(); // experiment: largest extent first
     }
 

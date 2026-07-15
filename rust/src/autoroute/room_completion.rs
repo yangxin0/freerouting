@@ -75,10 +75,11 @@ pub fn complete_shape_with_ripup(
     let max_margin = trace_half_width as f64
         + (matrix.max_value(room.layer).max(0)
             + crate::rules::clearance_matrix::CLEARANCE_SAFETY_MARGIN) as f64;
-    let query_shape = start_shape.offset(2.0 * max_margin);
-    // coarse (bbox-level) query: the exact cut happens per inflated shape
-    // below, so per-candidate exact intersections here would be wasted
+    // coarse (bbox-level) query on a grown box: the exact cut happens per
+    // inflated shape below, so per-candidate exact intersections (and
+    // offsetting the start simplex itself) would be wasted work
     let start_bbox = start_shape.bounding_box();
+    let query_shape = TileShape::Box(start_bbox.offset(2.0 * max_margin));
     let mut obstacles: Vec<(ItemId, TileShape)> = Vec::new();
     for item_id in board.overlapping_items_coarse(&query_shape, Some(room.layer)) {
         if Some(item_id) == ignore_item {
@@ -118,6 +119,16 @@ pub fn complete_shape_with_ripup(
                 // the room geometry. (cl/2-only inflation left copper
                 // gaps of cl/2 - hw — found by the DRC self-check.)
                 let margin = trace_half_width as f64 + clearance as f64;
+                // cheap precut on the CACHED uninflated bbox, grown by the
+                // worst-case miter reach (2·margin covers the √2 corner
+                // extension), before paying for the offset + fresh bbox
+                if !shape
+                    .bounding_box()
+                    .offset(2.0 * margin)
+                    .intersects(start_bbox)
+                {
+                    continue;
+                }
                 let shape = if margin > 0.0 {
                     shape.offset(margin)
                 } else {
@@ -134,11 +145,7 @@ pub fn complete_shape_with_ripup(
 
     // region-scoped completion log (FR_DEBUG_REGION): records whether a
     // watched obstacle was collected and what pieces resulted
-    let watch = std::env::var("FR_DEBUG_REGION").ok().and_then(|v| {
-        let n: Vec<i32> = v.split(',').filter_map(|p| p.parse().ok()).collect();
-        let [x1, y1, x2, y2] = n[..] else { return None };
-        Some(crate::geometry::planar::IntBox::from_coords(x1, y1, x2, y2))
-    });
+    let watch = crate::debug::region();
     if let Some(region) = watch {
         if room.contained_shape.bounding_box().intersects(region)
             || obstacles
@@ -183,7 +190,7 @@ pub fn complete_shape_with_ripup(
         }
         result = new_result;
         if result.is_empty() {
-            if std::env::var_os("FR_DEBUG_MAZE").is_some() {
+            if crate::debug::maze() {
                 let rippable = board
                     .get_item(*obstacle_id)
                     .is_some_and(|i| is_rippable(i, net_no));
