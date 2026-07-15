@@ -740,7 +740,16 @@ pub fn batch_route_passes_with_time_limit(
         };
         let ripup_penalty = request.via_cost.max(20_000.0);
         let mut restart = BatchResult::default();
-        for net_no in order {
+        // FR_LOCK_RESTART experiment (corridor negotiation): when an
+        // originally-incomplete net completes during the round, lock its
+        // route items so later nets cannot rip its corridors back out
+        // from under it; all locks release before the keep/rollback
+        // decision. Rationale: the coldfire stragglers are the giant
+        // power nets — they route fine first but signals erode their
+        // corridors during the rest of the round.
+        let lock_restart = std::env::var_os("FR_LOCK_RESTART").is_some();
+        let mut locked: Vec<ItemId> = Vec::new();
+        for &net_no in &order {
             if restart_limit.is_some_and(|t| t.limit_exceeded()) {
                 break;
             }
@@ -748,6 +757,23 @@ pub fn batch_route_passes_with_time_limit(
             let result = route_net_with_ripup(board, net_no, &net_request, ripup_penalty);
             restart.routed_connections += result.routed_connections;
             restart.failed_connections += result.failed_connections;
+            if lock_restart
+                && incomplete.contains(&net_no)
+                && board.net_is_completely_connected(net_no)
+            {
+                let ids: Vec<ItemId> = board
+                    .items()
+                    .filter(|(_, it)| it.base.contains_net(net_no) && it.is_routable())
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in ids {
+                    board.set_fixed_state(id, crate::board::FixedState::UserFixed);
+                    locked.push(id);
+                }
+            }
+        }
+        for id in locked {
+            board.set_fixed_state(id, crate::board::FixedState::Unfixed);
         }
         let complete_after = net_nos
             .iter()

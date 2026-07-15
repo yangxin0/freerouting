@@ -1676,6 +1676,19 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   Wall clock is now decisively in Java's range or better on every
   board measured.
 
+- 2026-07-15 (iter 206): NEGATIVE RESULT — restart corridor locking
+  (FR_LOCK_RESTART, default off): locking an originally-incomplete
+  net's route items UserFixed once it completes mid-round, so later
+  nets cannot rip its corridors, made restart rounds WORSE on
+  coldfire (267 -> 259 per round vs 267 -> 263 unlocked; final state
+  unchanged at 267/278 + 0 violations thanks to the transactional
+  rollback). Early locks starve the signal nets more than ripup
+  erosion costs the power nets — one-way reservation is not
+  negotiation. The straggler research needs bidirectional trading
+  (rip WITH compensation, e.g. Java-less simultaneous corridor
+  auctions); parked. The experiment stays env-gated for future
+  reference.
+
 ## Notes / decisions log
 
 - 2026-07-14: crate scaffolded on branch `rust`; no external deps yet.
