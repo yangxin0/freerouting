@@ -390,7 +390,15 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       999.99, J2 999.97.)
   [ ] RoutingJob/Session/RoutingStage job model
   [ ] RouterSettings/profiles (settings/ package, non-GUI)
-  [ ] API server (api/ package) + MCP server
+  [x] API server (iter 170: src/api.rs — the v1 job API on a
+      dependency-free HTTP/1.1 server: POST /v1/jobs/enqueue,
+      POST /{id}/input, PUT /{id}/start (background routing thread),
+      PUT /{id}/cancel, GET /{id} (state+score), GET /{id}/output,
+      GET /v1/system/status; includes the core RoutingJob/JobState
+      model. CLI --api-server <port>. E2E verified: enqueue→input→
+      start→COMPLETED score 999.97→SES fetch.)
+  [ ] MCP server endpoint (McpControllerV1 — JSON-RPC wrapper over
+      the job API; last remaining feature)
   DONE (faithful): AutorouteEngine, MazeSearchAlgo core,
   BatchAutorouter, BatchOptimizer (single-thread), ShoveTraceAlgo +
   ShapeTraceEntries (single family), PullTightAlgoAnyAngle (core),

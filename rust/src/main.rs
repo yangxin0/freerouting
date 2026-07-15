@@ -30,6 +30,7 @@ Options:
   --threads <n>      optimizer worker threads (default 1)
   --rules <f>        apply a .rules file before routing
   --export-rules <f> write the design rules to a .rules file
+  --api-server <p>   run the REST API server on port <p> (no routing)
   -h, --help         show this help";
 
 fn main() -> ExitCode {
@@ -44,6 +45,16 @@ fn main() -> ExitCode {
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
     };
+    if let Some(port) = flag_value("--api-server").and_then(|v| v.parse::<u16>().ok()) {
+        let seconds: u64 = flag_value("-tl").and_then(|v| v.parse().ok()).unwrap_or(300);
+        return match freerouting::api::serve(port, seconds) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let Some(design) = flag_value("-de") else {
         eprintln!("error: -de <input.dsn> is required\n\n{USAGE}");
         return ExitCode::FAILURE;
