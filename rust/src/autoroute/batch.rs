@@ -6,7 +6,7 @@
 //! components of a net's connectable items; the closest pair of items
 //! between two components becomes the next connection to route.
 
-use crate::autoroute::maze_search::{maze_route_with_ripup, MazeRouteRequest};
+use crate::autoroute::maze_search::{maze_route_with_engine, maze_route_with_ripup, MazeRouteRequest};
 use crate::board::basic_board::{BasicBoard, ItemId};
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -118,14 +118,22 @@ fn closest_pair(
 /// Routes all incomplete connections of `net_no`. Returns (routed,
 /// failed) counts; stops trying a net after the first failed connection.
 pub fn route_net(board: &mut BasicBoard, net_no: i32, request: &BatchRequest) -> BatchResult {
+    route_net_with_store(board, net_no, request, &mut None)
+}
+
+/// Like [`route_net`], reusing the caller's engine store across calls:
+/// the room graph persists across connections AND nets in plain mode
+/// (Java: maintain_database), synchronized against board changes and
+/// switched between nets before every connection. Ripup-mode requests
+/// bypass the store (they rip and shove foreign items mid-connection).
+pub fn route_net_with_store(
+    board: &mut BasicBoard,
+    net_no: i32,
+    request: &BatchRequest,
+    store: &mut Option<crate::autoroute::engine::AutorouteEngine>,
+) -> BatchResult {
     let mut result = BatchResult::default();
     let mut prev_component_count = usize::MAX;
-    // NOTE: reusing one engine for all connections of a net was tried and
-    // REVERTED: complete_room restrains every new room against ALL
-    // accumulated rooms, so the graph grows quadratically on many-pin
-    // nets — interf_u routed fewer connections in the same time and J2
-    // lost a net (wavefolder also slowed). Reuse needs Java's
-    // SortedRoomNeighbours incremental invalidation first.
     loop {
         if request.deadline.is_some_and(|t| t.limit_exceeded()) {
             result.failed_connections += 1;
@@ -187,7 +195,26 @@ pub fn route_net(board: &mut BasicBoard, net_no: i32, request: &BatchRequest) ->
             ripup_penalty: request.ripup_penalty,
             deadline: request.deadline,
         };
-        if let Some(connection) = maze_route_with_ripup(board, &maze_request) {
+        let connection = if request.ripup_penalty > 0.0 {
+            maze_route_with_ripup(board, &maze_request)
+        } else {
+            let usable = matches!(store, Some(e) if !e.allow_ripup
+                && e.trace_clearance_class == request.clearance_class
+                && e.trace_half_width == request.trace_half_width);
+            if !usable {
+                *store = Some(crate::autoroute::engine::AutorouteEngine::new_with_clearance(
+                    net_no,
+                    false,
+                    request.clearance_class,
+                    request.trace_half_width,
+                ));
+            }
+            let engine = store.as_mut().unwrap();
+            engine.sync_board_changes(board);
+            engine.switch_net(board, net_no);
+            maze_route_with_engine(board, engine, &maze_request)
+        };
+        if let Some(connection) = connection {
             result.routed_connections += 1;
             result.ripped_nets.extend(connection.ripped_nets);
         } else {
@@ -472,6 +499,7 @@ pub fn batch_route_passes_with_time_limit(
             ..*request
         };
         let mut failed_this_pass = 0usize;
+        let mut engine_store: Option<crate::autoroute::engine::AutorouteEngine> = None;
         // in-search ripup is allowed from the second pass on, with the
         // penalty escalating per pass (Java: the ripup costs increase
         // with the pass number, so churny swaps become ever more
@@ -491,7 +519,21 @@ pub fn batch_route_passes_with_time_limit(
                 continue;
             }
             let net_request = request_for_net(board, net_no, &pass_request);
-            let result = route_net_with_ripup(board, net_no, &net_request, ripup_penalty);
+            // cross-net room reuse (Java: maintain_database) is opt-in
+            // for now: on small dense boards the net-switch invalidation
+            // churn outweighs the saved completions (NormalPuzzle 17.4s
+            // vs 13.9s); it recovered display to 30/30 though — tune
+            // before defaulting on
+            let cross_net = std::env::var("FR_CROSS_NET")
+                .map(|v| v != "0")
+                .unwrap_or(false);
+            let result = if ripup_penalty > 0.0 {
+                route_net_with_ripup(board, net_no, &net_request, ripup_penalty)
+            } else if cross_net {
+                route_net_with_store(board, net_no, &net_request, &mut engine_store)
+            } else {
+                route_net(board, net_no, &net_request)
+            };
             total.routed_connections += result.routed_connections;
             failed_this_pass += result.failed_connections;
         }

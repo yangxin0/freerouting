@@ -77,6 +77,26 @@ pub struct BasicBoard {
     plane_items: Vec<ItemId>,
     /// Generator for unique item ids.
     next_id_no: ItemId,
+    /// Cache of item shapes inflated by an integer margin (room
+    /// completion re-inflates the same obstacles for every completed
+    /// room otherwise). Keyed per item id — ids are never reused, so an
+    /// entry only needs clearing when its item is removed.
+    /// Log of changed regions (layer, bbox) since board creation, for
+    /// incremental invalidation of cached expansion rooms (Java:
+    /// additional_update_after_change). Undo/redo/pop bump `change_epoch`
+    /// instead, telling consumers to drop everything.
+    change_log: Vec<(usize, IntBox)>,
+    change_epoch: u64,
+    #[allow(clippy::type_complexity)]
+    inflation_cache: std::cell::RefCell<
+        std::collections::HashMap<
+            ItemId,
+            std::collections::HashMap<
+                i32,
+                std::rc::Rc<Vec<(std::rc::Rc<TileShape>, IntBox, usize)>>,
+            >,
+        >,
+    >,
 }
 
 impl BasicBoard {
@@ -91,7 +111,70 @@ impl BasicBoard {
             tree_entries: BTreeMap::new(),
             plane_items: Vec::new(),
             next_id_no: 0,
+            change_log: Vec::new(),
+            change_epoch: 0,
+            inflation_cache: Default::default(),
         }
+    }
+
+    /// The tile shapes of an item inflated by `margin`, with their
+    /// bounding boxes and layers, cached per (item, margin).
+    #[allow(clippy::type_complexity)]
+    pub fn inflated_shapes(
+        &self,
+        item_id: ItemId,
+        margin: i32,
+    ) -> Option<std::rc::Rc<Vec<(std::rc::Rc<TileShape>, IntBox, usize)>>> {
+        if let Some(hit) = self
+            .inflation_cache
+            .borrow()
+            .get(&item_id)
+            .and_then(|per_margin| per_margin.get(&margin))
+        {
+            return Some(hit.clone());
+        }
+        let item = self.get_item(item_id)?;
+        let entries: Vec<(std::rc::Rc<TileShape>, IntBox, usize)> = item
+            .tile_shapes(&self.padstacks)
+            .iter()
+            .map(|(s, l)| {
+                let inflated = if margin > 0 {
+                    s.offset(margin as f64)
+                } else {
+                    s.clone()
+                };
+                let bbox = inflated.bounding_box();
+                (std::rc::Rc::new(inflated), bbox, *l)
+            })
+            .collect();
+        let rc = std::rc::Rc::new(entries);
+        self.inflation_cache
+            .borrow_mut()
+            .entry(item_id)
+            .or_default()
+            .insert(margin, rc.clone());
+        Some(rc)
+    }
+
+    /// The change log of (layer, bbox) regions touched by item
+    /// insertions/removals; consumers remember their index.
+    pub fn change_log(&self) -> &[(usize, IntBox)] {
+        &self.change_log
+    }
+
+    /// Bumped by undo/redo/pop_snapshot: log consumers must drop all
+    /// cached state when it changes.
+    pub fn change_epoch(&self) -> u64 {
+        self.change_epoch
+    }
+
+    fn log_item_regions(&mut self, item: &Item) {
+        let shapes: Vec<(usize, IntBox)> = item
+            .tile_shapes(&self.padstacks)
+            .iter()
+            .map(|(s, l)| (*l, s.bounding_box()))
+            .collect();
+        self.change_log.extend(shapes);
     }
 
     fn new_id_no(&mut self) -> ItemId {
@@ -116,6 +199,7 @@ impl BasicBoard {
             }
         }
         self.insert_into_search_tree(id, &item);
+        self.log_item_regions(&item);
         self.item_list.insert(id, item);
         id
     }
@@ -216,6 +300,10 @@ impl BasicBoard {
     pub fn remove_item(&mut self, id: ItemId) -> bool {
         if self.item_list.get(&id).is_none() {
             return false;
+        }
+        self.inflation_cache.borrow_mut().remove(&id);
+        if let Some(item) = self.item_list.get(&id).cloned() {
+            self.log_item_regions(&item);
         }
         if let Some(region) = debug_region() {
             if let Some(item) = self.item_list.get(&id) {
@@ -766,6 +854,7 @@ impl BasicBoard {
     /// Removes the top snapshot without restoring it (commits the changes
     /// made since the snapshot into the previous level).
     pub fn pop_snapshot(&mut self) -> bool {
+        self.change_epoch += 1;
         self.item_list.pop_snapshot()
     }
 
@@ -794,6 +883,12 @@ impl BasicBoard {
     }
 
     fn resync_search_tree(&mut self, cancelled: &[Item], restored: &[Item]) {
+        // items may reappear or vanish wholesale: cached room graphs and
+        // inflations cannot track this incrementally
+        self.change_epoch += 1;
+        for item in cancelled.iter().chain(restored) {
+            self.inflation_cache.borrow_mut().remove(&item.base.id_no);
+        }
         // Remove the tree entries of all touched items, then reinsert the
         // ones which are alive again.
         for item in cancelled.iter().chain(restored) {

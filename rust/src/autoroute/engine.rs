@@ -42,7 +42,22 @@ pub struct AutorouteEngine {
     rippable_items: Vec<Vec<ItemId>>,
     /// Rooms whose frontier was already expanded.
     expanded: Vec<bool>,
+    /// Rooms whose completion skipped an own-net or rippable item: they
+    /// cannot survive a net switch (Java: is_net_dependent).
+    net_dependent: Vec<bool>,
+    /// Consumed prefix of the board's change log.
+    seen_log: usize,
+    /// The board change epoch this graph was built against.
+    seen_epoch: u64,
+    /// Uniform grid over the complete rooms, per (cell_x, cell_y, layer):
+    /// the phase-2 restrains, door creation and containment lookups were
+    /// linear scans over all rooms, which made room reuse quadratic on
+    /// many-pin nets (the reason the first reuse attempt was reverted).
+    grid: std::collections::HashMap<(i32, i32, usize), Vec<RoomId>>,
 }
+
+/// Grid cell edge in board units (coarse: cells only prune candidates).
+const GRID_CELL: i32 = 32768;
 
 impl AutorouteEngine {
     pub fn new(net_no: i32) -> Self {
@@ -69,7 +84,150 @@ impl AutorouteEngine {
             target_doors: Vec::new(),
             rippable_items: Vec::new(),
             expanded: Vec::new(),
+            net_dependent: Vec::new(),
+            seen_log: 0,
+            seen_epoch: 0,
+            grid: std::collections::HashMap::new(),
         }
+    }
+
+    /// Drops every room (the graph arenas are rebuilt lazily).
+    pub fn clear_rooms(&mut self) {
+        self.graph = RoomGraph::new();
+        self.complete_rooms.clear();
+        self.target_doors.clear();
+        self.rippable_items.clear();
+        self.expanded.clear();
+        self.net_dependent.clear();
+        self.grid.clear();
+    }
+
+    fn remove_complete_room(&mut self, id: RoomId) {
+        // the surviving neighbours must be re-expandable: the removed
+        // room's space needs fresh rooms, reachable only through them
+        let neighbours: Vec<RoomId> = self
+            .graph
+            .room(id)
+            .doors
+            .clone()
+            .into_iter()
+            .filter_map(|d| self.graph.other_room(d, id))
+            .collect();
+        for n in neighbours {
+            if n < self.expanded.len() {
+                self.expanded[n] = false;
+            }
+        }
+        self.graph.remove_room(id);
+        // grid entries and the complete_rooms slot are filtered lazily by
+        // the alive flag
+    }
+
+    /// Brings the cached room graph up to date with the board: a changed
+    /// epoch (undo/redo/snapshot pop) drops everything; otherwise rooms
+    /// overlapping the regions changed since the last sync are removed
+    /// (Java: additional_update_after_change on every item change).
+    pub fn sync_board_changes(&mut self, board: &BasicBoard) {
+        if board.change_epoch() != self.seen_epoch {
+            self.clear_rooms();
+            self.seen_epoch = board.change_epoch();
+            self.seen_log = board.change_log().len();
+            return;
+        }
+        let log = board.change_log();
+        if self.seen_log >= log.len() {
+            return;
+        }
+        let matrix = &board.rules.clearance_matrix;
+        for (layer, bbox) in log[self.seen_log..].to_vec() {
+            // rooms were restrained by the item inflated by up to
+            // hw + max clearance (+ safety), with miter reach ≤ 2×
+            let slack = 2.0
+                * (self.trace_half_width
+                    + matrix.max_value(layer).max(0)
+                    + crate::rules::clearance_matrix::CLEARANCE_SAFETY_MARGIN)
+                    as f64;
+            let query = bbox.offset(slack);
+            for room in self.rooms_near(query, layer) {
+                if self.graph.room(room).shape.bounding_box().intersects(query) {
+                    self.remove_complete_room(room);
+                }
+            }
+        }
+        self.seen_log = log.len();
+    }
+
+    /// Switches the engine to another net, keeping the net-independent
+    /// rooms (Java: AutorouteEngine.init_connection with
+    /// maintain_database). Net-dependent rooms and rooms holding target
+    /// doors are dropped, as are rooms overlapping the new net's items
+    /// (which they treat as obstacles — the new net must reach its pads).
+    pub fn switch_net(&mut self, board: &BasicBoard, net_no: i32) {
+        if net_no == self.net_no {
+            return;
+        }
+        for id in 0..self.graph.room_count() {
+            if !self.graph.room(id).alive {
+                continue;
+            }
+            if self.net_dependent[id] || !self.target_doors[id].is_empty() {
+                self.remove_complete_room(id);
+            }
+        }
+        let matrix = &board.rules.clearance_matrix;
+        let net_items: Vec<ItemId> = board
+            .items()
+            .filter(|(_, it)| it.base.contains_net(net_no))
+            .map(|(id, _)| *id)
+            .collect();
+        for item_id in net_items {
+            let Some(item) = board.get_item(item_id) else { continue };
+            let regions: Vec<(usize, crate::geometry::planar::IntBox)> = item
+                .tile_shapes(&board.padstacks)
+                .iter()
+                .map(|(s, l)| (*l, s.bounding_box()))
+                .collect();
+            for (layer, bbox) in regions {
+                let slack = 2.0
+                    * (self.trace_half_width
+                        + matrix.max_value(layer).max(0)
+                        + crate::rules::clearance_matrix::CLEARANCE_SAFETY_MARGIN)
+                        as f64;
+                let query = bbox.offset(slack);
+                for room in self.rooms_near(query, layer) {
+                    if self.graph.room(room).shape.bounding_box().intersects(query) {
+                        self.remove_complete_room(room);
+                    }
+                }
+            }
+        }
+        self.net_no = net_no;
+    }
+
+    fn grid_cells(bbox: crate::geometry::planar::IntBox) -> impl Iterator<Item = (i32, i32)> {
+        let (x0, x1) = (bbox.ll.x.div_euclid(GRID_CELL), bbox.ur.x.div_euclid(GRID_CELL));
+        let (y0, y1) = (bbox.ll.y.div_euclid(GRID_CELL), bbox.ur.y.div_euclid(GRID_CELL));
+        (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
+    }
+
+    fn grid_insert(&mut self, room_id: RoomId, bbox: crate::geometry::planar::IntBox, layer: usize) {
+        for (x, y) in Self::grid_cells(bbox) {
+            self.grid.entry((x, y, layer)).or_default().push(room_id);
+        }
+    }
+
+    /// The complete rooms whose grid cells overlap `bbox` on `layer`
+    /// (a superset of the exactly overlapping rooms), deduplicated.
+    fn rooms_near(&self, bbox: crate::geometry::planar::IntBox, layer: usize) -> Vec<RoomId> {
+        let mut out: Vec<RoomId> = Vec::new();
+        for (x, y) in Self::grid_cells(bbox) {
+            if let Some(v) = self.grid.get(&(x, y, layer)) {
+                out.extend(v.iter().copied().filter(|&r| self.graph.room(r).alive));
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     /// The rippable foreign items overlapping a room.
@@ -91,7 +249,7 @@ impl AutorouteEngine {
             for (index, (shape, layer)) in
                 item.tile_shapes(&board.padstacks).iter().enumerate()
             {
-                for &room in &self.complete_rooms {
+                for room in self.rooms_near(shape.bounding_box(), *layer) {
                     if self.graph.room(room).layer == *layer
                         && shape.intersects(&self.graph.room(room).shape)
                     {
@@ -119,18 +277,28 @@ impl AutorouteEngine {
     /// own-net items. Returns the new room ids.
     pub fn complete_room(&mut self, board: &BasicBoard, room: IncompleteRoom) -> Vec<RoomId> {
         // restrain against the board obstacles
-        let mut pieces = crate::autoroute::room_completion::complete_shape_with_ripup(
-            board,
-            &room,
-            self.net_no,
-            None,
-            self.allow_ripup,
-            self.trace_clearance_class,
-            self.trace_half_width,
-        );
+        let (mut pieces, net_dependent) =
+            crate::autoroute::room_completion::complete_shape_tracked(
+                board,
+                &room,
+                self.net_no,
+                None,
+                self.allow_ripup,
+                self.trace_clearance_class,
+                self.trace_half_width,
+            );
         // restrain against the existing complete rooms (they must not
-        // overlap); bounding boxes prune the exact overlap tests
-        for &existing in &self.complete_rooms {
+        // overlap); the grid prunes to nearby rooms, bounding boxes prune
+        // the exact overlap tests
+        let query_bbox = pieces
+            .iter()
+            .map(|p| p.shape.bounding_box())
+            .reduce(|a, b| a.union(b));
+        let near = match query_bbox {
+            Some(bb) => self.rooms_near(bb, room.layer),
+            None => Vec::new(),
+        };
+        for existing in near {
             if self.graph.room(existing).layer != room.layer {
                 continue;
             }
@@ -160,10 +328,10 @@ impl AutorouteEngine {
             let room_id =
                 self.graph
                     .add_room(piece.shape.clone(), piece.layer, RoomKind::CompleteFreeSpace);
-            // doors to touching complete rooms (bounding boxes prune the
-            // exact touch tests)
+            // doors to touching complete rooms (grid + bounding boxes
+            // prune the exact touch tests)
             let piece_bbox = piece.shape.bounding_box();
-            for &existing in &self.complete_rooms {
+            for existing in self.rooms_near(piece_bbox, piece.layer) {
                 if self.graph.room(existing).layer != piece.layer {
                     continue;
                 }
@@ -207,9 +375,11 @@ impl AutorouteEngine {
                 }
             }
             self.complete_rooms.push(room_id);
+            self.grid_insert(room_id, piece_bbox, piece.layer);
             self.target_doors.push(targets);
             self.rippable_items.push(rippables);
             self.expanded.push(false);
+            self.net_dependent.push(net_dependent || !self.target_doors[room_id].is_empty());
             debug_assert_eq!(self.target_doors.len(), self.graph.room_count());
             new_rooms.push(room_id);
         }
@@ -254,10 +424,10 @@ impl AutorouteEngine {
         board: &BasicBoard,
     ) -> Vec<RoomId> {
         let p = crate::geometry::planar::Point::Int(point);
+        let point_box = crate::geometry::planar::IntBox::new(point, point);
         let existing: Vec<RoomId> = self
-            .complete_rooms
-            .iter()
-            .copied()
+            .rooms_near(point_box, layer)
+            .into_iter()
             .filter(|&r| {
                 self.graph.room(r).layer == layer && self.graph.room(r).shape.contains(&p)
             })

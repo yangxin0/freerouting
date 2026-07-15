@@ -45,10 +45,37 @@ pub fn complete_shape_with_ripup(
     trace_clearance_class: usize,
     trace_half_width: i32,
 ) -> Vec<IncompleteRoom> {
+    complete_shape_tracked(
+        board,
+        room,
+        net_no,
+        ignore_item,
+        ignore_rippable,
+        trace_clearance_class,
+        trace_half_width,
+    )
+    .0
+}
+
+/// Like [`complete_shape_with_ripup`], additionally reporting whether the
+/// completion was NET-DEPENDENT: whether it skipped an own-net (or
+/// rippable) item that would restrain the room for another net. Such
+/// rooms cannot be reused after a net switch (Java:
+/// `CompleteFreeSpaceExpansionRoom.is_net_dependent`).
+pub fn complete_shape_tracked(
+    board: &BasicBoard,
+    room: &IncompleteRoom,
+    net_no: i32,
+    ignore_item: Option<ItemId>,
+    ignore_rippable: bool,
+    trace_clearance_class: usize,
+    trace_half_width: i32,
+) -> (Vec<IncompleteRoom>, bool) {
+    let mut net_dependent = false;
     let board_box = board.bounding_box().offset(1000.0);
     let start_shape = TileShape::Box(board_box).intersection_with_simplify(&room.shape);
     if start_shape.dimension() != 2 {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     let mut result = vec![IncompleteRoom {
         shape: start_shape.clone(),
@@ -80,7 +107,7 @@ pub fn complete_shape_with_ripup(
     // offsetting the start simplex itself) would be wasted work
     let start_bbox = start_shape.bounding_box();
     let query_shape = TileShape::Box(start_bbox.offset(2.0 * max_margin));
-    let mut obstacles: Vec<(ItemId, TileShape)> = Vec::new();
+    let mut obstacles: Vec<(ItemId, std::rc::Rc<TileShape>)> = Vec::new();
     for item_id in board.overlapping_items_coarse(&query_shape, Some(room.layer)) {
         if Some(item_id) == ignore_item {
             continue;
@@ -90,6 +117,7 @@ pub fn complete_shape_with_ripup(
         };
         // is_trace_obstacle: items of a foreign net block the room
         if item.base.contains_net(net_no) {
+            net_dependent = true;
             continue;
         }
         // foreign conduction areas (power planes) do not restrain: they
@@ -100,6 +128,7 @@ pub fn complete_shape_with_ripup(
             }
         }
         if ignore_rippable && is_rippable(item, net_no) {
+            net_dependent = true;
             continue;
         }
         // with the safety margin (Java: add_safety_margin) — the room
@@ -111,34 +140,20 @@ pub fn complete_shape_with_ripup(
             room.layer,
             true,
         );
-        for (shape, layer) in item.tile_shapes(&board.padstacks) {
-            if *layer == room.layer {
-                // trace half width + full clearance: the maze may run the
-                // centerline anywhere inside a room (including on its
-                // border), so correctness requires the whole margin in
-                // the room geometry. (cl/2-only inflation left copper
-                // gaps of cl/2 - hw — found by the DRC self-check.)
-                let margin = trace_half_width as f64 + clearance as f64;
-                // cheap precut on the CACHED uninflated bbox, grown by the
-                // worst-case miter reach (2·margin covers the √2 corner
-                // extension), before paying for the offset + fresh bbox
-                if !shape
-                    .bounding_box()
-                    .offset(2.0 * margin)
-                    .intersects(start_bbox)
-                {
-                    continue;
-                }
-                let shape = if margin > 0.0 {
-                    shape.offset(margin)
-                } else {
-                    shape.clone()
-                };
-                // early cut: inflated shape can't restrain the room
-                if !shape.bounding_box().intersects(start_bbox) {
-                    continue;
-                }
-                obstacles.push((item_id, shape));
+        // trace half width + full clearance: the maze may run the
+        // centerline anywhere inside a room (including on its border), so
+        // correctness requires the whole margin in the room geometry.
+        // (cl/2-only inflation left copper gaps of cl/2 - hw — found by
+        // the DRC self-check.) Inflations are cached on the board per
+        // (item, margin): completion re-visits the same obstacles for
+        // every room it completes.
+        let margin = (trace_half_width + clearance).max(0);
+        let Some(inflated) = board.inflated_shapes(item_id, margin) else {
+            continue;
+        };
+        for (shape, bbox, layer) in inflated.iter() {
+            if *layer == room.layer && bbox.intersects(start_bbox) {
+                obstacles.push((item_id, shape.clone()));
             }
         }
     }
@@ -212,7 +227,7 @@ pub fn complete_shape_with_ripup(
             }
         }
     }
-    result
+    (result, net_dependent)
 }
 
 /// [`complete_shape_with_ripup`] without ripup, with the default trace

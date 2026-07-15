@@ -86,6 +86,9 @@ pub struct ExpansionRoom {
     pub kind: RoomKind,
     /// The doors to neighbour rooms.
     pub doors: Vec<DoorId>,
+    /// False after the room was invalidated (net switch or board change);
+    /// dead rooms are skipped by every engine lookup and expansion.
+    pub alive: bool,
 }
 
 /// A common edge between two expansion rooms.
@@ -122,8 +125,22 @@ impl RoomGraph {
             layer,
             kind,
             doors: Vec::new(),
+            alive: true,
         });
         self.rooms.len() - 1
+    }
+
+    /// Marks a room dead and detaches its doors from both sides (the
+    /// neighbours keep routing through their remaining doors).
+    pub fn remove_room(&mut self, id: RoomId) {
+        self.rooms[id].alive = false;
+        let doors = std::mem::take(&mut self.rooms[id].doors);
+        for door in doors {
+            let other = self.other_room(door, id);
+            if let Some(other) = other {
+                self.rooms[other].doors.retain(|&d| d != door);
+            }
+        }
     }
 
     pub fn room(&self, id: RoomId) -> &ExpansionRoom {

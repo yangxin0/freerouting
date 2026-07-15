@@ -258,6 +258,30 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 141): ROOM PERSISTENCE INFRASTRUCTURE (Java:
+  maintain_database) — the full machinery is in: rooms carry
+  alive/net_dependent flags, RoomGraph::remove_room detaches doors
+  and re-opens neighbours for expansion, the engine has a uniform
+  grid over complete rooms (fixes the quadratic phase-2 scans that
+  killed the first reuse attempt), sync_board_changes consumes the
+  board's new (layer, bbox) change log (undo/redo/pop bump a change
+  epoch → full drop), switch_net drops net-dependent rooms and rooms
+  overlapping the new net's items. Board-level inflation cache added
+  (per item id × margin; ids never reused). complete_shape_tracked
+  reports net-dependence. RESULTS SO FAR: per-net reuse (default) is
+  neutral; CROSS-net reuse (FR_CROSS_NET=1) is 25% SLOWER on
+  NormalPuzzle (net-switch invalidation churn: full-board item scan
+  per switch + rooms near every net item dropped) but recovered
+  display to 30/30 — left OPT-IN until tuned. Profile truth:
+  BinaryHeap::pop is ~50% of NormalPuzzle regardless (the search
+  itself, not completion); completion cost (corner_approx/offset)
+  did drop with the caches. Java-vs-Rust gap is NOT primarily
+  completions on small boards — need per-phase comparison vs Java
+  (their maze: ObstacleExpansionRooms, DrillPageArray, sorted
+  neighbours). Java fleet baseline attempt was CONTAMINATED (jars
+  route on top of the fixtures' pre-routed wiring — strip it first);
+  partial data: coldfire Java 1.9 = 243/440 connections in 25 s with
+  27 violations.
 - 2026-07-15 (iter 140): NEW DIRECTIVE + JAVA BASELINE. User:
   "Fix the gaps with java then align with performance and
   correctness with java." The loop's goal is now closing the Java
