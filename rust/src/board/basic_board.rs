@@ -65,6 +65,9 @@ pub struct BasicBoard {
     /// Board units per file coordinate unit of the imported design
     /// (DSN `resolution`); session exports must use the same factor.
     pub resolution: i32,
+    /// The imported DSN document without its wiring section (for DSN
+    /// export: the router only changes the wiring).
+    pub dsn_source: Option<String>,
     /// The undoable item database.
     item_list: UndoableObjects<ItemId, Item>,
     /// The spatial index over all item shapes.
@@ -106,6 +109,7 @@ impl BasicBoard {
             rules,
             padstacks,
             resolution: 10,
+            dsn_source: None,
             item_list: UndoableObjects::new(),
             search_tree: MinAreaTree::new(),
             tree_entries: BTreeMap::new(),

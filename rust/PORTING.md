@@ -338,7 +338,12 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   [ ] BatchOptimizerMultiThreaded (parallel optimizer)
   [ ] Distinct-net shove stacking (ShapeTraceEntries full semantics)
   I/O & TOOLING:
-  [ ] DSN export (specctra writer)
+  [x] DSN export (iter 163: io/dsn_export.rs — the imported document
+      is retained without its wiring (board.dsn_source) and re-emitted
+      with the wiring regenerated from the routed items (wire paths +
+      route vias with net/type tags); CLI --export-dsn. KNOWN ISSUE:
+      round-trip connectivity drift — some re-imported wires miss
+      their pad contacts (endpoint rounding), chase next.)
   [ ] SES import
   [ ] KiCad direct file I/O
   [x] DRC report (iter 162: src/drc.rs — DesignRulesChecker port:

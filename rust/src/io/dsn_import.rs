@@ -42,6 +42,23 @@ struct ImagePin {
 /// Imports a DSN file into a board: layers, default rules, padstacks,
 /// component pins (as drill items carrying their nets) and nets.
 pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
+    let mut board = import_dsn_inner(content)?;
+    // retain the document without its wiring for DSN export (the router
+    // only changes the wiring section)
+    let stripped = match content.find("(wiring") {
+        Some(pos) => {
+            let prefix = &content[..pos];
+            let trimmed = prefix.trim_end();
+            format!("{}
+)", trimmed.strip_suffix(')').unwrap_or(trimmed))
+        }
+        None => content.to_string(),
+    };
+    board.dsn_source = Some(stripped);
+    Ok(board)
+}
+
+fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     let pcb = parse_dsn(content).map_err(|e| err(e.to_string()))?;
     if !pcb.name().is_some_and(|n| n.eq_ignore_ascii_case("pcb")) {
         return Err(err("root node is not (pcb ...)"));

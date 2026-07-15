@@ -25,6 +25,7 @@ Options:
   --fanout           fan out SMD pins to vias before routing
   --angle <mode>     trace angle restriction: none, 45, 90 (default 45)
   --drc-report <f>   write a KiCad-format DRC report (JSON) after routing
+  --export-dsn <f>   write the routed design as a Specctra DSN file
   -h, --help         show this help";
 
 fn main() -> ExitCode {
@@ -164,6 +165,15 @@ fn main() -> ExitCode {
                 report.unconnected.len()
             ),
             Err(e) => eprintln!("error: cannot write {report_path}: {e}"),
+        }
+    }
+    if let Some(dsn_path) = flag_value("--export-dsn") {
+        match freerouting::io::export_dsn(&board) {
+            Some(text) => match std::fs::write(dsn_path, &text) {
+                Ok(()) => println!("design written to {dsn_path} ({} bytes)", text.len()),
+                Err(e) => eprintln!("error: cannot write {dsn_path}: {e}"),
+            },
+            None => eprintln!("error: no DSN source retained; cannot export"),
         }
     }
     let design_name = std::path::Path::new(design)
