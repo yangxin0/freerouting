@@ -70,12 +70,16 @@ pub fn complete_shape_tracked(
     ignore_rippable: bool,
     trace_clearance_class: usize,
     trace_half_width: i32,
-) -> (Vec<IncompleteRoom>, bool) {
-    let mut net_dependent = false;
+) -> (Vec<IncompleteRoom>, Vec<std::rc::Rc<TileShape>>) {
+    // inflated shapes of skipped own-net/rippable items on this layer:
+    // a piece is net-dependent ONLY if one of these actually overlaps it
+    // (Java: is_net_dependent = the room would differ for another net);
+    // flagging on any skipped query hit killed ~90% of rooms per switch
+    let mut skipped_shapes: Vec<std::rc::Rc<TileShape>> = Vec::new();
     let board_box = board.bounding_box().offset(1000.0);
     let start_shape = TileShape::Box(board_box).intersection_with_simplify(&room.shape);
     if start_shape.dimension() != 2 {
-        return (Vec::new(), false);
+        return (Vec::new(), Vec::new());
     }
     let mut result = vec![IncompleteRoom {
         shape: start_shape.clone(),
@@ -116,8 +120,21 @@ pub fn complete_shape_tracked(
             continue;
         };
         // is_trace_obstacle: items of a foreign net block the room
-        if item.base.contains_net(net_no) {
-            net_dependent = true;
+        if item.base.contains_net(net_no) || (ignore_rippable && is_rippable(item, net_no)) {
+            let clearance = matrix.get_value(
+                item.base.clearance_class,
+                trace_clearance_class,
+                room.layer,
+                true,
+            );
+            let margin = (trace_half_width + clearance).max(0);
+            if let Some(inflated) = board.inflated_shapes(item_id, margin) {
+                for (shape, bbox, layer) in inflated.iter() {
+                    if *layer == room.layer && bbox.intersects(start_bbox) {
+                        skipped_shapes.push(shape.clone());
+                    }
+                }
+            }
             continue;
         }
         // foreign conduction areas (power planes) do not restrain: they
@@ -127,10 +144,7 @@ pub fn complete_shape_tracked(
                 continue;
             }
         }
-        if ignore_rippable && is_rippable(item, net_no) {
-            net_dependent = true;
-            continue;
-        }
+
         // with the safety margin (Java: add_safety_margin) — the room
         // guarantee otherwise EQUALS the requirement exactly, and corner
         // rounding (≤1 unit) tips boundary-riding paths into violation
@@ -222,7 +236,7 @@ pub fn complete_shape_tracked(
             }
         }
     }
-    (result, net_dependent)
+    (result, skipped_shapes)
 }
 
 /// [`complete_shape_with_ripup`] without ripup, with the default trace

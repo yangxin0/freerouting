@@ -261,8 +261,18 @@ pub fn route_net_with_ripup(
         return result;
     }
     board.generate_snapshot();
+    // cap the whole transaction (retry + victim recovery) to a per-net
+    // budget: a single hard net otherwise burns a whole pass's wall
+    // clock in ripup-mode completions (8088sbc: 45 s for 3 nets)
+    let budget_ms = request
+        .deadline
+        .map(|t| t.remaining_ms())
+        .unwrap_or(u64::MAX)
+        .min(10_000);
+    let sub_deadline = crate::datastructures::TimeLimit::new(budget_ms);
     let rip_request = BatchRequest {
         ripup_penalty,
+        deadline: Some(sub_deadline),
         ..*request
     };
     let retry = route_net(board, net_no, &rip_request);
@@ -279,7 +289,9 @@ pub fn route_net_with_ripup(
         // benchmarked at iterations 55-58 and consistently regressed
         // completion by time starvation: 161/173 vs 166/173.)
         for &ripped in &retry.ripped_nets {
-            if request.deadline.is_some_and(|t| t.limit_exceeded()) {
+            if request.deadline.is_some_and(|t| t.limit_exceeded())
+                || sub_deadline.limit_exceeded()
+            {
                 // half-done victim recovery must not commit
                 broken_victims = usize::MAX;
                 break;
@@ -287,7 +299,11 @@ pub fn route_net_with_ripup(
             if board.net_is_completely_connected(ripped) {
                 continue;
             }
-            let r = route_net(board, ripped, request);
+            let victim_request = BatchRequest {
+                deadline: Some(sub_deadline),
+                ..*request
+            };
+            let r = route_net(board, ripped, &victim_request);
             extra_routed += r.routed_connections;
             if r.failed_connections > 0 || !board.net_is_completely_connected(ripped) {
                 broken_victims += 1;
@@ -499,6 +515,7 @@ pub fn batch_route_passes_with_time_limit(
         t
     });
     for pass in 0..passes.max(1) {
+        let pass_start = std::time::Instant::now();
         let pass_request = BatchRequest {
             max_expansions: budget,
             deadline: pass_limit.or(request.deadline),
@@ -542,6 +559,13 @@ pub fn batch_route_passes_with_time_limit(
             };
             total.routed_connections += result.routed_connections;
             failed_this_pass += result.failed_connections;
+        }
+        if crate::debug::stats() {
+            eprintln!(
+                "PASS {pass} done in {:.1?}: {} failed (penalty {ripup_penalty})",
+                pass_start.elapsed(),
+                failed_this_pass
+            );
         }
         if out_of_time {
             // count the remaining incomplete nets as failures and stop
@@ -589,6 +613,7 @@ pub fn batch_route_passes_with_time_limit(
         // settles it
         max_dry = incomplete.len().min(3);
         round += 1;
+        let round_start = std::time::Instant::now();
         let rot = round % incomplete.len();
         incomplete.rotate_left(rot);
         let complete_before = net_nos.len() - incomplete.len();
@@ -628,6 +653,14 @@ pub fn batch_route_passes_with_time_limit(
             .iter()
             .filter(|&&n| board.net_is_completely_connected(n))
             .count();
+        if crate::debug::stats() {
+            eprintln!(
+                "RESTART round {round} in {:.1?}: complete {} -> {}",
+                round_start.elapsed(),
+                complete_before,
+                complete_after
+            );
+        }
         if complete_after > complete_before {
             board.pop_snapshot();
             total.routed_connections += restart.routed_connections;

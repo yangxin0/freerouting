@@ -50,6 +50,24 @@ pub fn region() -> Option<IntBox> {
     })
 }
 
+/// FR_STATS: phase timing + search statistics.
+pub fn stats() -> bool {
+    static C: OnceLock<bool> = OnceLock::new();
+    flag(&C, "FR_STATS")
+}
+
+/// FR_ROOM_WINDOW: clip expansion seeds to this margin (board units)
+/// around the contained edge; 0 = unbounded half-planes (default 200000).
+pub fn room_window() -> i32 {
+    static C: OnceLock<i32> = OnceLock::new();
+    *C.get_or_init(|| {
+        std::env::var("FR_ROOM_WINDOW")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200_000)
+    })
+}
+
 /// FR_ASTAR_WEIGHT: multiplier on the A* estimate (default 1.0).
 pub fn astar_weight() -> f64 {
     static C: OnceLock<f64> = OnceLock::new();

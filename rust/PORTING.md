@@ -258,6 +258,26 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 147): BIG-BOARD THROUGHPUT ROUND 1 — 8088sbc
+  pass 0: 21.9 s → 7.0 s. Work accounting (FR_STATS + new per-phase
+  timing): 188k room completions for 420 searches — every frontier
+  expansion seeded a raw HALF-PLANE, so each completion queried and
+  restrained half the board's obstacles. Expansion seeds are now
+  CLIPPED to a window around the contained edge (FR_ROOM_WINDOW,
+  default 200k units; 100k = fastest pass 0 at 7 s with a few more
+  pass-0 failures for later passes to fix; Java bounds rooms via
+  divide_large_room/drill pages). Also: per-net ripup budget
+  (transaction capped at min(10 s, remaining) — a single hard net
+  burned 45 s of a pass before), TimeLimit::remaining_ms, per-piece
+  NET DEPENDENCE (only when a skipped own-net/rippable item's
+  inflation actually overlaps the piece — the old any-skip flag
+  killed ~90% of rooms per net switch; survival tripled, though
+  cross-net reuse still doesn't pay on dense boards where every
+  route's change log shreds the cache). Small fleet: all zeros hold,
+  NormalPuzzle 3.07 s. Remaining 8088sbc gap vs Java (8 s total):
+  ripup passes still burn 10 s per hopeless net and the restart
+  36 s/round; GND (giant power net) is the persistent holdout —
+  likely needs fanout-style multi-target routing.
 - 2026-07-15 (iter 146): FLEET-WIDE ZERO — every small board audits
   at 0 violations: pic 111/111, display 29/30, wavefolder 31/31,
   J2 24/24, NormalPuzzle 72/72. The pic "leak" was resolved by an

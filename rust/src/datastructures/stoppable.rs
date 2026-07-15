@@ -29,6 +29,13 @@ impl TimeLimit {
         self.start.elapsed() >= self.limit
     }
 
+    /// Milliseconds until the limit is exceeded (0 when already over).
+    pub fn remaining_ms(&self) -> u64 {
+        self.limit
+            .saturating_sub(self.start.elapsed())
+            .as_millis() as u64
+    }
+
     /// Multiplies the time limit by `factor` (Java: `multiply`).
     pub fn multiply(&mut self, factor: f64) {
         if factor <= 0.0 {

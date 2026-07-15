@@ -222,6 +222,16 @@ impl AutorouteEngine {
                 }
             }
         }
+        if crate::debug::stats() {
+            let alive = (0..self.graph.room_count())
+                .filter(|&r| self.graph.room(r).alive)
+                .count();
+            eprintln!(
+                "SWITCH {} -> {net_no}: {alive} rooms survive of {}",
+                self.net_no,
+                self.graph.room_count()
+            );
+        }
         self.net_no = net_no;
     }
 
@@ -298,7 +308,7 @@ impl AutorouteEngine {
     /// own-net items. Returns the new room ids.
     pub fn complete_room(&mut self, board: &BasicBoard, room: IncompleteRoom) -> Vec<RoomId> {
         // restrain against the board obstacles
-        let (mut pieces, net_dependent) =
+        let (mut pieces, skipped_shapes) =
             crate::autoroute::room_completion::complete_shape_tracked(
                 board,
                 &room,
@@ -397,6 +407,13 @@ impl AutorouteEngine {
             }
             crate::autoroute::maze_search::STATS
                 .with(|s| s.borrow_mut().rooms_completed += 1);
+            // net-dependent ONLY if a skipped own-net/rippable item's
+            // inflation actually overlaps this piece (its shape would
+            // differ for another net)
+            let net_dependent = skipped_shapes.iter().any(|sh| {
+                sh.bounding_box().intersects(piece_bbox)
+                    && sh.intersection(&piece.shape).dimension() >= 2
+            });
             if crate::debug::maze() {
                 eprintln!(
                     "NEWROOM {room_id} net {} layer {} nd {} bbox {:?}",
@@ -437,8 +454,25 @@ impl AutorouteEngine {
             if contained.is_empty() {
                 continue;
             }
+            // clip the seed to a window around the contained edge: a raw
+            // half-plane start makes every completion query and restrain
+            // half the board's obstacles (8088sbc pass 0 spent its time
+            // there); bounded rooms trade a few more expansions for far
+            // cheaper completions (Java bounds rooms via divide_large_room
+            // and the drill-page granularity)
+            let window = crate::debug::room_window();
+            let clipped = if window > 0 {
+                new_room_shape.intersection_with_simplify(&TileShape::Box(
+                    contained.bounding_box().offset(window as f64),
+                ))
+            } else {
+                new_room_shape
+            };
+            if clipped.dimension() != 2 {
+                continue;
+            }
             let incomplete = IncompleteRoom {
-                shape: new_room_shape,
+                shape: clipped,
                 layer,
                 contained_shape: contained,
             };
