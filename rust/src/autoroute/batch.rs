@@ -35,7 +35,7 @@ pub struct BatchRequest {
 }
 
 /// The connected components of the connectable items of `net_no`.
-fn net_components(board: &BasicBoard, net_no: i32) -> Vec<Vec<ItemId>> {
+pub fn net_components(board: &BasicBoard, net_no: i32) -> Vec<Vec<ItemId>> {
     let net_items: Vec<ItemId> = board
         .items()
         .filter(|(_, item)| item.base.contains_net(net_no) && item.is_connectable())

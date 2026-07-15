@@ -31,6 +31,9 @@ Options:
   --rules <f>        apply a .rules file before routing
   --export-rules <f> write the design rules to a .rules file
   --api-server <p>   run the REST API server on port <p> (no routing)
+  --ratsnest <f>     write the unconnected airlines as JSON after routing
+  --profile <f>      apply a JSON router-settings profile (maxPasses,
+                     viaCosts, timeLimitSeconds, angleRestriction, threads)
   -h, --help         show this help";
 
 fn main() -> ExitCode {
@@ -66,11 +69,36 @@ fn main() -> ExitCode {
             format!("{stem}.ses")
         });
     // like the Java jar, passes are effectively unlimited by default and
-    // the wall clock (-tl) is the real bound
-    let max_passes: usize = flag_value("-mp").and_then(|v| v.parse().ok()).unwrap_or(99);
-    let limit_s: u64 = flag_value("-tl").and_then(|v| v.parse().ok()).unwrap_or(300);
+    // the wall clock (-tl) is the real bound; a JSON profile (Java:
+    // RouterSettings) provides defaults that explicit flags override
+    let profile = flag_value("--profile")
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| freerouting::io::json::parse_json(&t).ok());
+    let prof_num = |key: &str| -> Option<f64> {
+        profile.as_ref().and_then(|p| p.get(key)).and_then(|v| v.as_f64())
+    };
+    let prof_str = |key: &str| -> Option<String> {
+        profile
+            .as_ref()
+            .and_then(|p| p.get(key))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    let max_passes: usize = flag_value("-mp")
+        .and_then(|v| v.parse().ok())
+        .or(prof_num("maxPasses").map(|v| v as usize))
+        .unwrap_or(99);
+    let limit_s: u64 = flag_value("-tl")
+        .and_then(|v| v.parse().ok())
+        .or(prof_num("timeLimitSeconds").map(|v| v as u64))
+        .unwrap_or(300);
     let strip_wiring = args.iter().any(|a| a == "--strip-wiring");
-    let angle_mode = flag_value("--angle").unwrap_or("45").to_string();
+    let angle_mode = flag_value("--angle")
+        .map(str::to_string)
+        .or(prof_str("angleRestriction"))
+        .unwrap_or_else(|| "45".to_string());
+    let profile_via_costs = prof_num("viaCosts");
+    let profile_threads = prof_num("threads").map(|v| v as usize);
 
     let mut content = match std::fs::read_to_string(design) {
         Ok(c) => c,
@@ -156,7 +184,7 @@ fn main() -> ExitCode {
         trace_half_width: board.rules.get_min_trace_half_width().max(500),
         clearance_class: 1,
         via_padstack,
-        via_cost: 50_000.0,
+        via_cost: profile_via_costs.unwrap_or(50_000.0),
         max_expansions: 100_000,
         ripup_penalty: 0.0,
         deadline: None,
@@ -189,7 +217,10 @@ fn main() -> ExitCode {
     );
 
     let opt_limit = TimeLimit::new(30_000);
-    let opt_threads: usize = flag_value("--threads").and_then(|v| v.parse().ok()).unwrap_or(1);
+    let opt_threads: usize = flag_value("--threads")
+        .and_then(|v| v.parse().ok())
+        .or(profile_threads)
+        .unwrap_or(1);
     let improved = freerouting::autoroute::optimize_route_multithreaded(
         &mut board,
         &request,
@@ -238,6 +269,13 @@ fn main() -> ExitCode {
         match std::fs::write(rules_out, &text) {
             Ok(()) => println!("rules written to {rules_out}"),
             Err(e) => eprintln!("error: cannot write {rules_out}: {e}"),
+        }
+    }
+    if let Some(rn_path) = flag_value("--ratsnest") {
+        let json = freerouting::ratsnest::ratsnest_json(&board);
+        match std::fs::write(rn_path, &json) {
+            Ok(()) => println!("ratsnest written to {rn_path}"),
+            Err(e) => eprintln!("error: cannot write {rn_path}: {e}"),
         }
     }
     let design_name = std::path::Path::new(design)

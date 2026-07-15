@@ -335,7 +335,6 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       15.0 s/5-failed — SRN better everywhere. J2's last net (GND)
       flaps in BOTH modes since the via-shove change — order
       sensitivity, tracked separately.)
-  [~] (superseded note)
       — Neighbour records with exact first/last corners, the
       counterclockwise comparator (tolerance 1), touching_sides /
       equals_corner classification for dim-1 and dim-0 touches, and
@@ -418,7 +417,9 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       v1 schema exactly like Java's DrcReport (coordinate_units mm,
       violations with per-item positions, unconnected_items,
       schematic_parity). CLI --drc-report <file>.)
-  [ ] RatsNest export (non-GUI part)
+  [x] RatsNest export (iter 176: src/ratsnest.rs — minimum-spanning
+      airlines over unconnected component centers per incomplete net,
+      JSON output; CLI --ratsnest)
   CORE/INFRA:
   [x] Scoring (iter 165: src/scoring.rs — BoardStatistics collection
       (incomplete/maximum nets, violations via drc, bends, vias,
@@ -427,8 +428,11 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       normalized 0..1000 with the no-connection guard. CLI logs
       "score: 999.99 (...)" like the Java pass log — NormalPuzzle
       999.99, J2 999.97.)
-  [ ] RoutingJob/Session/RoutingStage job model
-  [ ] RouterSettings/profiles (settings/ package, non-GUI)
+  [x] RoutingJob/JobState model (landed with the API server,
+      iter 170)
+  [x] RouterSettings profiles (iter 176: --profile file.json —
+      maxPasses, viaCosts, timeLimitSeconds, angleRestriction,
+      threads as defaults under explicit flags)
   [x] API server (iter 170: src/api.rs — the v1 job API on a
       dependency-free HTTP/1.1 server: POST /v1/jobs/enqueue,
       POST /{id}/input, PUT /{id}/start (background routing thread),
