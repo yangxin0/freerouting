@@ -226,6 +226,7 @@ pub fn route_net_with_store(
             dest_item: dest,
             start_items: if use_sets { start_component } else { Vec::new() },
             dest_items: if use_sets { dest_component } else { Vec::new() },
+            is_fanout: false,
             trace_half_width: request.trace_half_width,
             clearance_class: request.clearance_class,
             via_padstack: request.via_padstack,

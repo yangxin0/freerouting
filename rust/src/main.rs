@@ -22,6 +22,7 @@ Options:
   -mp <n>            maximum number of ripup passes (default 99)
   -tl <seconds>      wall-clock time limit for routing (default 300)
   --strip-wiring     remove the pre-routed wiring and route from scratch
+  --fanout           fan out SMD pins to vias before routing
   -h, --help         show this help";
 
 fn main() -> ExitCode {
@@ -110,6 +111,10 @@ fn main() -> ExitCode {
 
     let t1 = Instant::now();
     let time_limit = TimeLimit::new(limit_s.saturating_mul(1000));
+    if args.iter().any(|a| a == "--fanout") {
+        let fanned = freerouting::autoroute::fanout_board(&mut board, &request, 20, Some(&time_limit));
+        println!("fanout: {fanned} pins fanned out");
+    }
     let result =
         batch_route_passes_with_time_limit(&mut board, &request, max_passes, Some(&time_limit));
     let net_count = board.rules.nets.max_net_no() as usize;

@@ -262,7 +262,9 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   FIRST, performance alignment second; ALL routing algorithms must be
   faithful ports, not approximations. FEATURE CHECKLIST (non-GUI):
   ROUTING ALGORITHMS (priority order):
-  [ ] BatchFanout (pin→via escape; Java autoroute/BatchFanout.java)
+  [x] BatchFanout (iter 153: fanout.rs — maze is_fanout mode completes
+      at the first drill like Java's MazeSearchAlgo; passes over SMD
+      pins outer-first; CLI --fanout, default off like Java)
   [ ] ForcedViaAlgo + MoveDrillItemAlgo (shove-capable via insertion)
   [ ] 45°/90° AngleRestriction: LocateFoundConnectionAlgo45Degree,
       PullTightAlgo45, PullTightAlgo90

@@ -120,6 +120,10 @@ pub struct MazeRouteRequest {
     /// Optional wall-clock deadline checked periodically during the
     /// expansion.
     pub deadline: Option<crate::datastructures::TimeLimit>,
+    /// Fanout mode (Java: AutorouteControl.is_fanout): the search
+    /// completes at the FIRST successful drill — the goal of a fanout is
+    /// reaching another layer through a via, not a destination item.
+    pub is_fanout: bool,
 }
 
 impl MazeRouteRequest {
@@ -323,6 +327,22 @@ pub fn find_connection(
             parent: entry.parent,
             room: Some(room),
         });
+
+        // fanout completes at the first drill (Java: MazeSearchAlgo
+        // "algorithm completed after the first drill")
+        if request.is_fanout && matches!(entry.step, Step::Drill) {
+            let mut corners: Vec<(FloatPoint, usize)> = Vec::new();
+            let mut rooms: Vec<Option<RoomId>> = Vec::new();
+            let mut curr = Some(node_id);
+            while let Some(i) = curr {
+                corners.push((nodes[i].location, nodes[i].layer));
+                rooms.push(nodes[i].room);
+                curr = nodes[i].parent;
+            }
+            corners.reverse();
+            rooms.reverse();
+            return Some(MazeSearchResult { corners, rooms });
+        }
 
         engine.expand_room(board, room);
 
@@ -1229,6 +1249,7 @@ mod tests {
             net_no: 1,
             start_items: Vec::new(),
             dest_items: Vec::new(),
+            is_fanout: false,
             start_item: start,
             dest_item: dest,
             trace_half_width: 100,

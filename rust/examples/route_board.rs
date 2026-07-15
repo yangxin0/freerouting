@@ -76,6 +76,11 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(300);
     let time_limit = TimeLimit::new(limit_s * 1000);
+    if std::env::args().any(|a| a == "--fanout") {
+        let fanned =
+            freerouting::autoroute::fanout_board(&mut board, &request, 20, Some(&time_limit));
+        println!("fanout: {fanned} pins fanned out");
+    }
     let result =
         batch_route_passes_with_time_limit(&mut board, &request, 99, Some(&time_limit));
     let mut complete_nets = 0usize;
