@@ -1463,6 +1463,22 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   wall clock for repair (incomplete beats illegal), and consider
   skipping restart rounds whose expected value is low.
 
+- 2026-07-15 (iter 189): budget carve — the restart fallback is now
+  capped at 0.9 x the wall-clock limit (was: ran to the wire), so the
+  final repair_violations guarantee always gets the ~10% tail; repair's
+  per-net routes now carry the remaining overall budget as their
+  deadline (previously potentially None). Coldfire @600 s validation:
+  269/278 held (restart round properly truncated 180 s -> 120 s), but
+  the 12 deep violations are UNCHANGED and byte-identical (7476 pair
+  checks) — repair runs and rolls back: its transactional guard
+  (complete_after >= complete_before) refuses rounds where a ripped
+  violating net cannot re-complete, and the violating nets overlap the
+  9 incomplete ones. The violations involve routed items (an unrouted
+  board audits 0/0). NEXT: instrument repair_violations (nets found,
+  kept/rolled back) + dump the 12 violation pairs (nets, layers,
+  locations) to see whether they slip in during the escalated-penalty
+  passes (insert-time validation hole?) or the restart round.
+
 ## Notes / decisions log
 
 - 2026-07-14: crate scaffolded on branch `rust`; no external deps yet.

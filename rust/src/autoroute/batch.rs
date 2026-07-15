@@ -507,12 +507,18 @@ fn repair_violations(
             board.remove_item(id);
         }
         let ripup_penalty = request.via_cost.max(20_000.0);
+        // the repair routes carry the remaining overall budget so the
+        // per-net sub-deadlines inside route_net_with_ripup are honest
+        let repair_request = BatchRequest {
+            deadline: time_limit.copied().or(request.deadline),
+            ..*request
+        };
         crate::board::basic_board::set_birth_tag(5);
         for &net_no in &nets {
             if time_limit.is_some_and(|t| t.limit_exceeded()) {
                 break;
             }
-            let net_request = request_for_net(board, net_no, request);
+            let net_request = request_for_net(board, net_no, &repair_request);
             route_net_with_ripup(board, net_no, &net_request, ripup_penalty);
         }
         crate::board::basic_board::set_birth_tag(0);
@@ -666,7 +672,15 @@ pub fn batch_route_passes_with_time_limit(
     let mut dry_rounds = 0usize;
     let mut round = 0usize;
     let mut max_dry = 1usize;
-    while dry_rounds < max_dry && !time_limit.is_some_and(|t| t.limit_exceeded()) {
+    // the restart may not consume the tail of the budget: the final
+    // violation-repair guarantee needs wall clock too (coldfire @600s
+    // shipped 12 deep violations because a doomed 180s restart round
+    // ran to the wire and repair got nothing)
+    let restart_limit = time_limit.copied().map(|mut t| {
+        t.multiply(0.9);
+        t
+    });
+    while dry_rounds < max_dry && !restart_limit.is_some_and(|t| t.limit_exceeded()) {
         let mut incomplete: Vec<i32> = net_nos
             .iter()
             .copied()
@@ -703,13 +717,13 @@ pub fn batch_route_passes_with_time_limit(
             .collect();
         let restart_request = BatchRequest {
             max_expansions: budget,
-            deadline: time_limit.copied().or(request.deadline),
+            deadline: restart_limit.or(request.deadline),
             ..*request
         };
         let ripup_penalty = request.via_cost.max(20_000.0);
         let mut restart = BatchResult::default();
         for net_no in order {
-            if time_limit.is_some_and(|t| t.limit_exceeded()) {
+            if restart_limit.is_some_and(|t| t.limit_exceeded()) {
                 break;
             }
             let net_request = request_for_net(board, net_no, &restart_request);
