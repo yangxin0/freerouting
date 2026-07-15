@@ -258,6 +258,26 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 143): RIP CORRIDOR FIXED — display's ROUTING
+  phase now audits at ZERO violations, deterministically (3× identical
+  runs, 29/30 nets). The residual rip-window class was the iter-139
+  via-placement bug's twin in the RIPUP block: the corridor loops
+  (forbidden zones + to_rip) skipped la≠lb corner pairs, so the
+  pre-via travel segment (which runs on the OLD layer) was never
+  ripped and the via footprint ripped at the wrong end. Both loops
+  now mirror the insert semantics (travel on layer_a, via at the
+  drill node pb). Remaining display issue: post-processing pair
+  (7 violations w/ post; both partners individually validated at
+  their reinserts — TIGHT audit shows rebuilt-free=false fallbacks
+  flagging pre-existing proximity; needs partner kind/geometry in
+  the audit). JAVA SCOREBOARD (stripped, router phase): J2 3.42 s
+  with 3 UNROUTED, wavefolder 5.94 s with 5 UNROUTED, display 3.31 s
+  1 unrouted, pic 1.23 s 1 unrouted + 1 violation, NormalPuzzle
+  1.22 s clean. RUST: J2 24/24+0 (~1 s), wavefolder 31/31+1 (~2 s),
+  NormalPuzzle 72/72+0 (3.8 s), pic 111/111+2 (0.8 s) — Rust WINS
+  completion on J2/wavefolder/pic, ties display, loses NormalPuzzle
+  speed 3×. Java's optimizer phase (not ported) recovers their
+  unrouted nets and cleans violations — the next big gap.
 - 2026-07-15 (iter 142): OCCUPY-ON-PUSH — the ×5 search fix.
   FR_STATS counters exposed a relaxation storm: NormalPuzzle spent
   22M expansions / 69M heap pushes on 150 searches (~460k pushes per

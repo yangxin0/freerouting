@@ -829,14 +829,17 @@ pub fn maze_route_with_engine(
         for window in result.corners.windows(2) {
             let ((a, layer_a), (b, layer_b)) = (window[0], window[1]);
             let (pa, pb) = (a.round(), b.round());
-            if layer_a == layer_b && pa != pb {
+            // the travel pa→pb always runs on layer_a (when b is a drill
+            // node the via sits at PB) — same semantics as the insert
+            if pa != pb {
                 let max_cl = board.rules.clearance_matrix.max_value(layer_a).max(0);
                 if let Some(shape) = Polyline::from_two_points(pa, pb)
                     .offset_shape(request.trace_half_width + max_cl + 1, 0)
                 {
                     forbidden.push((shape, layer_a));
                 }
-            } else if layer_a != layer_b {
+            }
+            if layer_a != layer_b {
                 if let Some(padstack) = board.padstacks.get_by_no(request.via_padstack) {
                     for layer in padstack.from_layer()..=padstack.to_layer() {
                         if let Some(shape) = padstack.get_shape(layer) {
@@ -845,7 +848,7 @@ pub fn maze_route_with_engine(
                             forbidden.push((
                                 shape
                                     .translate_by(crate::geometry::planar::IntVector::new(
-                                        pa.x, pa.y,
+                                        pb.x, pb.y,
                                     ))
                                     .offset(max_cl + 1.0),
                                 layer,
@@ -859,7 +862,11 @@ pub fn maze_route_with_engine(
         for window in result.corners.windows(2) {
             let ((a, layer_a), (b, layer_b)) = (window[0], window[1]);
             let (pa, pb) = (a.round(), b.round());
-            if layer_a == layer_b && pa != pb {
+            // rip the travel corridor on layer_a for EVERY pair: when b
+            // is a drill node the segment pa→pb still runs on layer_a
+            // (skipping la≠lb pairs left the pre-via travel unripped —
+            // the residual rip-window violation class)
+            if pa != pb {
                 let polyline = Polyline::from_two_points(pa, pb);
                 // rip everything within CLEARANCE of the new copper, not
                 // only what touches it (leaving clearance-range items in
@@ -895,8 +902,10 @@ pub fn maze_route_with_engine(
                         }
                     }
                 }
-            } else if layer_a != layer_b {
-                // the via footprint at the layer change
+            }
+            if layer_a != layer_b {
+                // the via footprint at the layer change (the via sits at
+                // the DRILL node pb, not at the corner before it)
                 if let Some(padstack) = board.padstacks.get_by_no(request.via_padstack) {
                     for layer in padstack.from_layer()..=padstack.to_layer() {
                         if let Some(shape) = padstack.get_shape(layer) {
@@ -907,7 +916,7 @@ pub fn maze_route_with_engine(
                                 .max(0) as f64;
                             let q = shape
                                 .translate_by(
-                                    crate::geometry::planar::IntVector::new(pa.x, pa.y),
+                                    crate::geometry::planar::IntVector::new(pb.x, pb.y),
                                 )
                                 .offset(max_cl + 1.0);
                             for id in board.overlapping_items(&q, Some(layer)) {
