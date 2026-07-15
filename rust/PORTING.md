@@ -316,18 +316,19 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       to 24/24 (page candidates cured the GND flap). COST noted for
       the performance phase: NormalPuzzle 0.98→3.1 s, 8088sbc pass0
       11.4→17.4 s (per-net page recompute).)
-  [~] MazeShoveTraceAlgo (iter 160: the OBSTACLE EXPANSION ROOM model
-      is in and DEFAULT ON — routable foreign items become enterable
-      rooms (per (item, shape) registry, SRN creates the doors, and
-      obstacle rooms expand onward like free rooms), the maze pays
-      ripup_penalty per entered obstacle room and plain mode never
-      enters them, and the traversed items are the exact rip set at
-      insert (Java's model; FR_OBSTACLE_ROOMS=0 = old rippable-skip
-      rooms). Fleet: full completion + zero violations everywhere;
-      J2 24/24 in 83 ms (no restart churn). REMAINING: the actual
-      MazeShoveTraceAlgo line-shove check (shove instead of rip when
-      the trace can slide) — insert currently shoves via the corridor
-      shove_aside then rips what stays)
+  [~] MazeShoveTraceAlgo (iters 160+169: the obstacle-room model
+      carries the semantics; iter 169 adds the COST MODEL — obstacle
+      rooms whose trace matches Java's check_shove_trace_line
+      preconditions (same half width and clearance class, unfixed)
+      are charged 0.25× the rip penalty, so the maze prefers
+      slide-friendly corridors, and the insert-time corridor shove
+      slides them like Java's maze shove (rip only what stays).
+      REMAINING for the exact port: the geometric section-alignment
+      check (diagonal/polar door segments, shrink, perpendicular
+      probe) and Adjustment-aware door sections during search — the
+      outcome is currently validated transactionally at insert
+      instead. 8088sbc ripup passes: pass1 20.5 s, pass2 7.4 s
+      (faster); fleet all-zero unchanged.)
   [x] OptViaAlgo (iter 161: board/opt_via.rs — a via contacted by
       exactly two unfixed traces slides toward the adjacent corners /
       their midpoint when legal (forced-via with shove) and strictly

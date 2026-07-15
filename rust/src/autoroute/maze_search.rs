@@ -450,10 +450,25 @@ fn seed_room(
             continue;
         }
         let segments = engine.graph.door_section_segments(door, offset);
+        // shovable traces cost a fraction of the rip penalty (Java:
+        // MazeShoveTraceAlgo passages carry no ripup cost; the corridor
+        // shove at insert slides them aside)
+        let shove_discount = if request.ripup_penalty > 0.0
+            && engine.obstacle_room_shovable(
+                board,
+                other,
+                request.trace_half_width,
+                request.clearance_class,
+            ) {
+            0.25
+        } else {
+            1.0
+        };
         for (section, seg) in segments.iter().enumerate() {
             let midpoint = seg.a.middle_point(seg.b);
-            let ripup_cost =
-                request.ripup_penalty * engine.rippable_items(other).len() as f64;
+            let ripup_cost = request.ripup_penalty
+                * engine.rippable_items(other).len() as f64
+                * shove_discount;
             let cost = base_cost + location.distance(midpoint) + ripup_cost;
             // occupy ON PUSH (Java: expand_to_door_section sets
             // is_occupied when the element is inserted): each section

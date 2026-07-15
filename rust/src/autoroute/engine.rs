@@ -499,6 +499,37 @@ impl AutorouteEngine {
         }
     }
 
+    /// True if the obstacle room's trace satisfies Java's
+    /// `MazeShoveTraceAlgo.check_shove_trace_line` preconditions: a
+    /// polyline trace of the SAME half width and clearance class as the
+    /// routed trace, so a lateral shove (rather than a rip) can make
+    /// room. Such passages are charged a reduced cost — the insert-time
+    /// corridor shove then slides the trace like Java's maze shove.
+    pub fn obstacle_room_shovable(
+        &self,
+        board: &BasicBoard,
+        room: RoomId,
+        trace_half_width: i32,
+        clearance_class: usize,
+    ) -> bool {
+        let Some(item_id) = self.obstacle_room_item(room) else {
+            return false;
+        };
+        let Some(item) = board.get_item(item_id) else {
+            return false;
+        };
+        if item.base.is_user_fixed() {
+            return false;
+        }
+        match &item.kind {
+            crate::board::ItemKind::PolylineTrace(t) => {
+                t.half_width == trace_half_width
+                    && item.base.clearance_class == clearance_class
+            }
+            _ => false,
+        }
+    }
+
     /// Runs the SortedRoomNeighbours gap walk for a freshly completed
     /// room: collects the touching complete rooms and (inflated) items,
     /// sorts them counterclockwise, and adds the uncovered border gaps
