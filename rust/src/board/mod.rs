@@ -4,6 +4,7 @@ pub mod angle_restriction;
 pub mod calc_from_side;
 pub mod calc_shape_and_from_side;
 pub mod shape_trace_entries;
+pub mod forced_via;
 pub mod move_drill_item;
 pub mod shove_trace_algo;
 pub mod basic_board;

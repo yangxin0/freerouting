@@ -1,0 +1,192 @@
+//! Port of `ForcedViaAlgo.java`: checking and inserting a via at a
+//! location after shoving obstacle traces (and vias) aside. Java's pure
+//! `check` becomes check-by-doing inside a snapshot transaction.
+
+use crate::board::basic_board::{BasicBoard, ItemId};
+use crate::board::shove_trace_algo::shove_aside;
+use crate::geometry::planar::{IntBox, IntPoint, IntVector, TileShape};
+
+/// The via pad shapes of `padstack` translated to `location`, with their
+/// layers, plus the start-trace shape when the trace pen is wider than
+/// the pad (Java: the `start_trace_circle` handling).
+fn forced_shapes(
+    board: &BasicBoard,
+    via_padstack: usize,
+    location: IntPoint,
+    trace_half_width: i32,
+) -> Vec<(TileShape, usize)> {
+    let Some(ps) = board.padstacks.get_by_no(via_padstack) else {
+        return Vec::new();
+    };
+    let mut result = Vec::new();
+    for layer in ps.from_layer()..=ps.to_layer() {
+        let Some(shape) = ps.get_shape(layer) else { continue };
+        let pad = shape.translate_by(IntVector::new(location.x, location.y));
+        let pad_bb = pad.bounding_box();
+        result.push((pad, layer));
+        if trace_half_width > 0 {
+            // make space for starting a trace in case the trace is wider
+            // than the via pad
+            let trace_bb = IntBox::from_coords(
+                location.x - trace_half_width,
+                location.y - trace_half_width,
+                location.x + trace_half_width,
+                location.y + trace_half_width,
+            );
+            if trace_bb.max_width() > pad_bb.max_width() {
+                result.push((TileShape::Box(trace_bb), layer));
+            }
+        }
+    }
+    result
+}
+
+/// Shoves space free and inserts a via of `via_padstack` at `location`
+/// (Java: `ForcedViaAlgo.insert`). Transactional: on failure the board
+/// is unchanged and None is returned.
+pub fn insert_forced_via(
+    board: &mut BasicBoard,
+    via_padstack: usize,
+    location: IntPoint,
+    net_nos: &[i32],
+    cl_class: usize,
+    trace_half_width: i32,
+) -> Option<ItemId> {
+    let shapes = forced_shapes(board, via_padstack, location, trace_half_width);
+    if shapes.is_empty() {
+        return None;
+    }
+    board.generate_snapshot();
+    for (shape, layer) in &shapes {
+        let max_cl = board.rules.clearance_matrix.max_value(*layer).max(0) as f64;
+        let corridor = shape.offset(max_cl + 1.0);
+        if !shove_aside(board, &corridor, *layer, net_nos, cl_class, &[]) {
+            board.undo();
+            return None;
+        }
+        // the space must actually be free now (unshovable items remain)
+        let blocked = board
+            .overlapping_items(&corridor, Some(*layer))
+            .into_iter()
+            .any(|id| {
+                board.get_item(id).is_some_and(|it| {
+                    !it.base.net_nos.iter().any(|n| net_nos.contains(n))
+                        && !matches!(&it.kind, crate::board::ItemKind::ObstacleArea(a) if a.is_conduction)
+                })
+            });
+        if blocked {
+            board.undo();
+            return None;
+        }
+    }
+    let id = board.insert_via(via_padstack, location, net_nos.to_vec(), cl_class, false);
+    board.pop_snapshot();
+    Some(id)
+}
+
+/// True if a via of `via_padstack` fits at `location` after shoving
+/// (Java: `ForcedViaAlgo.check`). The board is left unchanged.
+pub fn check_forced_via(
+    board: &mut BasicBoard,
+    via_padstack: usize,
+    location: IntPoint,
+    net_nos: &[i32],
+    cl_class: usize,
+    trace_half_width: i32,
+) -> bool {
+    board.generate_snapshot();
+    let ok = insert_forced_via(
+        board,
+        via_padstack,
+        location,
+        net_nos,
+        cl_class,
+        trace_half_width,
+    )
+    .is_some();
+    board.undo();
+    ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::{Layer, LayerStructure};
+    use crate::core::Padstacks;
+    use crate::geometry::planar::Polyline;
+    use crate::rules::{BoardRules, ClearanceMatrix};
+
+    fn test_board() -> BasicBoard {
+        let stack = LayerStructure::new(vec![
+            Layer::new("F.Cu", true),
+            Layer::new("B.Cu", true),
+        ]);
+        let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
+        let mut rules = BoardRules::new(stack.clone(), matrix);
+        rules.get_default_net_class();
+        let mut padstacks = Padstacks::new(2);
+        padstacks.add_shape_on_layers(
+            TileShape::Box(IntBox::from_coords(-400, -400, 400, 400)),
+            0,
+            1,
+        );
+        BasicBoard::new(stack, rules, padstacks)
+    }
+
+    #[test]
+    fn forced_via_shoves_a_blocking_trace() {
+        let mut board = test_board();
+        // a foreign trace running straight over the target location
+        let blocker = board.insert_trace(
+            Polyline::from_int_points(&[
+                IntPoint::new(-20000, 0),
+                IntPoint::new(20000, 0),
+            ]),
+            0,
+            100,
+            vec![2],
+            1,
+        );
+        let via = insert_forced_via(&mut board, 1, IntPoint::new(0, 0), &[1], 1, 100);
+        assert!(via.is_some(), "forced via must succeed by shoving");
+        // the blocker net must still be connected (its trace was shoved,
+        // possibly replaced by pieces, never just deleted)
+        assert!(board.net_is_completely_connected(2));
+        let _ = blocker;
+        // and the via must keep clearance to every foreign item
+        let via_item = board.get_item(via.unwrap()).unwrap().clone();
+        for (s, l) in via_item.tile_shapes(&board.padstacks) {
+            for oid in board.overlapping_items(&s.offset(400.0), Some(*l)) {
+                let other = board.get_item(oid).unwrap();
+                if oid == via.unwrap() || other.base.shares_net(&via_item.base) {
+                    continue;
+                }
+                assert!(
+                    s.euclidean_distance_to(
+                        &other.tile_shapes(&board.padstacks).first().unwrap().0
+                    ) >= 199.0,
+                    "via must keep clearance after the shove"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn check_leaves_board_unchanged() {
+        let mut board = test_board();
+        board.insert_trace(
+            Polyline::from_int_points(&[
+                IntPoint::new(-20000, 0),
+                IntPoint::new(20000, 0),
+            ]),
+            0,
+            100,
+            vec![2],
+            1,
+        );
+        let items_before: Vec<_> = board.items().map(|(id, _)| *id).collect();
+        assert!(check_forced_via(&mut board, 1, IntPoint::new(0, 0), &[1], 1, 100));
+        let items_after: Vec<_> = board.items().map(|(id, _)| *id).collect();
+        assert_eq!(items_before, items_after, "check must not change the board");
+    }
+}

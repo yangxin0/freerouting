@@ -269,8 +269,11 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       try_shove_via_points border projections, transactional move_via
       with destination shoves, shove_vias wired into shove_aside like
       Java's forced_pad; deeper via-recursion still shallow)
-  [ ] ForcedViaAlgo (forced via insertion for interactive/fanout
-      quality; check_layer/check on top of the pad machinery)
+  [x] ForcedViaAlgo (iter 155: board/forced_via.rs —
+      insert_forced_via/check_forced_via: per-layer pad shapes +
+      wider-trace-pen shapes shoved free then the via inserted,
+      transactional; check leaves the board unchanged. Maze/fanout
+      integration lands with MazeShoveTraceAlgo)
   [ ] 45°/90° AngleRestriction: LocateFoundConnectionAlgo45Degree,
       PullTightAlgo45, PullTightAlgo90
   [ ] SortedRoomNeighbours (replace simplified frontier expansion)
