@@ -1633,8 +1633,12 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   budget; the CLI now scales it to max(30 s, tl/5). (drc_check's
   pipeline has no optimizer phase, which is part of why its 267
   differs from the CLI's routing-only 261 — different pass timing
-  under the same limit is the rest.) Validation of 600 s + 120 s
-  recovery pending.
+  under the same limit is the rest.) VALIDATED: with the scaled
+  120 s recovery the CLI reaches 268/278 with ZERO violations
+  (+7 nets recovered vs +3 under the flat 30 s; final score 950.43)
+  — the best violation-free coldfire completion of the port, equal
+  to the old 268 record that still shipped violations. NEW CANONICAL
+  coldfire (CLI, 600 s + tl/5 recovery): 268/278, 0 violations.
 
 ## Notes / decisions log
 
