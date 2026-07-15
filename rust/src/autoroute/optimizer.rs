@@ -9,6 +9,48 @@ use crate::autoroute::batch::{route_net_with_ripup, BatchRequest};
 use crate::board::basic_board::{BasicBoard, ItemId};
 use crate::board::ItemKind;
 
+/// The clearance violations touching one net's route items (local DRC:
+/// the optimizer must never trade violations for length).
+fn net_violations(board: &BasicBoard, net_no: i32) -> usize {
+    let mut count = 0usize;
+    for (id, item) in board.items() {
+        if item.base.component_no != 0 || !item.base.contains_net(net_no) {
+            continue;
+        }
+        for (s, l) in item.tile_shapes(&board.padstacks) {
+            for oid in board.overlapping_items(&s.offset(10_000.0), Some(*l)) {
+                if oid == *id {
+                    continue;
+                }
+                let Some(other) = board.get_item(oid) else { continue };
+                if other.base.shares_net(&item.base) {
+                    continue;
+                }
+                if let ItemKind::ObstacleArea(a) = &other.kind {
+                    if a.is_conduction {
+                        continue;
+                    }
+                }
+                let cl = board.rules.clearance_matrix.get_value(
+                    item.base.clearance_class,
+                    other.base.clearance_class,
+                    *l,
+                    false,
+                ) as f64;
+                let check = s.offset(cl);
+                if other.tile_shapes(&board.padstacks).iter().any(|(os, ol)| {
+                    ol == l
+                        && os.intersection(&check).dimension() >= 2
+                        && s.euclidean_distance_to(os) < cl - 1.0
+                }) {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
 /// The via count and trace length of one net's route items.
 fn net_route_cost(board: &BasicBoard, net_no: i32) -> (usize, f64) {
     let mut vias = 0usize;
@@ -71,6 +113,7 @@ pub fn optimize_nets_pass(
         }
         let was_complete = board.net_is_completely_connected(net_no);
         let (vias_before, len_before) = net_route_cost(board, net_no);
+        let violations_before = net_violations(board, net_no);
         if was_complete && vias_before == 0 && len_before == 0.0 {
             continue; // nothing routed (single-pad net or pad-only)
         }
@@ -102,6 +145,7 @@ pub fn optimize_nets_pass(
         let complete_now = board.net_is_completely_connected(net_no);
         let (vias_after, len_after) = net_route_cost(board, net_no);
         let keep = complete_now
+            && net_violations(board, net_no) <= violations_before
             && (!was_complete
                 || vias_after < vias_before
                 || (vias_after == vias_before && len_after + min_gain < len_before));

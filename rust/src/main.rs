@@ -221,12 +221,16 @@ fn main() -> ExitCode {
         .and_then(|v| v.parse().ok())
         .or(profile_threads)
         .unwrap_or(1);
-    let improved = freerouting::autoroute::optimize_route_multithreaded(
+    let improved = if std::env::var_os("FR_NO_OPT").is_some() {
+        0
+    } else {
+        freerouting::autoroute::optimize_route_multithreaded(
         &mut board,
         &request,
         opt_threads,
         Some(&opt_limit),
-    );
+    )
+    };
     if improved > 0 {
         println!("optimizer: {improved} nets improved");
     }

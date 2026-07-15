@@ -271,8 +271,13 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   | coldfire     | 993.45 (11 unr + 4 v)   | 260/278             Java |
   Rust wins or ties 6/8 by Java's own metric; 8088sbc's gap is pure
   via-count/length cost (Java routes it with fewer vias — optimizer
-  quality); pic showed 1 violation in this CLI run (drc_check runs
-  are 0 — pipeline variance to check).
+  quality). pic's "1 violation" RESOLVED: it is DESIGN-INHERENT (a
+  factory pad-clearance issue) — check_board audits all items
+  including pins, Java reports the identical 1 violation; drc_check
+  audits routed items only, hence its 0. Both routers behave
+  identically. Optimizer keep-rules hardened along the way (kept
+  transactions may not increase a net's violations; via-slide stubs
+  are clearance-checked); FR_NO_OPT knob added for stage isolation.
 - 2026-07-15 (iter 174): HEAD-TO-HEAD REFRESH (all features + all
   performance work in; Java 1.9 router phase on stripped boards):
   | board        | Java 1.9                | Rust (now)                 |

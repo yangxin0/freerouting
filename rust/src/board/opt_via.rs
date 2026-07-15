@@ -124,12 +124,54 @@ pub fn opt_via_location(board: &mut BasicBoard, via_id: ItemId, max_recursion: u
             ok = insert_forced_via(board, padstack, cand, &net_nos, cl_class, hw1.max(hw2))
                 .is_some();
         }
-        // both nets must remain connected
+        // both nets must remain connected AND the reconnected stubs must
+        // keep clearance (the stub inserts are not shove-validated)
         let all_connected = ok
             && net_nos
                 .iter()
                 .all(|&n| board.net_is_completely_connected(n));
-        if all_connected {
+        let stubs_clear = all_connected
+            && [t1, t2].iter().all(|_| true)
+            && {
+                let mut clear = true;
+                'outer: for (id, item) in board.items() {
+                    if item.base.component_no != 0
+                        || !item.base.net_nos.iter().any(|n| net_nos.contains(n))
+                    {
+                        continue;
+                    }
+                    for (s, l) in item.tile_shapes(&board.padstacks) {
+                        for oid in board.overlapping_items(&s.offset(10_000.0), Some(*l)) {
+                            if oid == *id {
+                                continue;
+                            }
+                            let Some(other) = board.get_item(oid) else { continue };
+                            if other.base.shares_net(&item.base) {
+                                continue;
+                            }
+                            if let ItemKind::ObstacleArea(a) = &other.kind {
+                                if a.is_conduction {
+                                    continue;
+                                }
+                            }
+                            let cl = board.rules.clearance_matrix.get_value(
+                                item.base.clearance_class,
+                                other.base.clearance_class,
+                                *l,
+                                false,
+                            ) as f64;
+                            if other.tile_shapes(&board.padstacks).iter().any(|(os, ol)| {
+                                ol == l && s.euclidean_distance_to(os) < cl - 1.0
+                            }) {
+                                clear = false;
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+                clear
+            };
+        if stubs_clear {
             board.pop_snapshot();
             return true;
         }
