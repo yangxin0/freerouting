@@ -147,6 +147,13 @@ fn main() -> ExitCode {
         result.routed_connections,
         result.failed_connections
     );
+    let stats = freerouting::scoring::BoardStatistics::collect(&board);
+    let score =
+        stats.normalized_score(&freerouting::scoring::ScoringSettings::default());
+    println!(
+        "score: {score:.2} ({} unrouted, {} violations, {} vias, {:.1} mm)",
+        stats.incomplete_count, stats.clearance_violations, stats.via_count, stats.total_length_mm
+    );
 
     let opt_limit = TimeLimit::new(30_000);
     let improved = freerouting::autoroute::optimize_route(&mut board, &request, Some(&opt_limit));

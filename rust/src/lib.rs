@@ -12,3 +12,4 @@ pub mod drc;
 pub mod geometry;
 pub mod io;
 pub mod rules;
+pub mod scoring;

@@ -362,7 +362,13 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       schematic_parity). CLI --drc-report <file>.)
   [ ] RatsNest export (non-GUI part)
   CORE/INFRA:
-  [ ] Scoring (core/scoring, RouterCounters)
+  [x] Scoring (iter 165: src/scoring.rs — BoardStatistics collection
+      (incomplete/maximum nets, violations via drc, bends, vias,
+      mm-normalized length) + Java's exact score formula and defaults
+      (unrouted 5M, violation 1M, bend 10, via 50, trace 1/mm);
+      normalized 0..1000 with the no-connection guard. CLI logs
+      "score: 999.99 (...)" like the Java pass log — NormalPuzzle
+      999.99, J2 999.97.)
   [ ] RoutingJob/Session/RoutingStage job model
   [ ] RouterSettings/profiles (settings/ package, non-GUI)
   [ ] API server (api/ package) + MCP server
