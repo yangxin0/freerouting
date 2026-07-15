@@ -60,7 +60,15 @@ pub fn fanout_pin(board: &mut BasicBoard, pin_id: ItemId, request: &BatchRequest
     let Some(net_no) = needs_fanout(board, pin_id) else {
         return false;
     };
-    if request.via_padstack == 0 {
+    // Java (a7cc6e42): the pin's net-class via rule decides the fanout
+    // via; nets without one fall back to the board-level via rules
+    // (fanout.fallback_to_board_vias, default true). A pin is skipped
+    // only when neither yields a via.
+    let via_padstack = board
+        .rules
+        .via_padstack_for_net(net_no)
+        .unwrap_or(request.via_padstack);
+    if via_padstack == 0 {
         return false;
     }
     let maze_request = MazeRouteRequest {
@@ -71,7 +79,7 @@ pub fn fanout_pin(board: &mut BasicBoard, pin_id: ItemId, request: &BatchRequest
         dest_items: Vec::new(),
         trace_half_width: request.trace_half_width,
         clearance_class: request.clearance_class,
-        via_padstack: request.via_padstack,
+        via_padstack,
         via_cost: request.via_cost,
         // fanout escapes are local: a small budget keeps hopeless pins
         // cheap (Java bounds the whole stage with a timeout instead)
@@ -92,6 +100,10 @@ pub fn fanout_pin(board: &mut BasicBoard, pin_id: ItemId, request: &BatchRequest
 
 /// Fans out every SMD pin that needs it, in passes until no pin
 /// improves (Java: `BatchFanout.fanout_board`, outer pins first).
+/// Java default `fanout.maxItems` (Integer.MAX_VALUE): a cap on the
+/// pins one fanout run may process.
+const FANOUT_MAX_ITEMS: usize = usize::MAX;
+
 pub fn fanout_board(
     board: &mut BasicBoard,
     request: &BatchRequest,
@@ -129,6 +141,10 @@ pub fn fanout_board(
         let mut fanned = 0usize;
         for (_, pin) in pins {
             if time_limit.is_some_and(|t| t.limit_exceeded()) {
+                return total + fanned;
+            }
+            // Java (27e700bc): fanout.maxItems caps the processed pins
+            if total + fanned >= FANOUT_MAX_ITEMS {
                 return total + fanned;
             }
             if fanout_pin(board, pin, request) {

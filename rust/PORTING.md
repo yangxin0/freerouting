@@ -1618,6 +1618,13 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   roughly a third of the budget, in the same range as Java, with a
   violation-free board where Java ships violations.
 
+- 2026-07-15 (iter 200): Java-tracking — ported a7cc6e42 (fanout
+  falls back to the board-level via padstack when the pin's net class
+  has no via rule; a pin is skipped only when neither yields a via;
+  via_padstack_for_net resolves the class rule) and 27e700bc's fanout
+  side (fanout.maxItems pin cap, Java default unbounded). Remaining
+  unported upstream commits are GUI/rendering/benchmark-infra only.
+
 ## Notes / decisions log
 
 - 2026-07-14: crate scaffolded on branch `rust`; no external deps yet.
