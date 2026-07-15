@@ -89,9 +89,27 @@ the only genuinely open work items across the whole port:
    violations (was 2; was 12 before iter 190), completion 267/278 =
    Java-equivalent completion with a violation-free board (Java ships
    violations at this scale). Fleet clean, 215 tests.
-6. Byte-exact MazeShoveTraceAlgo diagonal/polar door-segment
-   derivation (behaviorally covered by insert-time validation).
-7. Coldfire wall clock vs Java at equal completion (~1.5-2x).
+6. [CLOSED iter 204 — verified already byte-exact] The door-segment
+   derivation was audited line by line against Java:
+   ExpansionDoor.get_section_segments == compute_door_section_segments
+   (offset+tolerance, dim-1 diagonal shrink, dim-2 free-space corner
+   scan with the 4*offset^2 small-door cutoff, gravity-point fallback,
+   10*offset section width, identical divide), calc_door_line_segment
+   corner scans identical, TileShape.diagonal_corner_segment identical
+   (corner 0 to corner n/2). The only deviations are Rust-side
+   None-safety where Java would NPE. The historical note predated the
+   iter 157-158 SRN/door faithfulness work and was stale.
+7. [CLOSED iters 199-203] Coldfire wall clock: the via_free memo
+   (43M -> 1.77M tree queries) converges coldfire by ~200 s; the
+   fleet canonical shows every board in Java's range or better
+   (8088sbc 4.4 s, small boards in fractions of a second).
+
+REMAINING (research, not porting): the last ~10 coldfire nets and
+interf_u's final net under tight budgets plateau under every current
+strategy (passes, restarts, scaled recovery all roll back) — they
+likely need simultaneous multi-net negotiation, which no Java
+mechanism provides either (Java ships violations on these boards
+instead).
 
 ## Conventions
 
