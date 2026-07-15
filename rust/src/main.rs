@@ -24,6 +24,7 @@ Options:
   --strip-wiring     remove the pre-routed wiring and route from scratch
   --fanout           fan out SMD pins to vias before routing
   --angle <mode>     trace angle restriction: none, 45, 90 (default 45)
+  --drc-report <f>   write a KiCad-format DRC report (JSON) after routing
   -h, --help         show this help";
 
 fn main() -> ExitCode {
@@ -153,6 +154,18 @@ fn main() -> ExitCode {
         );
     }
 
+    if let Some(report_path) = flag_value("--drc-report") {
+        let report = freerouting::drc::check_board(&board);
+        let json = report.to_kicad_json(&board, design);
+        match std::fs::write(report_path, &json) {
+            Ok(()) => println!(
+                "DRC report written to {report_path}: {} violations, {} unconnected nets",
+                report.violations.len(),
+                report.unconnected.len()
+            ),
+            Err(e) => eprintln!("error: cannot write {report_path}: {e}"),
+        }
+    }
     let design_name = std::path::Path::new(design)
         .file_stem()
         .and_then(|s| s.to_str())

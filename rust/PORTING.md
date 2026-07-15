@@ -341,7 +341,13 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   [ ] DSN export (specctra writer)
   [ ] SES import
   [ ] KiCad direct file I/O
-  [ ] DRC report (drc/ package: DrcReport, ClearanceViolation, ...)
+  [x] DRC report (iter 162: src/drc.rs — DesignRulesChecker port:
+      check_board collects deduplicated clearance violations (mitered
+      pre-filter + exact Euclidean confirm, worst actual distance) and
+      unconnected nets; DrcReport::to_kicad_json emits the KiCad DRC
+      v1 schema exactly like Java's DrcReport (coordinate_units mm,
+      violations with per-item positions, unconnected_items,
+      schematic_parity). CLI --drc-report <file>.)
   [ ] RatsNest export (non-GUI part)
   CORE/INFRA:
   [ ] Scoring (core/scoring, RouterCounters)
