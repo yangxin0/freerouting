@@ -402,12 +402,14 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       are charged 0.25× the rip penalty, so the maze prefers
       slide-friendly corridors, and the insert-time corridor shove
       slides them like Java's maze shove (rip only what stays).
-      REMAINING for the exact port: the geometric section-alignment
-      check (diagonal/polar door segments, shrink, perpendicular
-      probe) and Adjustment-aware door sections during search — the
-      outcome is currently validated transactionally at insert
-      instead. 8088sbc ripup passes: pass1 20.5 s, pass2 7.4 s
-      (faster); fleet all-zero unchanged.)
+      Iter 181 adds Java's section_ok gate: the slide discount
+      applies only when entering through the FIRST or LAST door
+      section (interior entries cannot slide the trace past the
+      entry point) — fleet unchanged at all-zero/full-completion.
+      REMAINING for the byte-exact port: the diagonal/polar door
+      segment derivation and Adjustment-aware door sections during
+      search — behaviorally covered by insert-time transactional
+      validation.)
   [x] OptViaAlgo (iter 161: board/opt_via.rs — a via contacted by
       exactly two unfixed traces slides toward the adjacent corners /
       their midpoint when legal (forced-via with shove) and strictly

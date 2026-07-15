@@ -464,11 +464,23 @@ fn seed_room(
         } else {
             1.0
         };
+        let section_count = segments.len();
         for (section, seg) in segments.iter().enumerate() {
             let midpoint = seg.a.middle_point(seg.b);
+            // Java's section_ok (MazeShoveTraceAlgo.check_shove_trace_line):
+            // a lateral slide is only possible entering through the FIRST
+            // or LAST door section — interior sections would need the
+            // trace to pass through the entry point
+            let section_discount = if shove_discount < 1.0
+                && (section == 0 || section + 1 == section_count)
+            {
+                shove_discount
+            } else {
+                1.0
+            };
             let ripup_cost = request.ripup_penalty
                 * engine.rippable_items(other).len() as f64
-                * shove_discount;
+                * section_discount;
             let cost = base_cost + location.distance(midpoint) + ripup_cost;
             // occupy ON PUSH (Java: expand_to_door_section sets
             // is_occupied when the element is inserted): each section
