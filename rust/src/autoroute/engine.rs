@@ -129,6 +129,14 @@ impl AutorouteEngine {
     /// (Java: additional_update_after_change on every item change).
     pub fn sync_board_changes(&mut self, board: &BasicBoard) {
         if board.change_epoch() != self.seen_epoch {
+            if crate::debug::maze() {
+                eprintln!(
+                    "SYNC net {} EPOCH {} -> {} (full clear)",
+                    self.net_no,
+                    self.seen_epoch,
+                    board.change_epoch()
+                );
+            }
             self.clear_rooms();
             self.seen_epoch = board.change_epoch();
             self.seen_log = board.change_log().len();
@@ -138,6 +146,9 @@ impl AutorouteEngine {
         if self.seen_log >= log.len() {
             return;
         }
+        let debug = crate::debug::maze();
+        let before = self.seen_log;
+        let mut removed_rooms = 0usize;
         let matrix = &board.rules.clearance_matrix;
         for (layer, bbox) in log[self.seen_log..].to_vec() {
             // rooms were restrained by the item inflated by up to
@@ -151,10 +162,20 @@ impl AutorouteEngine {
             for room in self.rooms_near(query, layer) {
                 if self.graph.room(room).shape.bounding_box().intersects(query) {
                     self.remove_complete_room(room);
+                    removed_rooms += 1;
                 }
             }
         }
         self.seen_log = log.len();
+        if debug {
+            eprintln!(
+                "SYNC net {} log {}..{} removed {} rooms",
+                self.net_no,
+                before,
+                log.len(),
+                removed_rooms
+            );
+        }
     }
 
     /// Switches the engine to another net, keeping the net-independent
@@ -376,6 +397,15 @@ impl AutorouteEngine {
             }
             crate::autoroute::maze_search::STATS
                 .with(|s| s.borrow_mut().rooms_completed += 1);
+            if crate::debug::maze() {
+                eprintln!(
+                    "NEWROOM {room_id} net {} layer {} nd {} bbox {:?}",
+                    self.net_no,
+                    piece.layer,
+                    net_dependent,
+                    piece_bbox
+                );
+            }
             self.complete_rooms.push(room_id);
             self.grid_insert(room_id, piece_bbox, piece.layer);
             self.target_doors.push(targets);

@@ -258,6 +258,28 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 145): PIC LEAK NARROWED TO A COMPLETION PIPELINE
+  CONTRADICTION. pic's 2 violations: net 21's SAME path inserts
+  illegally against successive incarnations of net 14's trace
+  (280→341→354). Facts established with new diagnostics (SYNC/ENGINE/
+  NEWROOM logs, LEAKGEOM shape capture — data saved in scratchpad
+  leakgeom_pic.txt): the engine was FRESH (created for net 21 after
+  354's insert, epoch-cleared), room 57 was completed BY that engine
+  with the blocker on board AND COLLECTED (region-obstacles include
+  280), margin correct (6518 = hw 4000 + cl 2502 + safety 16) — yet
+  the output room 2D-overlaps the blocker's inflation, and
+  RECOMPLETING the same shape cuts it correctly (still-dirty false).
+  Restrain outputs provably exclude processed obstacles; the gate
+  (dimension()==2) cannot skip for ≥5-line intersections ⇒ one of
+  the "impossible" steps is wrong in a representation-dependent way
+  (recompletion differs only via intersection_with_simplify's
+  normalization). NEXT ACTION: offline replay — log the failing
+  completion's full input (start simplex + ordered obstacle
+  simplices), reproduce in a unit test, and bisect the pipeline on
+  exact data. Suspects in order: LineSegment::from_shape /
+  is_intersected_interior_by on REDUNDANT-line simplices (wrong
+  corner endpoints → cut_line not found → second-branch behavior),
+  dimension() on ≤4-line unsimplified intersections.
 - 2026-07-15 (iter 144): BIDIRECTIONAL PULL-TIGHT GATE — FOUR
   boards at ZERO violations with FULL post-processing: display
   (29/30), NormalPuzzle (72/72), wavefolder (31/31), J2 (24/24);

@@ -202,6 +202,12 @@ pub fn route_net_with_store(
                 && e.trace_clearance_class == request.clearance_class
                 && e.trace_half_width == request.trace_half_width);
             if !usable {
+                if crate::debug::maze() {
+                    eprintln!(
+                        "ENGINE new for net {net_no} (hw {} class {})",
+                        request.trace_half_width, request.clearance_class
+                    );
+                }
                 *store = Some(crate::autoroute::engine::AutorouteEngine::new_with_clearance(
                     net_no,
                     false,

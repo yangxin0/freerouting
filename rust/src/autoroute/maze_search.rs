@@ -733,6 +733,30 @@ pub fn maze_route_with_engine(
                                 })
                             });
                             eprintln!("  RECOMPLETE pieces {} still-dirty {still}", re.len());
+                            if !still {
+                                // stale-looking: capture exact shapes for
+                                // offline reproduction
+                                let margin = request.trace_half_width
+                                    + board
+                                        .rules
+                                        .clearance_matrix
+                                        .get_value(
+                                            item.base.clearance_class,
+                                            request.clearance_class,
+                                            la,
+                                            true,
+                                        )
+                                        .max(0);
+                                eprintln!(
+                                    "  LEAKGEOM room {:?} margin {margin} item-shapes {:?}",
+                                    engine.graph.room(room).shape.to_simplex(),
+                                    item.tile_shapes(&board.padstacks)
+                                        .iter()
+                                        .filter(|(_, l)| *l == la)
+                                        .map(|(s, _)| s.to_simplex())
+                                        .collect::<Vec<_>>(),
+                                );
+                            }
                         }
                     }
                 }
