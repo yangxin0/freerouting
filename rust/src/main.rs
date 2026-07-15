@@ -32,6 +32,7 @@ Options:
   --export-rules <f> write the design rules to a .rules file
   --api-server <p>   run the REST API server on port <p> (no routing)
   --ratsnest <f>     write the unconnected airlines as JSON after routing
+  --export-json <f>  write the routed board as KiCad board JSON
   --profile <f>      apply a JSON router-settings profile (maxPasses,
                      viaCosts, timeLimitSeconds, angleRestriction, threads)
   -h, --help         show this help";
@@ -280,6 +281,13 @@ fn main() -> ExitCode {
         match std::fs::write(rn_path, &json) {
             Ok(()) => println!("ratsnest written to {rn_path}"),
             Err(e) => eprintln!("error: cannot write {rn_path}: {e}"),
+        }
+    }
+    if let Some(json_path) = flag_value("--export-json") {
+        let text = freerouting::io::export_kicad_json(&board);
+        match std::fs::write(json_path, &text) {
+            Ok(()) => println!("board JSON written to {json_path} ({} bytes)", text.len()),
+            Err(e) => eprintln!("error: cannot write {json_path}: {e}"),
         }
     }
     let design_name = std::path::Path::new(design)

@@ -460,8 +460,10 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       net classes (clearance/width/via geometry), nets, components
       with rotated pad offsets (through-hole vs SMD layers),
       pre-routed traces/vias; mm/mil/µm units at Java's 0.1 µm
-      default resolution. CLI: -de file.json. Writer + conduction
-      areas + custom clearance rules simplified — noted.)
+      default resolution. CLI: -de file.json. Iter 183: WRITER ported
+      too (export_kicad_json, CLI --export-json, round-trips through
+      the reader). Conduction areas + custom clearance rules remain
+      simplified — noted.)
   [x] DRC report (iter 162: src/drc.rs — DesignRulesChecker port:
       check_board collects deduplicated clearance violations (mitered
       pre-filter + exact Euclidean confirm, worst actual distance) and
