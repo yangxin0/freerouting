@@ -258,6 +258,21 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 177): SCORE HEAD-TO-HEAD (identical formula both
+  sides — ours is the exact port; router phase, 60 s Rust runs):
+  | board        | Java 1.9 score          | Rust score               |
+  | J2           | 971.95 (3 unrouted)     | 999.97 clean         WIN |
+  | wavefolder   | 974.21 (5 unrouted)     | 999.97 clean         WIN |
+  | display      | 995.60 (1 unrouted)     | 999.94 clean         WIN |
+  | pic          | 996.51 (1 unr + 1 v)    | 994.09 (1 v, varies) ~tie|
+  | NormalPuzzle | 999.99                  | 999.99               tie |
+  | 8088sbc      | 999.98                  | 999.91 (via/length)  ~tie|
+  | interf_u     | 999.86 (62 VIOLATIONS)  | 172/173 clean       split|
+  | coldfire     | 993.45 (11 unr + 4 v)   | 260/278             Java |
+  Rust wins or ties 6/8 by Java's own metric; 8088sbc's gap is pure
+  via-count/length cost (Java routes it with fewer vias — optimizer
+  quality); pic showed 1 violation in this CLI run (drc_check runs
+  are 0 — pipeline variance to check).
 - 2026-07-15 (iter 174): HEAD-TO-HEAD REFRESH (all features + all
   performance work in; Java 1.9 router phase on stripped boards):
   | board        | Java 1.9                | Rust (now)                 |
