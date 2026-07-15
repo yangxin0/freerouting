@@ -284,6 +284,45 @@ impl BasicBoard {
         result
     }
 
+    /// Like [`Self::overlapping_items`], but WITHOUT the exact per-shape
+    /// intersection filter: returns every item whose tree bounding octagon
+    /// overlaps `shape` (plus the planes matching by bbox). Callers must
+    /// do their own exact filtering; use when the candidate set is large
+    /// and downstream work discards far items cheaply anyway.
+    pub fn overlapping_items_coarse(
+        &self,
+        shape: &TileShape,
+        layer: Option<usize>,
+    ) -> Vec<ItemId> {
+        let Some(query) = shape.bounding_octagon() else {
+            return Vec::new();
+        };
+        let mut result: Vec<ItemId> = self
+            .search_tree
+            .overlaps(query)
+            .into_iter()
+            .map(|leaf| *self.search_tree.entry(leaf).object)
+            .filter(|entry| layer.is_none_or(|l| entry.layer == l))
+            .map(|entry| entry.item_id)
+            .collect();
+        let query_bbox = shape.bounding_box();
+        for &plane_id in &self.plane_items {
+            let Some(item) = self.get_item(plane_id) else {
+                continue;
+            };
+            let matches = item.tile_shapes(&self.padstacks).iter().any(|(s, l)| {
+                layer.is_none_or(|want| *l == want)
+                    && s.bounding_box().intersects(query_bbox)
+            });
+            if matches {
+                result.push(plane_id);
+            }
+        }
+        result.sort();
+        result.dedup();
+        result
+    }
+
     /// The connectable items of `net_no` touching `shape` on `layer`.
     pub fn overlapping_items_of_net(
         &self,

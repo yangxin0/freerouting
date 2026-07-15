@@ -601,10 +601,23 @@ pub fn maze_route_with_engine(
         for k in 0..result.corners.len().saturating_sub(1) {
             let (a, la) = result.corners[k];
             let (b, lb) = result.corners[k + 1];
+            if std::env::var_os("FR_DEBUG_PATH").is_some() {
+                eprintln!(
+                    "PATH net {} corner {k} ({:.0},{:.0}) layer {la} room {:?}",
+                    request.net_no, a.x, a.y, result.rooms[k]
+                );
+            }
             if la != lb {
                 continue;
             }
-            let Some(room) = result.rooms[k] else { continue };
+            let Some(room) = result.rooms[k] else {
+                eprintln!(
+                    "INVARIANT SKIP net {} corner {k}: no room for segment \
+                     ({:.0},{:.0})→({:.0},{:.0}) layer {la}",
+                    request.net_no, a.x, a.y, b.x, b.y
+                );
+                continue;
+            };
             let shape = &engine.graph.room(room).shape;
             let pa = crate::geometry::planar::Point::Int(a.round());
             let pb = crate::geometry::planar::Point::Int(b.round());
@@ -618,6 +631,134 @@ pub fn maze_route_with_engine(
                      layer {la} room {room} does not contain both endpoints",
                     a, b
                 );
+            } else {
+                // cross-check: the room contains the segment, so the
+                // segment must be clear of foreign items; if not, the
+                // ROOM itself overlaps an obstacle
+                let (ra, rb) = (a.round(), b.round());
+                if ra != rb {
+                    if let Some(seg) = Polyline::from_two_points(ra, rb)
+                        .offset_shape(request.trace_half_width, 0)
+                    {
+                        let cl = board
+                            .rules
+                            .clearance_matrix
+                            .get_value(
+                                request.clearance_class,
+                                request.clearance_class,
+                                la,
+                                false,
+                            )
+                            .max(0) as f64;
+                        let check = seg.offset(cl - 2.0);
+                        for id in board.overlapping_items(&check, Some(la)) {
+                            let Some(item) = board.get_item(id) else { continue };
+                            if item.base.contains_net(request.net_no) {
+                                continue;
+                            }
+                            if let crate::board::ItemKind::ObstacleArea(ar) = &item.kind {
+                                if ar.is_conduction {
+                                    continue;
+                                }
+                            }
+                            if !item.tile_shapes(&board.padstacks).iter().any(|(s, l)| {
+                                *l == la && s.intersection(&check).dimension() >= 2
+                            }) {
+                                continue;
+                            }
+                            eprintln!(
+                                "ROOM LEAK net {} corner {k} room {room} bbox {:?} \
+                                 contains segment ({},{})→({},{}) layer {la} \
+                                 but item {id} (nets {:?}, birth {}, bbox {:?}) blocks",
+                                request.net_no,
+                                shape.bounding_box(),
+                                ra.x, ra.y, rb.x, rb.y,
+                                item.base.net_nos,
+                                item.base.birth,
+                                item.bounding_box(&board.padstacks),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // room-vs-board consistency audit (expensive, FR_AUDIT_ROOMS): every
+    // completed room must be clear of every foreign item's inflated shape
+    if std::env::var_os("FR_AUDIT_ROOMS").is_some() && !allow_ripup {
+        for &room_id in engine.complete_rooms() {
+            let r = engine.graph.room(room_id);
+            let room_bbox = r.shape.bounding_box();
+            let query = TileShape::Box(room_bbox).offset(8000.0);
+            for id in board.overlapping_items(&query, Some(r.layer)) {
+                let Some(item) = board.get_item(id) else { continue };
+                if item.base.contains_net(request.net_no) {
+                    continue;
+                }
+                if let crate::board::ItemKind::ObstacleArea(ar) = &item.kind {
+                    if ar.is_conduction {
+                        continue;
+                    }
+                }
+                let cl = board
+                    .rules
+                    .clearance_matrix
+                    .get_value(
+                        item.base.clearance_class,
+                        request.clearance_class,
+                        r.layer,
+                        false,
+                    )
+                    .max(0) as f64;
+                for (os, ol) in item.tile_shapes(&board.padstacks) {
+                    if *ol != r.layer {
+                        continue;
+                    }
+                    let infl = os.offset(request.trace_half_width as f64 + cl - 2.0);
+                    if infl.intersection(&r.shape).dimension() >= 2 {
+                        eprintln!(
+                            "DIRTY ROOM net {} room {room_id} layer {} bbox {:?} \
+                             overlaps item {id} (nets {:?}, birth {}) shape-bbox {:?} \
+                             cl {cl} hw {} isect-bbox {:?}\n  ROOM-GEOM {:?}\n  OBST-GEOM {:?}",
+                            request.net_no,
+                            r.layer,
+                            room_bbox,
+                            item.base.net_nos,
+                            item.base.birth,
+                            os.bounding_box(),
+                            request.trace_half_width,
+                            infl.intersection(&r.shape).bounding_box(),
+                            r.shape.to_simplex(),
+                            os.to_simplex(),
+                        );
+                        // decisive probe: re-complete this exact shape now;
+                        // if the piece survives overlapping, the collection
+                        // or restrain bug reproduces deterministically
+                        let recompleted =
+                            crate::autoroute::room_completion::complete_shape_with_ripup(
+                                board,
+                                &crate::autoroute::room_completion::IncompleteRoom {
+                                    shape: r.shape.clone(),
+                                    layer: r.layer,
+                                    contained_shape: r.shape.clone(),
+                                },
+                                request.net_no,
+                                None,
+                                false,
+                                request.clearance_class,
+                                request.trace_half_width,
+                            );
+                        let still_dirty = recompleted
+                            .iter()
+                            .any(|p| infl.intersection(&p.shape).dimension() >= 2);
+                        eprintln!(
+                            "  RECOMPLETE pieces {} still-dirty {}",
+                            recompleted.len(),
+                            still_dirty
+                        );
+                    }
+                }
             }
         }
     }
@@ -799,6 +940,14 @@ fn insert_connection(
                                 if a.is_conduction {
                                     continue;
                                 }
+                            }
+                            // exact: only report 2D overlaps (the tree
+                            // query also returns boundary touches)
+                            if !item.tile_shapes(&board.padstacks).iter().any(|(s, l)| {
+                                *l == layer
+                                    && s.intersection(&check).dimension() >= 2
+                            }) {
+                                continue;
                             }
                             eprintln!(
                                 "ILLEGAL INSERT net {} layer {layer} ripup={} \

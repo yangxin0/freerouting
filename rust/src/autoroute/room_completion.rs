@@ -64,13 +64,23 @@ pub fn complete_shape_with_ripup(
     let matrix = &board.rules.clearance_matrix;
     // the query must include the margin: an obstacle just OUTSIDE the
     // room's start shape still restrains it when its inflated shape
-    // reaches inside (missing this was the final DRC leak — obstacles
-    // behind a frontier half-plane's border were invisible)
-    let max_margin =
-        trace_half_width as f64 + matrix.max_value(room.layer).max(0) as f64;
-    let query_shape = start_shape.offset(max_margin);
+    // reaches inside (missing this was a DRC leak — obstacles behind a
+    // frontier half-plane's border were invisible). The factor 2 covers
+    // the MITER REACH: inflation pushes border lines outward, so an
+    // obstacle's inflated corner extends up to margin·√2 (90° corners)
+    // beyond its copper — an obstacle diagonally off a room corner is
+    // otherwise missed while its inflation still overlaps the room
+    // (Java avoids this by storing pre-compensated shapes in the tree).
+    // Over-collection is harmless: the restrain loop intersects exactly.
+    let max_margin = trace_half_width as f64
+        + (matrix.max_value(room.layer).max(0)
+            + crate::rules::clearance_matrix::CLEARANCE_SAFETY_MARGIN) as f64;
+    let query_shape = start_shape.offset(2.0 * max_margin);
+    // coarse (bbox-level) query: the exact cut happens per inflated shape
+    // below, so per-candidate exact intersections here would be wasted
+    let start_bbox = start_shape.bounding_box();
     let mut obstacles: Vec<(ItemId, TileShape)> = Vec::new();
-    for item_id in board.overlapping_items(&query_shape, Some(room.layer)) {
+    for item_id in board.overlapping_items_coarse(&query_shape, Some(room.layer)) {
         if Some(item_id) == ignore_item {
             continue;
         }
@@ -113,6 +123,10 @@ pub fn complete_shape_with_ripup(
                 } else {
                     shape.clone()
                 };
+                // early cut: inflated shape can't restrain the room
+                if !shape.bounding_box().intersects(start_bbox) {
+                    continue;
+                }
                 obstacles.push((item_id, shape));
             }
         }
@@ -142,7 +156,8 @@ pub fn complete_shape_with_ripup(
                 Some(room.layer),
             );
             eprintln!(
-                "COMPLETE layer {} contained {:?} region-obstacles {:?} tree-sees {:?}",
+                "COMPLETE net {net_no} ripup={ignore_rippable} ignore={ignore_item:?} \
+                 layer {} contained {:?} region-obstacles {:?} tree-sees {:?}",
                 room.layer,
                 room.contained_shape.bounding_box(),
                 in_region,

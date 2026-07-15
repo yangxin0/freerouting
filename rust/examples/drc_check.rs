@@ -121,6 +121,24 @@ fn main() {
                 }
                 if conflict {
                     violations += 1;
+                    // bisect the violation depth: largest d with overlap
+                    // at offset(clearance - d)
+                    let (mut lo, mut hi) = (0.0f64, clearance);
+                    while hi - lo > 1.0 {
+                        let mid = (lo + hi) / 2.0;
+                        let deep = other.tile_shapes(&board.padstacks).iter().any(|(s, l)| {
+                            *l == layer
+                                && s.intersection(&shape.offset(clearance - mid))
+                                    .dimension()
+                                    >= 2
+                        });
+                        if deep {
+                            lo = mid;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    println!("DEPTH {lo:.0} of {clearance}");
                     if violations <= 10 {
                         let kind = |it: &freerouting::board::Item| match &it.kind {
                             ItemKind::Via(_) => "via",

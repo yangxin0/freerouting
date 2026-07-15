@@ -258,6 +258,32 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 136): THE MITER-REACH LEAK — the deep-violation
+  class found, reproduced, and fixed. Chain: exact-overlap validators
+  (bbox-noise removed) → invariant cross-check → FR_AUDIT_ROOMS
+  (audits EVERY completed room vs every foreign inflated shape after
+  each search) found 60+ DIRTY ROOMS → geometry dump + in-place
+  recompletion probe reproduced 63/63 deterministically. ROOT CAUSE:
+  obstacle inflation is a mitered line-push, so a box inflated by m
+  reaches m·√2 beyond its copper at corners; the collection query
+  start_shape.offset(m) only reaches m toward its own borders — an
+  obstacle diagonally off a room corner is missed by the query while
+  its inflation overlaps the room corner (Java is immune: its search
+  tree stores pre-compensated shapes, queries are exact). FIX: query
+  radius 2·(hw + max_cl + safety) via a new coarse bbox-level query
+  (overlapping_items_coarse) + early bbox cut per inflated shape (the
+  restrain loop stays exact). RESULTS: FR_AUDIT_ROOMS clean (0 dirty);
+  display 30/30 with 12 violations (was 34-38; rest is the
+  transactional rip/shove-window class + post-processing);
+  wavefolder/J2/ecc83 0 violations. HONEST COSTS: the previously
+  leaky rooms were routing through corner slivers — interf_u
+  170/173 (was 173/173, 3 nets now need real ripup, finishes at
+  276s), NormalPuzzle 71/72 (was 72/72). Recovering those is a
+  ripup/shove quality problem, not a correctness one. Debug arsenal
+  added: FR_AUDIT_ROOMS, FR_DEBUG_PATH, ROOM LEAK invariant
+  cross-check, exact ILLEGAL INSERT validator, DEPTH bisection in
+  drc_check. NOTE: routing is timing-nondeterministic (deadline
+  checks), run-to-run counts vary a few violations.
 - 2026-07-15 (iter 135): SAFETY MARGIN — the boundary-equality bug:
   the room guarantee (obstacle margin hw+cl) EQUALS the DRC
   requirement exactly, so boundary-riding paths tip into violation
