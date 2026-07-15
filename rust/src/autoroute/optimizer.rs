@@ -103,6 +103,33 @@ pub fn optimize_route_pass(
     improved
 }
 
+/// One via-optimization sweep (Java: OptViaAlgo in the optimizer
+/// phase): every route via tries to slide to a shorter legal location.
+pub fn optimize_vias(
+    board: &mut BasicBoard,
+    time_limit: Option<&crate::datastructures::TimeLimit>,
+) -> usize {
+    let vias: Vec<ItemId> = board
+        .items()
+        .filter(|(_, it)| {
+            it.base.component_no == 0
+                && it.base.net_count() > 0
+                && matches!(it.kind, ItemKind::Via(_))
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    let mut moved = 0usize;
+    for via in vias {
+        if time_limit.is_some_and(|t| t.limit_exceeded()) {
+            break;
+        }
+        if crate::board::opt_via::opt_via_location(board, via, 3) {
+            moved += 1;
+        }
+    }
+    moved
+}
+
 /// Runs optimization passes until no net improves or time runs out.
 /// Returns the total number of improvements.
 pub fn optimize_route(
@@ -115,7 +142,8 @@ pub fn optimize_route(
         if time_limit.is_some_and(|t| t.limit_exceeded()) {
             break;
         }
-        let improved = optimize_route_pass(board, request, time_limit);
+        let improved = optimize_route_pass(board, request, time_limit)
+            + optimize_vias(board, time_limit);
         total += improved;
         if improved == 0 {
             break;

@@ -328,7 +328,13 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       MazeShoveTraceAlgo line-shove check (shove instead of rip when
       the trace can slide) — insert currently shoves via the corridor
       shove_aside then rips what stays)
-  [ ] OptViaAlgo (via optimization)
+  [x] OptViaAlgo (iter 161: board/opt_via.rs — a via contacted by
+      exactly two unfixed traces slides toward the adjacent corners /
+      their midpoint when legal (forced-via with shove) and strictly
+      shorter; stubs reconnected, transactional, both nets verified
+      connected. Wired into the optimizer phase (optimize_vias sweep
+      per pass). Plane/fanout single-contact branch simplified out —
+      noted.)
   [ ] BatchOptimizerMultiThreaded (parallel optimizer)
   [ ] Distinct-net shove stacking (ShapeTraceEntries full semantics)
   I/O & TOOLING:
