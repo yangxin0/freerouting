@@ -67,6 +67,13 @@ pub fn opt_via_location(board: &mut BasicBoard, via_id: ItemId, max_recursion: u
     if item.base.is_user_fixed() || item.base.component_no != 0 {
         return false;
     }
+    let contacts = board.get_normal_contacts(via_id);
+    if contacts.len() == 1 {
+        // plane/fanout via: exactly one trace contact — pull the via
+        // along its stub toward the far end (Java:
+        // opt_plane_or_fanout_via)
+        return opt_single_contact_via(board, via_id, contacts[0]);
+    }
     let Some((t1, t2)) = two_trace_contacts(board, via_id) else {
         return false;
     };
@@ -180,6 +187,72 @@ pub fn opt_via_location(board: &mut BasicBoard, via_id: ItemId, max_recursion: u
     false
 }
 
+/// The plane/fanout branch (Java: `opt_plane_or_fanout_via`): a via
+/// with a single trace contact slides to the trace's adjacent corner,
+/// shortening the stub, when a forced via fits there and the net stays
+/// connected.
+fn opt_single_contact_via(board: &mut BasicBoard, via_id: ItemId, trace_id: ItemId) -> bool {
+    let Some(item) = board.get_item(via_id).cloned() else {
+        return false;
+    };
+    let ItemKind::Via(via) = &item.kind else {
+        return false;
+    };
+    if item.base.is_user_fixed() || item.base.component_no != 0 {
+        return false;
+    }
+    let Some(t) = board.get_item(trace_id).cloned() else {
+        return false;
+    };
+    if t.base.is_user_fixed() || !matches!(t.kind, ItemKind::PolylineTrace(_)) {
+        return false;
+    }
+    let via_center = via.center;
+    let padstack = via.padstack;
+    let net_nos = item.base.net_nos.clone();
+    let cl_class = item.base.clearance_class;
+    let tolerance = board
+        .padstacks
+        .get_by_no(padstack)
+        .and_then(|p| p.get_shape(p.from_layer()))
+        .map(|s| s.bounding_box().min_width() / 2.0 + 1.0)
+        .unwrap_or(500.0);
+    let Some((cand, end)) = from_corner(board, trace_id, via_center, tolerance) else {
+        return false;
+    };
+    if cand == via_center {
+        return false;
+    }
+    let hw = match &t.kind {
+        ItemKind::PolylineTrace(pt) => pt.half_width,
+        _ => return false,
+    };
+    board.generate_snapshot();
+    // when the via reaches the trace's far corner the stub degenerates:
+    // remove it entirely — the via then contacts the far item directly
+    // (Java deletes the emptied stub too)
+    let ok = if shorten_trace_at(board, trace_id, end, cand) {
+        true
+    } else {
+        board.remove_item(trace_id)
+    };
+    let ok = ok && {
+        board.remove_item(via_id);
+        insert_forced_via(board, padstack, cand, &net_nos, cl_class, hw).is_some()
+    };
+    let connected = ok
+        && net_nos
+            .iter()
+            .all(|&n| board.net_is_completely_connected(n));
+    if connected {
+        board.pop_snapshot();
+        true
+    } else {
+        board.undo();
+        false
+    }
+}
+
 /// Replaces the via-end corner of a trace with `new_end` (the stub
 /// follows the moved via). Returns false when the geometry degenerates.
 fn shorten_trace_at(
@@ -249,6 +322,26 @@ mod tests {
             1,
         );
         BasicBoard::new(stack, rules, padstacks)
+    }
+
+    #[test]
+    fn single_contact_via_pulls_along_its_stub() {
+        let mut board = test_board();
+        let pad = board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        board.set_component_no(pad, 1);
+        // stub from the pad to a dangling fanout via
+        let via = board.insert_via(1, IntPoint::new(12000, 0), vec![1], 1, false);
+        board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(0, 0), IntPoint::new(12000, 0)]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        assert!(board.net_is_completely_connected(1));
+        let moved = opt_via_location(&mut board, via, 3);
+        assert!(moved, "the fanout via should pull toward the pad");
+        assert!(board.net_is_completely_connected(1));
     }
 
     #[test]

@@ -419,8 +419,10 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       their midpoint when legal (forced-via with shove) and strictly
       shorter; stubs reconnected, transactional, both nets verified
       connected. Wired into the optimizer phase (optimize_vias sweep
-      per pass). Plane/fanout single-contact branch simplified out —
-      noted.)
+      per pass). Iter 184: plane/fanout single-contact branch PORTED
+      (opt_single_contact_via — the via pulls along its stub toward
+      the contact; a degenerated stub is deleted and the via lands
+      on the far item, like Java). All OptViaAlgo branches now in.)
   [x] BatchOptimizerMultiThreaded (iter 166: optimize_route_multithreaded
       — per round, workers clone the board and optimize round-robin
       net slices in parallel; the best-scoring result is adopted
