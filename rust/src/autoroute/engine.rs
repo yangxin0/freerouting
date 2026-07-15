@@ -45,6 +45,9 @@ pub struct AutorouteEngine {
     /// Rooms whose completion skipped an own-net or rippable item: they
     /// cannot survive a net switch (Java: is_net_dependent).
     net_dependent: Vec<bool>,
+    /// Drill pages for via-location candidates (Java: DrillPageArray),
+    /// created on first use, cache synced against board changes.
+    pub drill_pages: Option<crate::autoroute::drill_pages::DrillPageArray>,
     /// Consumed prefix of the board's change log.
     seen_log: usize,
     /// The board change epoch this graph was built against.
@@ -85,6 +88,7 @@ impl AutorouteEngine {
             rippable_items: Vec::new(),
             expanded: Vec::new(),
             net_dependent: Vec::new(),
+            drill_pages: None,
             seen_log: 0,
             seen_epoch: 0,
             grid: std::collections::HashMap::new(),

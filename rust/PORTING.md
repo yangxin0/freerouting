@@ -306,7 +306,16 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       incomplete-room queue in the graph, maze-triggered lazy
       completion through doors, then replace expand_room and flip
       the default)
-  [ ] DrillPageArray/DrillPage (replace in-room grid sampling)
+  [x] DrillPageArray/DrillPage (iter 159: autoroute/drill_pages.rs —
+      pages of max(5×via,10k) width caching ExpansionDrills = centers
+      of the convex free pieces (page minus undrillable inflated item
+      shapes, split via restrain_all), per-net like Java, invalidated
+      through the change log/epoch; the maze drill expansion consumes
+      page drills intersecting the entered room instead of grid
+      sampling. FLEET: all boards complete, zero violations — J2 back
+      to 24/24 (page candidates cured the GND flap). COST noted for
+      the performance phase: NormalPuzzle 0.98→3.1 s, 8088sbc pass0
+      11.4→17.4 s (per-net page recompute).)
   [ ] MazeShoveTraceAlgo (in-maze shove)
   [ ] OptViaAlgo (via optimization)
   [ ] BatchOptimizerMultiThreaded (parallel optimizer)

@@ -5,6 +5,7 @@
 //! interim grid router so the pipeline is routable end to end meanwhile.
 
 pub mod batch;
+pub mod drill_pages;
 pub mod engine;
 pub mod expansion_room;
 pub mod maze_search;

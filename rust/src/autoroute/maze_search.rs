@@ -488,27 +488,35 @@ fn seed_room(
     }
     let mut drill_points: Vec<IntPoint> = vec![location.round()];
     {
-        // grid sampling like drill pages: step derived from the via size
+        // drill pages (Java: DrillPageArray): cached convex free areas;
+        // candidates are the page drills whose free area intersects the
+        // current room
         let room_shape = engine.graph.room(room).shape.clone();
         let bb = room_shape.bounding_box();
-        let via_extent = padstack
+        if engine.drill_pages.is_none() {
+            engine.drill_pages = Some(
+                crate::autoroute::drill_pages::DrillPageArray::new(
+                    board,
+                    request.via_padstack,
+                ),
+            );
+        }
+        let via_margin = padstack
             .get_shape(from)
-            .map(|s| s.bounding_box().width().max(1))
-            .unwrap_or(1000);
-        let step = (2 * via_extent).max(4 * request.trace_half_width);
-        let mut count = 0;
-        let mut x = bb.ll.x - bb.ll.x.rem_euclid(step) + step;
-        while x < bb.ur.x && count < 16 {
-            let mut y = bb.ll.y - bb.ll.y.rem_euclid(step) + step;
-            while y < bb.ur.y && count < 16 {
-                let p = IntPoint::new(x, y);
-                if room_shape.contains(&crate::geometry::planar::Point::Int(p)) {
-                    drill_points.push(p);
-                    count += 1;
-                }
-                y += step;
+            .map(|s| (s.bounding_box().max_width() / 2.0) as i32)
+            .unwrap_or(1000)
+            + board.rules.clearance_matrix.max_value(layer).max(0);
+        let pages = engine.drill_pages.as_mut().unwrap();
+        pages.sync_board_changes(board);
+        for drill in pages.drills_overlapping(board, &bb, request.net_no, via_margin) {
+            if drill_points.len() >= 17 {
+                break;
             }
-            x += step;
+            if room_shape
+                .contains(&crate::geometry::planar::Point::Int(drill.location))
+            {
+                drill_points.push(drill.location);
+            }
         }
     }
     for drill_point in drill_points {
