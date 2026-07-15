@@ -123,6 +123,11 @@ fn main() -> ExitCode {
         result.failed_connections
     );
 
+    let opt_limit = TimeLimit::new(30_000);
+    let improved = freerouting::autoroute::optimize_route(&mut board, &request, Some(&opt_limit));
+    if improved > 0 {
+        println!("optimizer: {improved} nets improved");
+    }
     let combined = freerouting::autoroute::combine_all_traces(&mut board);
     if combined > 0 {
         println!("normalized: {combined} trace fragments combined");

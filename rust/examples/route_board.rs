@@ -104,6 +104,15 @@ fn main() {
     if !incomplete_nets.is_empty() {
         println!("incomplete nets: {}", incomplete_nets.join(", "));
     }
+    // optimizer phase (Java: BatchOptRoute): rip-and-reroute per net
+    // with the remaining wall clock (capped)
+    let opt_budget = 30_000u64;
+    let t_opt = Instant::now();
+    let opt_limit = freerouting::datastructures::TimeLimit::new(opt_budget);
+    let improved =
+        freerouting::autoroute::optimize_route(&mut board, &request, Some(&opt_limit));
+    println!("optimizer: {improved} nets improved in {:?}", t_opt.elapsed());
+
     // normalize (combine fragmented trace chains), then pull tight
     let combined = freerouting::autoroute::combine_all_traces(&mut board);
     println!("normalized: {combined} trace fragments combined");
