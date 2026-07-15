@@ -590,7 +590,7 @@ pub fn batch_route_passes_with_time_limit(
             // overrides
             let cross_net = std::env::var("FR_CROSS_NET")
                 .map(|v| v != "0")
-                .unwrap_or_else(|_| board.item_count() >= 1000);
+                .unwrap_or_else(|_| board.item_count() >= 400);
             let result = if ripup_penalty > 0.0 {
                 route_net_with_ripup(board, net_no, &net_request, ripup_penalty)
             } else if cross_net {

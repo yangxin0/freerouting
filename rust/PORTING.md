@@ -258,6 +258,14 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 173): THE VARIANCE SOLVED — it was never
+  variance: 8088sbc has only 471 items, under the 1000-item
+  cross-net threshold, so route_board ran the old path while the
+  drc A/B had FR_CROSS_NET=1 explicitly. Threshold lowered to 400.
+  RESULT: 8088sbc routes 104/104 COMPLETE IN 14.1 s with ZERO
+  violations (Java 1.9: 8.0 s) — from ~300 s to within 2× of Java.
+  ENTIRE fleet incl. 8088sbc now at zero violations and full
+  completion. interf_u/coldfire reruns queued.
 - 2026-07-15 (iter 172): PERFORMANCE PHASE round 1. (a) Drill pages:
   two-level cache (net-independent base drills computed once per
   invalidation; per-net recompute only for pages actually containing
