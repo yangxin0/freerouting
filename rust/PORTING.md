@@ -344,7 +344,14 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       route vias with net/type tags); CLI --export-dsn. KNOWN ISSUE:
       round-trip connectivity drift — some re-imported wires miss
       their pad contacts (endpoint rounding), chase next.)
-  [ ] SES import
+  [x] SES import (iter 164: io/ses_import.rs — SesReader port:
+      network_out wires/vias parsed with the session's resolution
+      scaled to the board's, inserted with their nets; CLI
+      --import-ses applies a session before routing. Round-trip:
+      route → .ses → import → 72/72 complete, 0 connections, 8 ms.
+      Also this iteration: DSN export UNIT FIX — coordinates descale
+      to file units; full-board DSN round-trip now preserves
+      connectivity exactly.)
   [ ] KiCad direct file I/O
   [x] DRC report (iter 162: src/drc.rs — DesignRulesChecker port:
       check_board collects deduplicated clearance violations (mitered

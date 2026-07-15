@@ -26,6 +26,7 @@ Options:
   --angle <mode>     trace angle restriction: none, 45, 90 (default 45)
   --drc-report <f>   write a KiCad-format DRC report (JSON) after routing
   --export-dsn <f>   write the routed design as a Specctra DSN file
+  --import-ses <f>   apply an existing session file before routing
   -h, --help         show this help";
 
 fn main() -> ExitCode {
@@ -89,6 +90,16 @@ fn main() -> ExitCode {
         board.rules.nets.max_net_no(),
         board.item_count()
     );
+
+    if let Some(ses_path) = flag_value("--import-ses") {
+        match std::fs::read_to_string(ses_path) {
+            Ok(text) => match freerouting::io::import_ses(&mut board, &text) {
+                Ok(s) => println!("session applied: {} wires, {} vias", s.wires, s.vias),
+                Err(e) => eprintln!("error: {e}"),
+            },
+            Err(e) => eprintln!("error: cannot read {ses_path}: {e}"),
+        }
+    }
 
     // via padstack: first named "Via*", else any all-layer padstack
     let all_layers = board.layer_structure.layer_count().saturating_sub(1);
