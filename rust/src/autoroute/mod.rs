@@ -12,6 +12,7 @@ pub mod fanout;
 pub mod optimizer;
 pub mod pull_tight;
 pub mod room_completion;
+pub mod sorted_room_neighbours;
 pub mod simple_router;
 
 pub use batch::{

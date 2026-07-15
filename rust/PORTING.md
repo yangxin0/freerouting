@@ -285,7 +285,16 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       J2 24/24, wavefolder 31/31, pic 111/111, NormalPuzzle 72/72 —
       ALL ZERO violations. PullTight45's full corner-reduction
       remains simplified: bypass gating only)
-  [ ] SortedRoomNeighbours (replace simplified frontier expansion)
+  [~] SortedRoomNeighbours (iter 157: autoroute/sorted_room_neighbours.rs
+      — Neighbour records with exact first/last corners, the
+      counterclockwise comparator (tolerance 1), touching_sides /
+      equals_corner classification for dim-1 and dim-0 touches, and
+      calculate_new_incomplete_rooms' full gap walk (start/middle/end
+      edge lines, concave-corner drops) producing GapRooms; unit
+      tested on synthetic geometry. REMAINING: engine integration —
+      incomplete-room queue in the graph, maze-triggered lazy
+      completion through doors, then replace expand_room and flip
+      the default)
   [ ] DrillPageArray/DrillPage (replace in-room grid sampling)
   [ ] MazeShoveTraceAlgo (in-maze shove)
   [ ] OptViaAlgo (via optimization)
