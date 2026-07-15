@@ -258,6 +258,19 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 179): INTERF_U COMPLETE — 173/173, the VCC
+  holdout falls. Diagnosis: VCC (22 connections, the biggest net)
+  routes ALONE in 136 ms — the ascending-extent order simply routed
+  it LAST into leftover congestion. New HYBRID net order: many-pin
+  nets (≥6 connectable items — power nets needing whole corridor
+  systems) route FIRST by descending pin count on the open board;
+  signal nets keep ascending extent (measured cleanest). Straight
+  descending completed everything too but reintroduced 2+2
+  violations on NormalPuzzle/J2 — the hybrid gives BOTH: interf_u
+  173/173 AND all-zero violations across NormalPuzzle/J2/display/
+  8088sbc. SEVEN OF EIGHT boards now fully complete + clean; only
+  coldfire's tail remains. probe_net example added (routes one named
+  net on the bare board).
 - 2026-07-15 (iter 177): SCORE HEAD-TO-HEAD (identical formula both
   sides — ours is the exact port; router phase, 60 s Rust runs):
   | board        | Java 1.9 score          | Rust score               |

@@ -541,9 +541,27 @@ pub fn batch_route_passes_with_time_limit(
     time_limit: Option<&crate::datastructures::TimeLimit>,
 ) -> BatchResult {
     let mut net_nos: Vec<i32> = (1..=board.rules.nets.max_net_no()).collect();
-    net_nos.sort_by_key(|&n| net_extent(board, n));
+    // many-pin (power) nets route FIRST on the open board — they need
+    // whole corridor systems and are unroutable into leftover congestion
+    // (interf_u's VCC: 22 connections, routable alone in 136 ms, never
+    // completable when last); everything else keeps ascending extent,
+    // which measured cleanest for signal nets
+    let pin_count = |n: i32| -> usize {
+        board
+            .items()
+            .filter(|(_, it)| it.base.contains_net(n) && it.is_connectable())
+            .count()
+    };
+    net_nos.sort_by_key(|&n| {
+        let pins = pin_count(n);
+        if pins >= 6 {
+            (0i64, (usize::MAX - pins) as i64, 0i64)
+        } else {
+            (1i64, 0i64, net_extent(board, n))
+        }
+    });
     if crate::debug::route_order_desc() {
-        net_nos.reverse(); // experiment: largest extent first
+        net_nos.reverse(); // experiment: reversed order
     }
 
     let mut total = BatchResult::default();
