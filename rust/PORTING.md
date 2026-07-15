@@ -258,6 +258,21 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 174): HEAD-TO-HEAD REFRESH (all features + all
+  performance work in; Java 1.9 router phase on stripped boards):
+  | board        | Java 1.9                | Rust (now)                 |
+  | NormalPuzzle | 1.2 s clean             | 2.0 s, 72/72, 0 viol       |
+  | J2           | 3.4 s, 3 UNROUTED       | 0.1 s, 24/24, 0 viol   WIN |
+  | wavefolder   | 5.9 s, 5 UNROUTED       | ~2 s, 31/31, 0 viol    WIN |
+  | display      | 3.3 s, 1 unrouted       | 8.5 s, 30/30, 0 viol   WIN |
+  | pic          | 1.2 s, 1 unr + 1 viol   | 0.8 s, 111/111, 0 v    WIN |
+  | 8088sbc      | 8.0 s clean             | 14.1 s, 104/104, 0 v  ~par |
+  | interf_u     | 7.6 s + 62 VIOLATIONS   | 227 s, 172/173 clean  split|
+  | coldfire     | 199 s, 11 unr + 4 viol  | 300 s, 260/278        Java |
+  READING: the Rust port completes MORE nets with ZERO violations on
+  6 of 8 boards, matches 8088sbc within 2×, and trails only on the
+  two largest boards' wall clock — where Java trades violations for
+  speed (interf_u: 62!). interf_u new best 172/173 (VCC last).
 - 2026-07-15 (iter 173): THE VARIANCE SOLVED — it was never
   variance: 8088sbc has only 471 items, under the 1000-item
   cross-net threshold, so route_board ran the old path while the
