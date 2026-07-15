@@ -1564,12 +1564,18 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   boxes from corner approximations), and restrain_shape skips the
   to_simplex conversion for already-simplex contained shapes (the
   restrain loop converts once per obstacle for the same room).
-  Coldfire PASS 0: 37.5 s -> 31.5 s (-16%), zero violations held,
-  fleet clean. NOTE: the hoist skips to_simplex's normalization for
-  simplex inputs, which legitimately shifts restrain outcomes — a new
-  deterministic baseline (15 failed in PASS 0, was 16). Remaining
-  hot spots per the profile: Simplex::remove_redundant_lines in the
-  half-plane intersections (~12%), the completion tree walks.
+  MEASUREMENT CORRECTION: the "37.5 -> 31.5 s" PASS 0 numbers first
+  recorded here were cutoff artifacts — a 45 s drc_check budget caps
+  the pass at 0.7 x 45 = 31.5 s, so the pass was deadline-truncated,
+  not faster. Honest PASS 0 at the full 600 s budget after iter 196's
+  caches + iter 197's scratch buffers: 37.5 s -> 36.9 s (~2%; the
+  caches help but modestly at PASS 0 scale — the earlier percentage
+  claims were wrong). Lesson recorded: NEVER time a pass with a
+  budget that can truncate it (pass limit = 0.7 x budget must exceed
+  the expected pass time). Remaining hot spots per the profile:
+  Simplex::remove_redundant_lines (~22%), MinAreaTree walks (~21%),
+  allocator traffic (~14%, addressed by iter 197's thread-local
+  scratch in remove_redundant_lines).
 
 ## Notes / decisions log
 

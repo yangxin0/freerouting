@@ -723,9 +723,19 @@ impl Simplex {
         if self.lines.is_empty() {
             return Simplex::EMPTY;
         }
+        // Thread-local scratch: this runs millions of times per routing
+        // pass and the two working vectors dominated the allocator
+        // traffic (~14% of a coldfire profile).
+        thread_local! {
+            static SCRATCH: std::cell::RefCell<(Vec<Line>, Vec<Option<Side>>)> =
+                std::cell::RefCell::new((Vec::new(), Vec::new()));
+        }
+        SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        let (line_arr, intersection_sides) = &mut *scratch;
         // Copy the sorted lines, skipping duplicates (equal line and
         // direction).
-        let mut line_arr: Vec<Line> = Vec::with_capacity(self.lines.len());
+        line_arr.clear();
         line_arr.push(self.lines[0]);
         for line in &self.lines[1..] {
             if *line != *line_arr.last().unwrap() {
@@ -734,7 +744,8 @@ impl Simplex {
         }
         let mut new_length = line_arr.len();
         // On which side of line `ind` the previous and next lines intersect.
-        let mut intersection_sides: Vec<Option<Side>> = vec![None; new_length];
+        intersection_sides.clear();
+        intersection_sides.resize(new_length, None);
 
         let mut try_again = new_length > 2;
         let mut index_of_last_removed_line = new_length as isize;
@@ -833,8 +844,8 @@ impl Simplex {
         if new_length == 0 {
             return Simplex::EMPTY;
         }
-        line_arr.truncate(new_length);
-        Simplex::new(line_arr)
+        Simplex::new(line_arr[..new_length].to_vec())
+        })
     }
 }
 
