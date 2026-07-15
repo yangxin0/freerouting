@@ -1625,6 +1625,17 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   side (fanout.maxItems pin cap, Java default unbounded). Remaining
   unported upstream commits are GUI/rendering/benchmark-infra only.
 
+- 2026-07-15 (iter 201): plateau-net experiment — the full CLI
+  pipeline (600 s routing + optimizer) on stripped coldfire: routing
+  reached 261/278, then the optimizer's incomplete-net recovery
+  (2x-penalty reroutes) recovered +3 nets -> 264/278, zero
+  violations. Recovery WORKS on stragglers but had a flat 30 s
+  budget; the CLI now scales it to max(30 s, tl/5). (drc_check's
+  pipeline has no optimizer phase, which is part of why its 267
+  differs from the CLI's routing-only 261 — different pass timing
+  under the same limit is the rest.) Validation of 600 s + 120 s
+  recovery pending.
+
 ## Notes / decisions log
 
 - 2026-07-14: crate scaffolded on branch `rust`; no external deps yet.

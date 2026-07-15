@@ -217,7 +217,10 @@ fn main() -> ExitCode {
         stats.incomplete_count, stats.clearance_violations, stats.via_count, stats.total_length_mm
     );
 
-    let opt_limit = TimeLimit::new(30_000);
+    // the optimizer's recovery reroutes complete the last hard nets
+    // (coldfire: +3 nets in 30 s); scale its budget with the job
+    // instead of a flat 30 s
+    let opt_limit = TimeLimit::new((limit_s * 1000 / 5).max(30_000));
     let opt_threads: usize = flag_value("--threads")
         .and_then(|v| v.parse().ok())
         .or(profile_threads)
