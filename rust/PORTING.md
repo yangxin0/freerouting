@@ -464,8 +464,18 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       pre-routed traces/vias; mm/mil/µm units at Java's 0.1 µm
       default resolution. CLI: -de file.json. Iter 183: WRITER ported
       too (export_kicad_json, CLI --export-json, round-trips through
-      the reader). Conduction areas + custom clearance rules remain
-      simplified — noted.)
+      the reader). Iter 185: full Java parity — per-net-class
+      clearance classes in the matrix + custom clearanceRules pairs,
+      per-class trace widths and via padstacks resolved through via
+      rules (via_padstack_for_net), circle/oval pads as Java's
+      corner-cut octagons, pad layer spans from the named layers,
+      conduction areas (net pours connectable, netless zones as
+      keepouts; Java's separate is_obstacle flag folded into that
+      distinction — noted), referenced-net auto-registration,
+      system-fixed pins / user-fixed pre-wiring, and Y-axis negation
+      on import like Java. Deviation: Java's writer emits un-negated
+      Y (breaking its own round trip); the Rust writer negates
+      symmetrically.)
   [x] DRC report (iter 162: src/drc.rs — DesignRulesChecker port:
       check_board collects deduplicated clearance violations (mitered
       pre-filter + exact Euclidean confirm, worst actual distance) and

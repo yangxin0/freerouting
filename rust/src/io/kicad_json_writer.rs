@@ -89,7 +89,7 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
             mm(w),
             mm(h),
             mm(v.center.x as f64),
-            mm(v.center.y as f64),
+            mm(-v.center.y as f64),
             if through { 1 } else { 0 },
             esc(&layer_name),
         ));
@@ -125,7 +125,7 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
                     .polyline
                     .corner_approx_arr()
                     .iter()
-                    .map(|c| format!("{{\"x\": {:.6}, \"y\": {:.6}}}", mm(c.x), mm(c.y)))
+                    .map(|c| format!("{{\"x\": {:.6}, \"y\": {:.6}}}", mm(c.x), mm(-c.y)))
                     .collect();
                 traces.push(format!(
                     "    {{\"id\": {id}, \"netName\": \"{}\", \"width\": {:.6}, \"layerIndex\": {}, \"points\": [{}]}}",
@@ -140,7 +140,7 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
                     "    {{\"id\": {id}, \"netName\": \"{}\", \"position\": {{\"x\": {:.6}, \"y\": {:.6}}}, \"diameter\": 0.6, \"drill\": 0.3, \"startLayerIndex\": 0, \"endLayerIndex\": {}}}",
                     esc(&net_name),
                     mm(v.center.x as f64),
-                    mm(v.center.y as f64),
+                    mm(-v.center.y as f64),
                     layer_count - 1
                 ));
             }
