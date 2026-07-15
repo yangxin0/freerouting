@@ -37,6 +37,28 @@ should pick up the first unchecked item below.
   modes, GUI (out of scope per user directive — CLI is the
   deliverable).
 
+## OPEN ITEMS (reconciled 2026-07-15, iter 190)
+
+The early-phase checklists above are ticked with pointers; these are
+the only genuinely open work items across the whole port:
+
+1. Trace overlap/cycle removal on split (Java: PolylineTrace
+   normalize + board.remove_if_cycle) — redundant trace loops can
+   survive splitting; affects length/score, not legality.
+2. DSN keepout-area import ((keepout ...) scopes in structure —
+   place/via/wire keepouts; Java Structure.java parses them, the Rust
+   importer only builds boundary keepout strips).
+3. SES library_out section (Java SesWriter emits padstack definitions;
+   the Rust writer references padstack names in network_out only).
+4. Delaunay-based ratsnest airlines (Java: PlanarDelaunayTriangulation
+   + MST in NetIncompletes; Rust uses MST over component centers).
+5. Corridor-trace clearance at insert (iter 190 residue: 2 coldfire
+   deep violations — maze traces through rip corridors pass surviving
+   foreign vias closer than the pair clearance).
+6. Byte-exact MazeShoveTraceAlgo diagonal/polar door-segment
+   derivation (behaviorally covered by insert-time validation).
+7. Coldfire wall clock vs Java at equal completion (~1.5-2x).
+
 ## Conventions
 
 - Java package → Rust module (`geometry.planar` → `geometry::planar`), one Java
@@ -75,15 +97,14 @@ should pick up the first unchecked item below.
 - [x] Circle.java → `geometry/planar/circle.rs` (containment/distances, bounding octagon + tangent-line bounding tile, transforms, intersections)
 - [x] PolygonShape.java → `geometry/planar/polygon_shape.rs` (ccw normalization, convexity/hull/bounding tile, split_to_convex with axis-parallel division points; area() fixes Java's dimension()<=2 always-zero bug; + Polygon::winding_number_after_closing)
 - [x] PolylineArea.java / Area.java → `geometry/planar/area.rs` (border + holes, split_to_convex with hole cutout, containment, transforms)
-- [ ] Remaining geometry (on demand): Ellipse; TileShape methods needing Polyline/LineSegment (entrance_points, cutout(Polyline), is_intersected_interior_by, touching_sides, …)
-- [ ] Polygon.java
+- [x] Remaining geometry (entrance_points, cutout_polyline, is_intersected_interior_by all in tile_shape.rs; touching_sides in sorted_room_neighbours.rs. Ellipse is GUI-only in Java — boardgraphics + interactive Route — excluded by scope.)
 
 ## Phase 2 — supporting infrastructure
 
 - [x] datastructures/ShapeTree.java + MinAreaTree.java → `datastructures/min_area_tree.rs` (arena-indexed generic tree; IntOctagon bounds subsume both ShapeBoundingDirections variants; ArrayStack replaced by Vec)
 - [x] datastructures/UndoableObjects.java → `undoable_objects.rs` (explicit key/value split, arena version chains; pop_snapshot splices same-level undo versions — documented deviation fixing a Java edge-case that loses objects)
 - [x] datastructures/Stoppable.java + TimeLimit.java → `stoppable.rs`
-- [ ] datastructures remaining: PlanarDelaunayTriangulation (autoroute-time), IdentifierType/IndentFileWriter (specctra I/O time)
+- [x] datastructures remaining (IdentifierType/IndentFileWriter: quoting/indentation handled inline by the Rust writers. PlanarDelaunayTriangulation: NOT ported — the ratsnest uses MST over component centers instead; listed under OPEN ITEMS.)
 - [x] board/Layer.java + LayerStructure.java → `board/layer.rs`
 - [x] rules/ClearanceMatrix.java → `rules/clearance_matrix.rs` (even-rounded values, per-row/layer maxima, append/remove class, safety margin)
 - [x] rules/Net.java + Nets.java → `rules/net.rs` (rules data; board item queries follow with the board item model)
@@ -97,7 +118,7 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 - [x] BasicBoard core → `board/basic_board.rs` (UndoableObjects item store + MinAreaTree integration, insert/remove trace+via, layer-filtered exact overlap queries, net filtering/blocking, undo/redo with tree resync)
 - [x] connectivity → `board/basic_board.rs` (get_normal_contacts at trace corners / drill centers, start/end contacts, is_tail, connected sets, net completeness)
 - [x] ObstacleArea/ConductionArea items → `board/item.rs` ItemKind::ObstacleArea (resolved PolylineArea + layer + is_conduction; tree shapes via split_to_convex; symmetric conduction contacts in basic_board)
-- [ ] board remaining: Pin item (needs component model), BoardOutline item, clearance-compensated ShapeSearchTree variants, RoutingBoard, shove/pull-tight algorithms
+- [x] board remaining (all landed via equivalents: pins are component-tagged drill items — KiCad reader iter 185 marks them SystemFixed; BoardOutline as boundary keepout strips; clearance compensation via the board inflation cache; RoutingBoard functionality folded into BasicBoard; shove/pull-tight/forced-via/move-drill ported iters 144-158.)
 
 ## Phase 3 — routing engines
 
@@ -109,7 +130,7 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 - [x] batch autorouter loop → `autoroute/batch.rs` (per-net component analysis, closest-pair incompletes preferring drill endpoints — trace splitting at junctions not yet ported, no-progress guard, single pass without ripup escalation)
 - [x] trace splitting at junctions → `BasicBoard::split_traces_at` (+ maze_route normalizes inserted endpoints; T-junction contacts now register)
 - [x] trace combining at simple joints → `BasicBoard::combine_trace` (PolylineTrace.combine: exactly-one-trace contact with equal layer/width/nets merges via Polyline::combine)
-- [ ] faithful autoroute port remaining: SortedRoomNeighbours faithful door/gap algorithm, clearance compensation, DrillPage-based drill candidates, ripup/shove + pass escalation, remaining normalization (overlap/cycle removal), faithful Locate/InsertFoundConnectionAlgo corner calculation, fanout, optimizer
+- [x] faithful autoroute port remaining (SortedRoomNeighbours iters 157-158; clearance compensation via inflation model; DrillPageArray iter 159; ripup/shove + pass escalation iters 14x-15x; Locate/Insert corner calculation iter 156; fanout iter 153; optimizer iters 161-166 + 186 + 188. EXCEPTION: overlap/cycle removal on trace split — Java's board.remove_if_cycle — NOT ported; listed under OPEN ITEMS.)
 
 ## Phase 4 — I/O and CLI
 
@@ -118,8 +139,8 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 - [x] SES session writer → `io/ses_export.rs` (network_out wires + autoroute vias; validated by re-parsing)
 - [x] end-to-end integration → `tests/route_fixture.rs` (import interf_u fixture → route /ACK → export session with the routed wire)
 - [x] boundary import as outline keepout strips (BoardOutline tree-shape equivalent; routes verified to stay inside the outline bbox)
-- [ ] DSN wiring/keepout-area import, richer SES fidelity (library_out, session padstack forms)
-- [ ] CLI entry point (headless batch routing first; no GUI planned)
+- [x] DSN wiring import (pre-routed wires and vias, dsn_import.rs) — but DSN keepout-AREA import and the SES library_out padstack section are NOT ported; listed under OPEN ITEMS.
+- [x] CLI entry point (src/main.rs: the Java jar's full non-GUI surface; see the feature checklist)
 
 ## Benchmark log
 
