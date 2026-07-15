@@ -607,17 +607,25 @@ fn destination_point(
                                 .map(|(s, _)| s)
                                 .unwrap_or(&room.clone()),
                         );
-                        if door.dimension() >= 0 && !door.is_empty() {
+                        if door.dimension() >= 1 {
                             door.centre_of_gravity()
                         } else {
                             fallback
                         }
                     })
                     .unwrap_or(fallback);
-                return t
-                    .polyline
-                    .nearest_lattice_point(anchor)
-                    .map(|p| p.to_float());
+                let tap = t.polyline.nearest_lattice_point(anchor)?;
+                // the tap (and thus the final segment) must stay in the
+                // arrival room; a far tap crosses whatever lies between
+                if let Some(room) = arrival_room {
+                    let pt = crate::geometry::planar::Point::Int(tap);
+                    if !room.contains(&pt)
+                        && !room.to_simplex().offset(2.0).contains(&pt)
+                    {
+                        return Some(fallback);
+                    }
+                }
+                return Some(tap.to_float());
             }
             let shapes = item.tile_shapes(&board.padstacks);
             let dest_shape = shapes

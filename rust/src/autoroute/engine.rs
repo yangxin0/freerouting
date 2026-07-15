@@ -394,10 +394,22 @@ impl AutorouteEngine {
                 if !item.is_connectable() || !item.base.contains_net(self.net_no) {
                     continue;
                 }
+                let is_trace = matches!(item.kind, crate::board::ItemKind::PolylineTrace(_));
                 for (index, (shape, layer)) in
                     item.tile_shapes(&board.padstacks).iter().enumerate()
                 {
-                    if *layer == piece.layer && shape.intersects(&piece.shape) {
+                    if *layer != piece.layer {
+                        continue;
+                    }
+                    // trace targets need a REAL overlap: a corner touch
+                    // gives no in-room centerline to tap, and the tap
+                    // then lands outside the room (illegal segment)
+                    let reachable = if is_trace {
+                        shape.intersection(&piece.shape).dimension() >= 1
+                    } else {
+                        shape.intersects(&piece.shape)
+                    };
+                    if reachable {
                         targets.push(TargetDoor {
                             item: item_id,
                             shape_index: index,
