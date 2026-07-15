@@ -359,7 +359,13 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       Also this iteration: DSN export UNIT FIX — coordinates descale
       to file units; full-board DSN round-trip now preserves
       connectivity exactly.)
-  [ ] KiCad direct file I/O
+  [x] RulesReader/RulesWriter (iter 167: io/rules_io.rs — the
+      Specctra (rules PCB ...) format: snap_angle, default
+      width/clearance rule, per-class width rules; CLI --rules /
+      --export-rules; round-trip tested. Java's full via-info/
+      via-rule serialization simplified — noted.)
+  [ ] KiCad direct file I/O (KiCadJsonReader — 559 lines, Gson-based
+      board JSON; next I/O item)
   [x] DRC report (iter 162: src/drc.rs — DesignRulesChecker port:
       check_board collects deduplicated clearance violations (mitered
       pre-filter + exact Euclidean confirm, worst actual distance) and

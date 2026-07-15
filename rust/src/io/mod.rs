@@ -3,11 +3,13 @@
 pub mod dsn;
 pub mod dsn_export;
 pub mod dsn_import;
+pub mod rules_io;
 pub mod ses_export;
 pub mod ses_import;
 
 pub use dsn::{parse_dsn, SExpr};
 pub use dsn_export::export_dsn;
+pub use rules_io::{read_rules, write_rules};
 pub use ses_import::{import_ses, SesImportSummary};
 pub use dsn_import::{import_dsn, ImportError};
 pub use ses_export::export_ses;

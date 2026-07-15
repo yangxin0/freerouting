@@ -28,6 +28,8 @@ Options:
   --export-dsn <f>   write the routed design as a Specctra DSN file
   --import-ses <f>   apply an existing session file before routing
   --threads <n>      optimizer worker threads (default 1)
+  --rules <f>        apply a .rules file before routing
+  --export-rules <f> write the design rules to a .rules file
   -h, --help         show this help";
 
 fn main() -> ExitCode {
@@ -92,6 +94,15 @@ fn main() -> ExitCode {
         board.item_count()
     );
 
+    if let Some(rules_path) = flag_value("--rules") {
+        match std::fs::read_to_string(rules_path) {
+            Ok(text) => match freerouting::io::read_rules(&mut board, &text) {
+                Ok(n) => println!("rules applied: {n} settings"),
+                Err(e) => eprintln!("error: {e}"),
+            },
+            Err(e) => eprintln!("error: cannot read {rules_path}: {e}"),
+        }
+    }
     if let Some(ses_path) = flag_value("--import-ses") {
         match std::fs::read_to_string(ses_path) {
             Ok(text) => match freerouting::io::import_ses(&mut board, &text) {
@@ -199,6 +210,13 @@ fn main() -> ExitCode {
                 Err(e) => eprintln!("error: cannot write {dsn_path}: {e}"),
             },
             None => eprintln!("error: no DSN source retained; cannot export"),
+        }
+    }
+    if let Some(rules_out) = flag_value("--export-rules") {
+        let text = freerouting::io::write_rules(&board, design);
+        match std::fs::write(rules_out, &text) {
+            Ok(()) => println!("rules written to {rules_out}"),
+            Err(e) => eprintln!("error: cannot write {rules_out}: {e}"),
         }
     }
     let design_name = std::path::Path::new(design)
