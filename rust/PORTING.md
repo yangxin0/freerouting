@@ -1479,6 +1479,30 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   locations) to see whether they slip in during the escalated-penalty
   passes (insert-time validation hole?) or the restart round.
 
+- 2026-07-15 (iter 190): VIOLATION HUNT — coldfire's 12 deep
+  violations traced by birth tags to rip-corridor VIAS bypassing the
+  drill-page exclusion (insert_connection used raw insert_via; a
+  corridor via landed 1004 from a foreign via at required 1500).
+  FIX: via sites are now checked exactly at insert (mitered
+  pre-filter + Euclidean confirm vs pairwise clearance,
+  via_site_is_clear); clear sites insert plainly (bit-identical old
+  behavior — J2/fleet pair counts unchanged), conflicted sites go
+  through Java's forced-via path (insert_forced_via: checked, shoves
+  free) and fail the whole insert if even that cannot clear them
+  (transactional rollback). An UNCONDITIONAL forced-via variant was
+  tried first and REVERTED: shove side effects on already-legal sites
+  regressed J2 to 23/24 + 1 violation. Also: drill-page caches now
+  keyed by via_margin (base_margin/net_margin) — a net with larger
+  vias/clearances must not reuse drills computed for a smaller margin
+  (defensive; coldfire single-margin, no behavior change there).
+  Coldfire @600 s: 12 -> 2 deep violations, completion HELD 269/278,
+  REPAIR round now KEPT (268 -> 269, was always ROLLED BACK).
+  Remaining 2: maze-inserted TRACES (birth 1) too close to
+  pre-existing vias (birth 0, req 1500) — the corridor-trace analog
+  (ripped foreign traces vacate the corridor but surviving vias are
+  nearer than the trace-pair clearance). NEXT: validate corridor
+  trace runs against surviving foreign drill items at insert.
+
 ## Notes / decisions log
 
 - 2026-07-14: crate scaffolded on branch `rust`; no external deps yet.

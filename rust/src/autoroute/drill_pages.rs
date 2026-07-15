@@ -33,6 +33,12 @@ struct DrillPage {
     /// own-net items are drillable).
     net_drills: Option<Vec<ExpansionDrill>>,
     net_no: i32,
+    /// The via margins the caches were computed with: nets with larger
+    /// vias or clearances need wider exclusion zones, so a cache entry
+    /// built for a smaller margin must not be reused (coldfire shipped
+    /// vias 496 units too close to foreign vias through exactly that).
+    base_margin: i32,
+    net_margin: i32,
 }
 
 /// The array of drill pages covering the board
@@ -139,21 +145,28 @@ impl DrillPageArray {
                         nets_present: Vec::new(),
                         net_drills: None,
                         net_no: -1,
+                        base_margin: -1,
+                        net_margin: -1,
                     });
-                if page.base_drills.is_none() {
+                if page.base_drills.is_none() || page.base_margin != via_margin {
                     let (drills, nets) =
                         calculate_page_drills(board, page.shape, -1, via_margin);
                     page.base_drills = Some(drills);
                     page.nets_present = nets;
                     page.net_drills = None;
                     page.net_no = -1;
+                    page.base_margin = via_margin;
                 }
                 let drills: &Vec<ExpansionDrill> = if page.nets_present.contains(&net_no) {
                     // this net has items here: own-net items are
                     // drillable, so the drill set differs (Java's
                     // per-net cache, now only where it matters)
-                    if page.net_drills.is_none() || page.net_no != net_no {
+                    if page.net_drills.is_none()
+                        || page.net_no != net_no
+                        || page.net_margin != via_margin
+                    {
                         page.net_no = net_no;
+                        page.net_margin = via_margin;
                         page.net_drills = Some(
                             calculate_page_drills(board, page.shape, net_no, via_margin).0,
                         );

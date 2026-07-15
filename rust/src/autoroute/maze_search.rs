@@ -1258,6 +1258,48 @@ fn restrict_corners(
 
 /// Inserts the found connection as per-layer polyline traces joined by
 /// vias and normalizes the junctions.
+/// True when a via of the request's padstack at `p` keeps the exact
+/// pairwise clearance to every foreign item (mitered pre-filter +
+/// Euclidean confirm, like the DRC).
+fn via_site_is_clear(board: &BasicBoard, request: &MazeRouteRequest, p: IntPoint) -> bool {
+    let Some(ps) = board.padstacks.get_by_no(request.via_padstack) else {
+        return true;
+    };
+    let matrix = &board.rules.clearance_matrix;
+    for layer in ps.from_layer()..=ps.to_layer() {
+        let Some(shape) = ps.get_shape(layer) else { continue };
+        let shape = shape.translate_by(crate::geometry::planar::IntVector::new(p.x, p.y));
+        let max_cl = matrix.max_value(layer).max(0) as f64;
+        for other_id in board.overlapping_items(&shape.offset(max_cl), Some(layer)) {
+            let Some(other) = board.get_item(other_id) else { continue };
+            if other.base.contains_net(request.net_no) {
+                continue;
+            }
+            if let crate::board::ItemKind::ObstacleArea(a) = &other.kind {
+                if a.is_conduction {
+                    continue;
+                }
+            }
+            let cl = matrix
+                .get_value(
+                    request.clearance_class,
+                    other.base.clearance_class,
+                    layer,
+                    false,
+                )
+                .max(0) as f64;
+            if other.tile_shapes(&board.padstacks).iter().any(|(os, ol)| {
+                *ol == layer
+                    && os.intersection(&shape.offset(cl)).dimension() >= 2
+                    && shape.euclidean_distance_to(os) < cl - 1.0
+            }) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn insert_connection(
     board: &mut BasicBoard,
     request: &MazeRouteRequest,
@@ -1339,13 +1381,41 @@ fn insert_connection(
                 run.push(p);
             }
             flush(board, &mut run, run_layer, &mut new_items);
-            new_items.push(board.insert_via(
-                request.via_padstack,
-                p,
-                vec![request.net_no],
-                request.clearance_class,
-                false,
-            ));
+            // Drill-page-validated sites are inserted plainly (the vast
+            // majority). Rip-corridor sites bypass the drill-page
+            // exclusion and could land too close to surviving foreign
+            // vias (coldfire: 1004 apart at required 1500) — a conflicted
+            // site goes through Java's forced-via path instead (checked,
+            // shoves conflicting items free) and fails the insert when
+            // even that cannot clear it.
+            if via_site_is_clear(board, request, p) {
+                new_items.push(board.insert_via(
+                    request.via_padstack,
+                    p,
+                    vec![request.net_no],
+                    request.clearance_class,
+                    false,
+                ));
+            } else {
+                match crate::board::forced_via::insert_forced_via(
+                    board,
+                    request.via_padstack,
+                    p,
+                    &[request.net_no],
+                    request.clearance_class,
+                    request.trace_half_width,
+                ) {
+                    Some(id) => new_items.push(id),
+                    None => {
+                        // an illegal via site fails the whole insert; the
+                        // caller's transaction removes the partial items
+                        for id in new_items {
+                            board.remove_item(id);
+                        }
+                        return None;
+                    }
+                }
+            }
             run = vec![p];
             run_layer = *layer;
         }

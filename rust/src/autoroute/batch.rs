@@ -526,6 +526,16 @@ fn repair_violations(
             .iter()
             .filter(|&&n| board.net_is_completely_connected(n))
             .count();
+        if crate::debug::stats() {
+            eprintln!(
+                "REPAIR round {_round}: {} violating nets {:?}, complete {} -> {} ({})",
+                nets.len(),
+                nets,
+                complete_before,
+                complete_after,
+                if complete_after >= complete_before { "KEPT" } else { "ROLLED BACK" }
+            );
+        }
         if complete_after >= complete_before {
             board.pop_snapshot();
             repaired += nets.len();
