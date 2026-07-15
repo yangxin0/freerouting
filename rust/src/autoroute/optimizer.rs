@@ -159,70 +159,234 @@ pub fn optimize_nets_pass(
     improved
 }
 
-/// The multithreaded optimizer (Java: `BatchOptimizerMultiThreaded`):
-/// each round clones the board per worker, every worker optimizes its
-/// slice of the nets in parallel, and the best-scoring result board is
-/// adopted (greedy board update strategy). Requires `threads >= 1`.
+/// How the multithreaded optimizer publishes task results to the master
+/// board (Java: `BoardUpdateStrategy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardUpdateStrategy {
+    /// Only the pass's single best improvement is adopted, at pass end.
+    GlobalOptimal,
+    /// Every winning task replaces the master board immediately; later
+    /// tasks clone the updated board.
+    Greedy,
+    /// Alternates between the two per pass, `ratio.0` global-optimal
+    /// passes then `ratio.1` greedy passes (Java: hybridRatio "1:1").
+    Hybrid,
+}
+
+/// The order nets are handed to the optimizer tasks (Java:
+/// `ItemSelectionStrategy`). GlobalOptimal passes always run Sequential,
+/// like Java.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemSelectionStrategy {
+    Sequential,
+    /// Deterministically shuffled per pass (xorshift seeded by pass no).
+    Random,
+    /// Nets whose previous-pass results were best come first (Java sorts
+    /// prior `ItemRouteResult`s ascending), unseen nets after them.
+    Prioritized,
+}
+
+/// One net's reroute outcome, ordered like Java's `ItemRouteResult`
+/// `compareTo`: fewer incompletes, then fewer vias, then shorter.
+#[derive(Debug, Clone, Copy)]
+struct NetRouteResult {
+    net_no: i32,
+    incomplete_after: usize,
+    vias_after: usize,
+    len_after: f64,
+}
+
+impl NetRouteResult {
+    fn key(&self) -> (usize, usize, f64) {
+        (self.incomplete_after, self.vias_after, self.len_after)
+    }
+    fn improved_over(&self, other: &NetRouteResult) -> bool {
+        self.key()
+            .partial_cmp(&other.key())
+            .is_some_and(|o| o == std::cmp::Ordering::Less)
+    }
+}
+
+/// The multithreaded optimizer (Java: `BatchOptimizerMultiThreaded`)
+/// with Java's defaults: GREEDY board updates, PRIORITIZED selection.
 pub fn optimize_route_multithreaded(
     board: &mut BasicBoard,
     request: &BatchRequest,
     threads: usize,
     time_limit: Option<&crate::datastructures::TimeLimit>,
 ) -> usize {
+    optimize_route_multithreaded_with_strategy(
+        board,
+        request,
+        threads,
+        time_limit,
+        BoardUpdateStrategy::Greedy,
+        ItemSelectionStrategy::Prioritized,
+        (1, 1),
+    )
+}
+
+/// The multithreaded optimizer (Java: `BatchOptimizerMultiThreaded`):
+/// each pass spawns one reroute task per net; every task clones the
+/// master board, reroutes its net, and reports a [`NetRouteResult`].
+/// GREEDY publishes each winning board immediately, GLOBAL_OPTIMAL only
+/// the pass's best at pass end, HYBRID alternates. Passes repeat until
+/// none improves or time runs out. Requires `threads >= 1`.
+pub fn optimize_route_multithreaded_with_strategy(
+    board: &mut BasicBoard,
+    request: &BatchRequest,
+    threads: usize,
+    time_limit: Option<&crate::datastructures::TimeLimit>,
+    strategy: BoardUpdateStrategy,
+    selection: ItemSelectionStrategy,
+    hybrid_ratio: (usize, usize),
+) -> usize {
     let threads = threads.max(1);
     if threads == 1 {
         return optimize_route(board, request, time_limit);
     }
     let all_nets: Vec<i32> = (1..=board.rules.nets.max_net_no()).collect();
+    // the strategy sequence a HYBRID run cycles through per pass
+    let hybrid_list: Vec<BoardUpdateStrategy> = {
+        let (optimal, greedy) = (hybrid_ratio.0.max(1), hybrid_ratio.1.max(1));
+        std::iter::repeat(BoardUpdateStrategy::GlobalOptimal)
+            .take(optimal)
+            .chain(std::iter::repeat(BoardUpdateStrategy::Greedy).take(greedy))
+            .collect()
+    };
+    let mut prior_results: std::collections::HashMap<i32, NetRouteResult> =
+        std::collections::HashMap::new();
     let mut total = 0usize;
+    let mut pass_no = 0usize;
     loop {
         if time_limit.is_some_and(|t| t.limit_exceeded()) {
             break;
         }
-        // partition the nets round-robin across the workers
-        let slices: Vec<Vec<i32>> = (0..threads)
-            .map(|t| {
-                all_nets
-                    .iter()
-                    .copied()
-                    .skip(t)
-                    .step_by(threads)
-                    .collect()
-            })
-            .collect();
-        let results: Vec<(usize, f64, BasicBoard)> = std::thread::scope(|scope| {
-            let handles: Vec<_> = slices
-                .iter()
-                .map(|slice| {
-                    let mut clone = board.clone();
-                    scope.spawn(move || {
-                        let improved =
-                            optimize_nets_pass(&mut clone, request, slice, time_limit);
-                        let stats =
-                            crate::scoring::BoardStatistics::collect(&clone);
-                        let score = stats
-                            .normalized_score(&crate::scoring::ScoringSettings::default());
-                        (improved, score, clone)
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .filter_map(|h| h.join().ok())
-                .collect()
-        });
-        let baseline = crate::scoring::BoardStatistics::collect(board)
-            .normalized_score(&crate::scoring::ScoringSettings::default());
-        let best = results
-            .into_iter()
-            .filter(|(improved, score, _)| *improved > 0 && *score > baseline)
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        match best {
-            Some((improved, _, winner)) => {
-                *board = winner;
-                total += improved;
+        let pass_strategy = match strategy {
+            BoardUpdateStrategy::Hybrid => hybrid_list[pass_no % hybrid_list.len()],
+            s => s,
+        };
+        // GLOBAL_OPTIMAL forces sequential selection, like Java
+        let pass_selection = if pass_strategy == BoardUpdateStrategy::GlobalOptimal {
+            ItemSelectionStrategy::Sequential
+        } else {
+            selection
+        };
+        let mut order = all_nets.clone();
+        match pass_selection {
+            ItemSelectionStrategy::Sequential => {}
+            ItemSelectionStrategy::Random => {
+                // deterministic xorshift shuffle (the crate has no rng)
+                let mut state = 0x9e3779b9u64 ^ (pass_no as u64 + 1);
+                for i in (1..order.len()).rev() {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    order.swap(i, (state % (i as u64 + 1)) as usize);
+                }
             }
-            None => break,
+            ItemSelectionStrategy::Prioritized => {
+                let mut seen: Vec<NetRouteResult> = Vec::new();
+                let mut unseen: Vec<i32> = Vec::new();
+                for &n in &all_nets {
+                    match prior_results.get(&n) {
+                        Some(r) => seen.push(*r),
+                        None => unseen.push(n),
+                    }
+                }
+                seen.sort_by(|a, b| {
+                    a.key()
+                        .partial_cmp(&b.key())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                order = seen.iter().map(|r| r.net_no).collect();
+                order.extend(unseen);
+            }
+        }
+        prior_results.clear();
+
+        struct Shared {
+            master: BasicBoard,
+            next: usize,
+            best: Option<(NetRouteResult, BasicBoard)>,
+            results: Vec<NetRouteResult>,
+            adopted: usize,
+        }
+        let shared = std::sync::Mutex::new(Shared {
+            master: board.clone(),
+            next: 0,
+            best: None,
+            results: Vec::new(),
+            adopted: 0,
+        });
+        std::thread::scope(|scope| {
+            for _ in 0..threads.min(order.len()) {
+                scope.spawn(|| loop {
+                    if time_limit.is_some_and(|t| t.limit_exceeded()) {
+                        return;
+                    }
+                    let (net_no, mut clone) = {
+                        let mut s = shared.lock().unwrap();
+                        if s.next >= order.len() {
+                            return;
+                        }
+                        let net_no = order[s.next];
+                        s.next += 1;
+                        // GREEDY tasks copy the live master; GLOBAL tasks
+                        // conceptually copy the pass-start board, which is
+                        // the same object since GLOBAL never updates it
+                        (net_no, s.master.clone())
+                    };
+                    let improved =
+                        optimize_nets_pass(&mut clone, request, &[net_no], time_limit) > 0;
+                    let (vias_after, len_after) = net_route_cost(&clone, net_no);
+                    let result = NetRouteResult {
+                        net_no,
+                        incomplete_after: usize::from(
+                            !clone.net_is_completely_connected(net_no),
+                        ),
+                        vias_after,
+                        len_after,
+                    };
+                    let mut s = shared.lock().unwrap();
+                    s.results.push(result);
+                    if improved
+                        && s.best
+                            .as_ref()
+                            .map_or(true, |(b, _)| result.improved_over(b))
+                    {
+                        if pass_strategy == BoardUpdateStrategy::Greedy {
+                            s.master = clone.clone();
+                            s.adopted += 1;
+                        }
+                        s.best = Some((result, clone));
+                    }
+                });
+            }
+        });
+        let s = shared.into_inner().unwrap();
+        for r in &s.results {
+            prior_results.insert(r.net_no, *r);
+        }
+        let improved_this_pass = match pass_strategy {
+            BoardUpdateStrategy::Greedy => {
+                if s.adopted > 0 {
+                    *board = s.master;
+                }
+                s.adopted
+            }
+            _ => match s.best {
+                Some((_, winner)) => {
+                    *board = winner;
+                    1
+                }
+                None => 0,
+            },
+        };
+        total += improved_this_pass;
+        pass_no += 1;
+        if improved_this_pass == 0 {
+            break;
         }
     }
     total

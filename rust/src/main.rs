@@ -222,15 +222,33 @@ fn main() -> ExitCode {
         .and_then(|v| v.parse().ok())
         .or(profile_threads)
         .unwrap_or(1);
+    // Java defaults: GREEDY board updates with PRIORITIZED selection
+    let strategy = match flag_value("--opt-strategy").unwrap_or("greedy") {
+        "global" => freerouting::autoroute::BoardUpdateStrategy::GlobalOptimal,
+        "hybrid" => freerouting::autoroute::BoardUpdateStrategy::Hybrid,
+        _ => freerouting::autoroute::BoardUpdateStrategy::Greedy,
+    };
+    let selection = match flag_value("--opt-selection").unwrap_or("prioritized") {
+        "sequential" => freerouting::autoroute::ItemSelectionStrategy::Sequential,
+        "random" => freerouting::autoroute::ItemSelectionStrategy::Random,
+        _ => freerouting::autoroute::ItemSelectionStrategy::Prioritized,
+    };
+    let hybrid_ratio = flag_value("--hybrid-ratio")
+        .and_then(|v| v.split_once(':'))
+        .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))
+        .unwrap_or((1, 1));
     let improved = if std::env::var_os("FR_NO_OPT").is_some() {
         0
     } else {
-        freerouting::autoroute::optimize_route_multithreaded(
-        &mut board,
-        &request,
-        opt_threads,
-        Some(&opt_limit),
-    )
+        freerouting::autoroute::optimize_route_multithreaded_with_strategy(
+            &mut board,
+            &request,
+            opt_threads,
+            Some(&opt_limit),
+            strategy,
+            selection,
+            hybrid_ratio,
+        )
     };
     if improved > 0 {
         println!("optimizer: {improved} nets improved");
@@ -245,6 +263,17 @@ fn main() -> ExitCode {
     if len_before > 0.0 {
         println!(
             "pull tight: {removed} corners removed, length {len_before:.0} -> {len_after:.0}"
+        );
+    }
+    if improved > 0 || removed > 0 || combined > 0 {
+        let stats = freerouting::scoring::BoardStatistics::collect(&board);
+        let score = stats.normalized_score(&freerouting::scoring::ScoringSettings::default());
+        println!(
+            "final score: {score:.2} ({} unrouted, {} violations, {} vias, {:.1} mm)",
+            stats.incomplete_count,
+            stats.clearance_violations,
+            stats.via_count,
+            stats.total_length_mm
         );
     }
 

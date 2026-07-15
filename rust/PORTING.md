@@ -424,13 +424,21 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       the contact; a degenerated stub is deleted and the via lands
       on the far item, like Java). All OptViaAlgo branches now in.)
   [x] BatchOptimizerMultiThreaded (iter 166: optimize_route_multithreaded
-      — per round, workers clone the board and optimize round-robin
-      net slices in parallel; the best-scoring result is adopted
-      (Java's GLOBAL_OPTIMAL board update strategy). Enabled the
-      groundwork: BasicBoard is Clone + Send (Rc→Arc in the shared
+      — groundwork: BasicBoard is Clone + Send (Rc→Arc in the shared
       shape caches, OnceCell→OnceLock in Simplex/Item). CLI
-      --threads <n>. Java's GREEDY merge strategy and the
-      random/prioritized item selection strategies not ported.)
+      --threads <n>. Iter 186: FULLY FAITHFUL — per-net tasks pulled
+      from a shared queue, each cloning the master board; GREEDY
+      replaces the master the moment a task wins (later tasks clone
+      the updated board), GLOBAL_OPTIMAL adopts only the pass's best
+      at pass end (sequential selection forced, like Java), HYBRID
+      alternates by ratio. Item selection SEQUENTIAL / RANDOM
+      (deterministic xorshift) / PRIORITIZED (prior-pass results
+      sorted by Java's ItemRouteResult compareTo: incompletes, vias,
+      length; unseen nets appended). Defaults match Java: GREEDY +
+      PRIORITIZED, ratio 1:1. CLI --opt-strategy greedy|global|hybrid,
+      --opt-selection, --hybrid-ratio N:M; CLI also prints the final
+      post-optimizer score now. J2 --threads 4: 999.94, 0 violations
+      under both strategies; NormalPuzzle 999.97 under all three.)
   [x] Distinct-net shove stacking (iter 178: VERIFIED ALREADY
       COMPLETE — calculate_stack_levels' level raise/lower across
       foreign net sets is the full Java multi-net semantics; a new
