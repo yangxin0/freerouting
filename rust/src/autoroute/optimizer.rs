@@ -107,8 +107,15 @@ pub fn optimize_nets_pass(
     let net_nos: Vec<i32> = net_nos.to_vec();
     let min_gain = 4.0 * request.trace_half_width as f64;
     let mut improved = 0usize;
+    // Java (BatchOptimizer): a pass ends early after too many
+    // consecutive non-improving items; the streak resets on improvement
+    // (settings.optimizer.maxConsecutiveFailures, default 50)
+    let mut consecutive_failures = 0usize;
     for net_no in net_nos {
         if time_limit.is_some_and(|t| t.limit_exceeded()) {
+            break;
+        }
+        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
             break;
         }
         let was_complete = board.net_is_completely_connected(net_no);
@@ -152,11 +159,33 @@ pub fn optimize_nets_pass(
         if keep {
             board.pop_snapshot();
             improved += 1;
+            consecutive_failures = 0;
         } else {
             board.undo();
+            consecutive_failures += 1;
         }
     }
     improved
+}
+
+/// Java default `optimizer.maxConsecutiveFailures`: an optimization pass
+/// exits after this many non-improving items in a row.
+const MAX_CONSECUTIVE_FAILURES: usize = 50;
+
+/// Java default `optimizer.optimizationImprovementThreshold` (1%): a
+/// pass whose relative score gain falls below this stops the optimizer.
+const IMPROVEMENT_THRESHOLD: f64 = 0.01;
+
+fn board_score(board: &BasicBoard) -> f64 {
+    crate::scoring::BoardStatistics::collect(board)
+        .normalized_score(&crate::scoring::ScoringSettings::default())
+}
+
+/// Java (BatchOptimizer.runBatchLoop): stop before a pass when the score
+/// is already so close to 1000 that the remaining potential improvement
+/// is below the threshold.
+fn score_near_maximum(score: f64) -> bool {
+    score * (1.0 + IMPROVEMENT_THRESHOLD) >= 1000.0
 }
 
 /// How the multithreaded optimizer publishes task results to the master
@@ -260,6 +289,10 @@ pub fn optimize_route_multithreaded_with_strategy(
     let mut pass_no = 0usize;
     loop {
         if time_limit.is_some_and(|t| t.limit_exceeded()) {
+            break;
+        }
+        let score_before = board_score(board);
+        if score_near_maximum(score_before) {
             break;
         }
         let pass_strategy = match strategy {
@@ -388,6 +421,17 @@ pub fn optimize_route_multithreaded_with_strategy(
         if improved_this_pass == 0 {
             break;
         }
+        // Java's threshold stop: a pass gaining less than the threshold
+        // relative score improvement ends the optimizer
+        let score_after = board_score(board);
+        let pass_improvement = if score_before > 0.0 {
+            (score_after - score_before) / score_before
+        } else {
+            0.0
+        };
+        if pass_improvement < IMPROVEMENT_THRESHOLD {
+            break;
+        }
     }
     total
 }
@@ -419,8 +463,11 @@ pub fn optimize_vias(
     moved
 }
 
-/// Runs optimization passes until no net improves or time runs out.
-/// Returns the total number of improvements.
+/// Runs optimization passes with Java's stopping criteria
+/// (BatchOptimizer.runBatchLoop): stop when the score is already close
+/// to the maximum, and stop when a pass's relative score improvement
+/// falls below the threshold (no improvement counts too). Returns the
+/// total number of improvements.
 pub fn optimize_route(
     board: &mut BasicBoard,
     request: &BatchRequest,
@@ -431,10 +478,23 @@ pub fn optimize_route(
         if time_limit.is_some_and(|t| t.limit_exceeded()) {
             break;
         }
+        let score_before = board_score(board);
+        if score_near_maximum(score_before) {
+            break;
+        }
         let improved = optimize_route_pass(board, request, time_limit)
             + optimize_vias(board, time_limit);
         total += improved;
         if improved == 0 {
+            break;
+        }
+        let score_after = board_score(board);
+        let pass_improvement = if score_before > 0.0 {
+            (score_after - score_before) / score_before
+        } else {
+            0.0
+        };
+        if pass_improvement < IMPROVEMENT_THRESHOLD {
             break;
         }
     }

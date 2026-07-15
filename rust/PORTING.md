@@ -1442,6 +1442,27 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   (deterministic, 240 s): 263/278, 1 deep violation, PASS 0 38.7 s,
   PASS 1 129.3 s. Fresh 600 s canonical run pending.
 
+- 2026-07-15 (iter 188): Java-tracking — ported the optimizer stopping
+  criteria added upstream this month (f7533a68, ab4b6935, 27e700bc):
+  (1) near-maximum early stop — skip/stop optimization when
+  score x (1 + threshold) >= 1000 (threshold 1%, Java default);
+  (2) per-pass relative score improvement below the threshold ends
+  the optimizer (replaces the bare improved==0 gate); (3) a pass
+  exits after 50 consecutive non-improving nets (streak resets on
+  improvement; Java maxConsecutiveFailures default). Both the
+  single-threaded and multithreaded drivers gate passes on the
+  normalized score now. Visible effect: near-perfect boards
+  (NormalPuzzle 999.97) skip optimization entirely, like Java.
+  Java's use_increased_ripup_costs pass toggle has no Rust
+  equivalent (our nets_pass escalates per net, not per pass) — noted.
+  CANONICAL coldfire @600 s (deterministic, caffeinated, clip):
+  269/278 nets — NEW COMPLETION RECORD (was 268 pre-determinism) —
+  passes converge 16 -> 12 -> 8 -> 6 failed, but 12 deep violations
+  remain: the restart round consumed the tail (180 s, rolled back
+  269 -> 249) leaving repair_violations no budget. NEXT: reserve
+  wall clock for repair (incomplete beats illegal), and consider
+  skipping restart rounds whose expected value is low.
+
 ## Notes / decisions log
 
 - 2026-07-14: crate scaffolded on branch `rust`; no external deps yet.
