@@ -169,6 +169,24 @@ pub fn combine_all_traces(board: &mut BasicBoard) -> usize {
             audit_foreign_clearance(board, current, "COMBINE");
         }
     }
+    // redundant cycles (parallel paths back to the same endpoints) are
+    // removed after combining, like Java's normalize pass
+    // (BasicBoard.remove_if_cycle); repeated because a removal can
+    // expose another cycle
+    loop {
+        let ids: Vec<crate::board::ItemId> = board
+            .items()
+            .filter(|(_, it)| matches!(it.kind, ItemKind::PolylineTrace(_)))
+            .map(|(id, _)| *id)
+            .collect();
+        let removed_cycles = ids
+            .into_iter()
+            .filter(|&id| board.remove_if_cycle(id))
+            .count();
+        if removed_cycles == 0 {
+            break;
+        }
+    }
     before.saturating_sub(board.items().count())
 }
 

@@ -42,9 +42,15 @@ should pick up the first unchecked item below.
 The early-phase checklists above are ticked with pointers; these are
 the only genuinely open work items across the whole port:
 
-1. Trace overlap/cycle removal on split (Java: PolylineTrace
-   normalize + board.remove_if_cycle) — redundant trace loops can
-   survive splitting; affects length/score, not legality.
+1. [DONE iter 191] Trace cycle removal (Java: board.remove_if_cycle)
+   — trace_is_cycle (BFS across non-area contacts proving a parallel
+   path) + remove_if_cycle (removal + freed-tail chain cleanup),
+   TRANSACTIONAL: a removal that degrades net connectivity rolls back
+   (the shape-based contact walk can diverge from electrical reality
+   at tolerance edges — an untransactional first cut broke J2's
+   /MIPI_CSI_D0_P in the normalize phase). Wired into
+   combine_all_traces (repeat until no cycle). J2 length improved
+   486.0 -> 482.3 mm; fleet clean; unit test cycle_traces_are_removed.
 2. DSN keepout-area import ((keepout ...) scopes in structure —
    place/via/wire keepouts; Java Structure.java parses them, the Rust
    importer only builds boundary keepout strips).

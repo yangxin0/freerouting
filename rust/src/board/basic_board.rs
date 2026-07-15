@@ -637,6 +637,147 @@ impl BasicBoard {
         }
     }
 
+    /// True if the trace's endpoints stay connected through OTHER items
+    /// (Java: `Trace.is_cycle`): the trace is a redundant parallel path.
+    /// Conduction areas neither count as targets nor as hops (Java's
+    /// default `ignore_cycles_with_areas` — planes must not make every
+    /// plane-touching trace a cycle).
+    pub fn trace_is_cycle(&self, id: ItemId) -> bool {
+        let Some(item) = self.get_item(id) else { return false };
+        if !matches!(item.kind, ItemKind::PolylineTrace(_)) {
+            return false;
+        }
+        let skip = |board: &Self, other: ItemId| -> bool {
+            matches!(
+                board.get_item(other).map(|i| &i.kind),
+                Some(ItemKind::ObstacleArea(_)) | None
+            )
+        };
+        let starts: Vec<ItemId> = self
+            .get_start_contacts(id)
+            .into_iter()
+            .filter(|&c| !skip(self, c))
+            .collect();
+        let ends: Vec<ItemId> = self
+            .get_end_contacts(id)
+            .into_iter()
+            .filter(|&c| !skip(self, c))
+            .collect();
+        if starts.is_empty() || ends.is_empty() {
+            return false;
+        }
+        // BFS from the start contacts, never passing through the trace
+        // itself: reaching an end contact proves the parallel path
+        let mut visited: Vec<ItemId> = starts.clone();
+        let mut queue = starts;
+        while let Some(cur) = queue.pop() {
+            if ends.contains(&cur) {
+                return true;
+            }
+            for next in self.get_normal_contacts(cur) {
+                if next == id || visited.contains(&next) || skip(self, next) {
+                    continue;
+                }
+                visited.push(next);
+                queue.push(next);
+            }
+        }
+        false
+    }
+
+    /// A same-net dangling trace at `point`: its first corner sits there
+    /// with no start contacts, or its last with no end contacts
+    /// (Java: `BasicBoard.get_trace_tail`).
+    fn get_trace_tail(&self, point: &Point, layer: usize, net_nos: &[i32]) -> Option<ItemId> {
+        let search_shape = TileShape::Box(point.surrounding_box());
+        for other_id in self.overlapping_items(&search_shape, Some(layer)) {
+            let Some(other) = self.get_item(other_id) else { continue };
+            let ItemKind::PolylineTrace(t) = &other.kind else { continue };
+            if t.layer != layer || other.base.net_nos != net_nos {
+                continue;
+            }
+            if t.first_corner() == *point && self.get_start_contacts(other_id).is_empty() {
+                return Some(other_id);
+            }
+            if t.last_corner() == *point && self.get_end_contacts(other_id).is_empty() {
+                return Some(other_id);
+            }
+        }
+        None
+    }
+
+    /// Removes the trace if it is a redundant cycle, then removes any
+    /// tails the removal created at its endpoints (Java:
+    /// `BasicBoard.remove_if_cycle`). Fixed traces are never removed.
+    pub fn remove_if_cycle(&mut self, id: ItemId) -> bool {
+        let Some(item) = self.get_item(id) else { return false };
+        if item.base.is_user_fixed() {
+            return false;
+        }
+        let ItemKind::PolylineTrace(t) = &item.kind else {
+            return false;
+        };
+        if !self.trace_is_cycle(id) {
+            return false;
+        }
+        if std::env::var_os("FR_CYCLE_DEBUG").is_some() {
+            eprintln!(
+                "CYCLE REMOVE trace {id} nets {:?} {:?} -> {:?}",
+                item.base.net_nos,
+                t.first_corner(),
+                t.last_corner()
+            );
+        }
+        let layer = t.layer;
+        let net_nos = item.base.net_nos.clone();
+        let end_corners = [t.first_corner(), t.last_corner()];
+        let tail_before: Vec<bool> = end_corners
+            .iter()
+            .map(|c| self.get_trace_tail(c, layer, &net_nos).is_some())
+            .collect();
+        // transactional, in the port's check-by-doing style: the contact
+        // graph the cycle test walks is shape-based and can diverge from
+        // electrical reality at tolerance edges — a removal that degrades
+        // net connectivity is rolled back instead of trusted
+        let complete_before: Vec<bool> = net_nos
+            .iter()
+            .map(|&n| self.net_is_completely_connected(n))
+            .collect();
+        self.generate_snapshot();
+        self.remove_item(id);
+        for (i, corner) in end_corners.iter().enumerate() {
+            if tail_before[i] {
+                continue;
+            }
+            // follow the freshly created tail chain outward
+            let mut at = corner.clone();
+            while let Some(tail) = self.get_trace_tail(&at, layer, &net_nos) {
+                let Some(ItemKind::PolylineTrace(tt)) =
+                    self.get_item(tail).map(|i| i.kind.clone())
+                else {
+                    break;
+                };
+                let other_end = if tt.first_corner() == at {
+                    tt.last_corner()
+                } else {
+                    tt.first_corner()
+                };
+                self.remove_item(tail);
+                at = other_end;
+            }
+        }
+        let degraded = net_nos
+            .iter()
+            .zip(&complete_before)
+            .any(|(&n, &before)| before && !self.net_is_completely_connected(n));
+        if degraded {
+            self.undo();
+            return false;
+        }
+        self.pop_snapshot();
+        true
+    }
+
     /// True if the trace is not contacted at its first or its last corner
     /// (Java: `Trace.is_tail`).
     pub fn is_tail(&self, id: ItemId) -> bool {
@@ -1272,6 +1413,44 @@ mod tests {
             Some(0),
         );
         assert_eq!(hits, vec![a], "search tree out of sync after undo");
+    }
+
+    #[test]
+    fn cycle_traces_are_removed() {
+        let mut board = test_board();
+        // two pads (component-tagged vias) joined by a direct trace
+        let a = board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        board.set_component_no(a, 1);
+        let b = board.insert_via(1, IntPoint::new(8000, 0), vec![1], 1, false);
+        board.set_component_no(b, 2);
+        let direct = board.insert_trace(trace_polyline(&[(0, 0), (8000, 0)]), 0, 100, vec![1], 1);
+        // a redundant detour between the same pads: a parallel path
+        let d1 = board.insert_trace(
+            trace_polyline(&[(0, 0), (0, 4000), (8000, 4000)]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        let _d2 = board.insert_trace(
+            trace_polyline(&[(8000, 4000), (8000, 0)]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        assert!(board.trace_is_cycle(direct), "parallel paths make a cycle");
+        assert!(board.remove_if_cycle(d1), "the detour is a removable cycle");
+        // the detour's second piece became a tail and is gone too
+        assert!(
+            board.get_item(_d2).is_none(),
+            "the freed tail must be cleaned up"
+        );
+        // the direct trace survives and the net stays connected
+        assert!(board.get_item(direct).is_some());
+        assert!(board.net_is_completely_connected(1));
+        // and the survivor is no longer a cycle
+        assert!(!board.trace_is_cycle(direct));
     }
 
     #[test]
