@@ -133,7 +133,7 @@ pub struct Item {
     pub kind: ItemKind,
     /// Lazily computed tile shapes: items are immutable once inserted,
     /// and recomputing trace offset shapes dominated the routing profile.
-    cached_tile_shapes: std::cell::OnceCell<Vec<(TileShape, usize)>>,
+    cached_tile_shapes: std::sync::OnceLock<Vec<(TileShape, usize)>>,
 }
 
 impl PartialEq for Item {
@@ -157,7 +157,7 @@ impl Item {
                 center,
                 attach_allowed,
             }),
-            cached_tile_shapes: std::cell::OnceCell::new(),
+            cached_tile_shapes: std::sync::OnceLock::new(),
         }
     }
 
@@ -174,7 +174,7 @@ impl Item {
                 layer,
                 polyline,
             }),
-            cached_tile_shapes: std::cell::OnceCell::new(),
+            cached_tile_shapes: std::sync::OnceLock::new(),
         }
     }
 
@@ -341,7 +341,7 @@ impl Item {
                 name: name.into(),
                 is_conduction,
             }),
-            cached_tile_shapes: std::cell::OnceCell::new(),
+            cached_tile_shapes: std::sync::OnceLock::new(),
         }
     }
 }

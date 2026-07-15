@@ -7,9 +7,9 @@
 
 use freerouting::autoroute::room_completion::{restrain_all, IncompleteRoom};
 use freerouting::geometry::planar::{IntPoint, Line, TileShape};
-use std::rc::Rc;
+use std::sync::Arc;
 
-fn parse() -> (TileShape, TileShape, Vec<(i32, Rc<TileShape>)>) {
+fn parse() -> (TileShape, TileShape, Vec<(i32, Arc<TileShape>)>) {
     let data = include_str!("data/pic_completion57.txt");
     let mut start = None;
     let mut contained = None;
@@ -34,7 +34,7 @@ fn parse() -> (TileShape, TileShape, Vec<(i32, Rc<TileShape>)>) {
         } else if tag == "containedx" {
             contained = Some(simplex());
         } else if let Some(id) = tag.strip_prefix("obstacle ") {
-            obstacles.push((id.parse().unwrap(), Rc::new(simplex())));
+            obstacles.push((id.parse().unwrap(), Arc::new(simplex())));
         }
     }
     (start.unwrap(), contained.unwrap(), obstacles)

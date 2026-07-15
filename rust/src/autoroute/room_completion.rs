@@ -70,12 +70,12 @@ pub fn complete_shape_tracked(
     ignore_rippable: bool,
     trace_clearance_class: usize,
     trace_half_width: i32,
-) -> (Vec<IncompleteRoom>, Vec<std::rc::Rc<TileShape>>) {
+) -> (Vec<IncompleteRoom>, Vec<std::sync::Arc<TileShape>>) {
     // inflated shapes of skipped own-net/rippable items on this layer:
     // a piece is net-dependent ONLY if one of these actually overlaps it
     // (Java: is_net_dependent = the room would differ for another net);
     // flagging on any skipped query hit killed ~90% of rooms per switch
-    let mut skipped_shapes: Vec<std::rc::Rc<TileShape>> = Vec::new();
+    let mut skipped_shapes: Vec<std::sync::Arc<TileShape>> = Vec::new();
     let board_box = board.bounding_box().offset(1000.0);
     let start_shape = TileShape::Box(board_box).intersection_with_simplify(&room.shape);
     if start_shape.dimension() != 2 {
@@ -111,7 +111,7 @@ pub fn complete_shape_tracked(
     // offsetting the start simplex itself) would be wasted work
     let start_bbox = start_shape.bounding_box();
     let query_shape = TileShape::Box(start_bbox.offset(2.0 * max_margin));
-    let mut obstacles: Vec<(ItemId, std::rc::Rc<TileShape>)> = Vec::new();
+    let mut obstacles: Vec<(ItemId, std::sync::Arc<TileShape>)> = Vec::new();
     for item_id in board.overlapping_items_coarse(&query_shape, Some(room.layer)) {
         if Some(item_id) == ignore_item {
             continue;
@@ -255,7 +255,7 @@ pub fn complete_shape(
 /// `on_killed` fires when the obstacle eliminates every piece.
 pub fn restrain_all(
     mut result: Vec<IncompleteRoom>,
-    obstacles: &[(ItemId, std::rc::Rc<TileShape>)],
+    obstacles: &[(ItemId, std::sync::Arc<TileShape>)],
     mut on_killed: impl FnMut(ItemId, &TileShape),
 ) -> Vec<IncompleteRoom> {
     for (obstacle_id, obstacle_shape) in obstacles {

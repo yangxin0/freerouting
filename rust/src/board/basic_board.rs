@@ -57,7 +57,7 @@ struct TreeShapeEntry {
     layer: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BasicBoard {
     pub layer_structure: LayerStructure,
     pub rules: BoardRules,
@@ -96,7 +96,7 @@ pub struct BasicBoard {
             ItemId,
             std::collections::HashMap<
                 i32,
-                std::rc::Rc<Vec<(std::rc::Rc<TileShape>, IntBox, usize)>>,
+                std::sync::Arc<Vec<(std::sync::Arc<TileShape>, IntBox, usize)>>,
             >,
         >,
     >,
@@ -128,7 +128,7 @@ impl BasicBoard {
         &self,
         item_id: ItemId,
         margin: i32,
-    ) -> Option<std::rc::Rc<Vec<(std::rc::Rc<TileShape>, IntBox, usize)>>> {
+    ) -> Option<std::sync::Arc<Vec<(std::sync::Arc<TileShape>, IntBox, usize)>>> {
         if let Some(hit) = self
             .inflation_cache
             .borrow()
@@ -138,7 +138,7 @@ impl BasicBoard {
             return Some(hit.clone());
         }
         let item = self.get_item(item_id)?;
-        let entries: Vec<(std::rc::Rc<TileShape>, IntBox, usize)> = item
+        let entries: Vec<(std::sync::Arc<TileShape>, IntBox, usize)> = item
             .tile_shapes(&self.padstacks)
             .iter()
             .map(|(s, l)| {
@@ -148,10 +148,10 @@ impl BasicBoard {
                     s.clone()
                 };
                 let bbox = inflated.bounding_box();
-                (std::rc::Rc::new(inflated), bbox, *l)
+                (std::sync::Arc::new(inflated), bbox, *l)
             })
             .collect();
-        let rc = std::rc::Rc::new(entries);
+        let rc = std::sync::Arc::new(entries);
         self.inflation_cache
             .borrow_mut()
             .entry(item_id)

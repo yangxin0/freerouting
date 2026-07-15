@@ -17,7 +17,7 @@ pub struct Simplex {
     lines: Vec<Line>,
     /// Lazily computed bounding box (corner computation is expensive and
     /// bounding boxes are queried constantly by the restrain pre-filters).
-    cached_bbox: std::cell::OnceCell<IntBox>,
+    cached_bbox: std::sync::OnceLock<IntBox>,
 }
 
 impl PartialEq for Simplex {
@@ -31,7 +31,7 @@ impl Simplex {
     /// Standard implementation of an empty simplex.
     pub const EMPTY: Simplex = Simplex {
         lines: Vec::new(),
-        cached_bbox: std::cell::OnceCell::new(),
+        cached_bbox: std::sync::OnceLock::new(),
     };
 
     /// Constructs a simplex from directed lines without normalizing. Use
@@ -39,7 +39,7 @@ impl Simplex {
     pub fn new(lines: Vec<Line>) -> Self {
         Simplex {
             lines,
-            cached_bbox: std::cell::OnceCell::new(),
+            cached_bbox: std::sync::OnceLock::new(),
         }
     }
 

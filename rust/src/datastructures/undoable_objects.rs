@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 type NodeId = usize;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Node<K, V> {
     key: K,
     object: V,
@@ -24,7 +24,7 @@ struct Node<K, V> {
     redo_object: Option<NodeId>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UndoableObjects<K: Ord + Clone, V: Clone + PartialEq> {
     objects: BTreeMap<K, NodeId>,
     nodes: Vec<Node<K, V>>,

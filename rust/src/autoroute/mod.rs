@@ -28,7 +28,7 @@ pub use maze_search::{take_stats,
     find_connection, maze_route, maze_route_with_ripup, MazeSearchResult, RoutedConnection,
 };
 pub use fanout::{fanout_board, fanout_pin};
-pub use optimizer::{optimize_route, optimize_route_pass, optimize_vias};
+pub use optimizer::{optimize_route, optimize_route_multithreaded, optimize_route_pass, optimize_vias};
 pub use pull_tight::{combine_all_traces, pull_tight_all, pull_tight_trace, total_trace_length};
 pub use room_completion::{complete_shape, restrain_shape, IncompleteRoom};
 pub use simple_router::{RouteRequest, RouteResult, SimpleRouter};

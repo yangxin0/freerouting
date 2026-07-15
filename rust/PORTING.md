@@ -335,7 +335,14 @@ rules package complete (except GUI print_info methods, intentionally out of scop
       connected. Wired into the optimizer phase (optimize_vias sweep
       per pass). Plane/fanout single-contact branch simplified out —
       noted.)
-  [ ] BatchOptimizerMultiThreaded (parallel optimizer)
+  [x] BatchOptimizerMultiThreaded (iter 166: optimize_route_multithreaded
+      — per round, workers clone the board and optimize round-robin
+      net slices in parallel; the best-scoring result is adopted
+      (Java's GLOBAL_OPTIMAL board update strategy). Enabled the
+      groundwork: BasicBoard is Clone + Send (Rc→Arc in the shared
+      shape caches, OnceCell→OnceLock in Simplex/Item). CLI
+      --threads <n>. Java's GREEDY merge strategy and the
+      random/prioritized item selection strategies not ported.)
   [ ] Distinct-net shove stacking (ShapeTraceEntries full semantics)
   I/O & TOOLING:
   [x] DSN export (iter 163: io/dsn_export.rs — the imported document

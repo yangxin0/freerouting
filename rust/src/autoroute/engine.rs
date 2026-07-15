@@ -510,7 +510,7 @@ impl AutorouteEngine {
         let room_simplex = self.graph.room(room_id).shape.to_simplex();
         let room_bbox = self.graph.room(room_id).shape.bounding_box();
         let mut neighbours: Vec<srn::Neighbour> = Vec::new();
-        let mut obstacle_doors: Vec<(ItemId, usize, std::rc::Rc<TileShape>)> = Vec::new();
+        let mut obstacle_doors: Vec<(ItemId, usize, std::sync::Arc<TileShape>)> = Vec::new();
         // touching complete rooms from the grid
         for other in self.rooms_near(room_bbox.offset(4.0), layer) {
             if other == room_id || self.graph.room(other).layer != layer {

@@ -17,7 +17,7 @@ use crate::geometry::planar::IntOctagon;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LeafId(usize);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum NodeKind<T> {
     Inner { first: usize, second: usize },
     Leaf { object: T, shape_index: usize },
@@ -25,7 +25,7 @@ enum NodeKind<T> {
     Free { next_free: Option<usize> },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Node<T> {
     bound: IntOctagon,
     parent: Option<usize>,
@@ -40,7 +40,7 @@ pub struct TreeEntry<T> {
     pub shape_index_in_object: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MinAreaTree<T> {
     nodes: Vec<Node<T>>,
     first_free: Option<usize>,

@@ -51,6 +51,18 @@ pub fn optimize_route_pass(
     time_limit: Option<&crate::datastructures::TimeLimit>,
 ) -> usize {
     let net_nos: Vec<i32> = (1..=board.rules.nets.max_net_no()).collect();
+    optimize_nets_pass(board, request, &net_nos, time_limit)
+}
+
+/// [`optimize_route_pass`] over an explicit net slice (the unit of work
+/// of the multithreaded optimizer).
+pub fn optimize_nets_pass(
+    board: &mut BasicBoard,
+    request: &BatchRequest,
+    net_nos: &[i32],
+    time_limit: Option<&crate::datastructures::TimeLimit>,
+) -> usize {
+    let net_nos: Vec<i32> = net_nos.to_vec();
     let min_gain = 4.0 * request.trace_half_width as f64;
     let mut improved = 0usize;
     for net_no in net_nos {
@@ -101,6 +113,75 @@ pub fn optimize_route_pass(
         }
     }
     improved
+}
+
+/// The multithreaded optimizer (Java: `BatchOptimizerMultiThreaded`):
+/// each round clones the board per worker, every worker optimizes its
+/// slice of the nets in parallel, and the best-scoring result board is
+/// adopted (greedy board update strategy). Requires `threads >= 1`.
+pub fn optimize_route_multithreaded(
+    board: &mut BasicBoard,
+    request: &BatchRequest,
+    threads: usize,
+    time_limit: Option<&crate::datastructures::TimeLimit>,
+) -> usize {
+    let threads = threads.max(1);
+    if threads == 1 {
+        return optimize_route(board, request, time_limit);
+    }
+    let all_nets: Vec<i32> = (1..=board.rules.nets.max_net_no()).collect();
+    let mut total = 0usize;
+    loop {
+        if time_limit.is_some_and(|t| t.limit_exceeded()) {
+            break;
+        }
+        // partition the nets round-robin across the workers
+        let slices: Vec<Vec<i32>> = (0..threads)
+            .map(|t| {
+                all_nets
+                    .iter()
+                    .copied()
+                    .skip(t)
+                    .step_by(threads)
+                    .collect()
+            })
+            .collect();
+        let results: Vec<(usize, f64, BasicBoard)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = slices
+                .iter()
+                .map(|slice| {
+                    let mut clone = board.clone();
+                    scope.spawn(move || {
+                        let improved =
+                            optimize_nets_pass(&mut clone, request, slice, time_limit);
+                        let stats =
+                            crate::scoring::BoardStatistics::collect(&clone);
+                        let score = stats
+                            .normalized_score(&crate::scoring::ScoringSettings::default());
+                        (improved, score, clone)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|h| h.join().ok())
+                .collect()
+        });
+        let baseline = crate::scoring::BoardStatistics::collect(board)
+            .normalized_score(&crate::scoring::ScoringSettings::default());
+        let best = results
+            .into_iter()
+            .filter(|(improved, score, _)| *improved > 0 && *score > baseline)
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        match best {
+            Some((improved, _, winner)) => {
+                *board = winner;
+                total += improved;
+            }
+            None => break,
+        }
+    }
+    total
 }
 
 /// One via-optimization sweep (Java: OptViaAlgo in the optimizer

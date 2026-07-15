@@ -7,7 +7,7 @@
 use crate::autoroute::room_completion::{restrain_all, IncompleteRoom};
 use crate::board::basic_board::BasicBoard;
 use crate::geometry::planar::{IntBox, IntPoint, TileShape};
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// A possible via location (Java: `ExpansionDrill`).
 #[derive(Debug, Clone)]
@@ -156,7 +156,7 @@ fn calculate_page_drills(
 ) -> Vec<ExpansionDrill> {
     let page_shape = TileShape::Box(page);
     let query = page_shape.offset(via_margin as f64);
-    let mut holes: Vec<(i32, Rc<TileShape>)> = Vec::new();
+    let mut holes: Vec<(i32, Arc<TileShape>)> = Vec::new();
     for item_id in board.overlapping_items_coarse(&query, None) {
         let Some(item) = board.get_item(item_id) else { continue };
         // drillable for this net: own-net items and conduction planes

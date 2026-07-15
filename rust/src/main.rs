@@ -27,6 +27,7 @@ Options:
   --drc-report <f>   write a KiCad-format DRC report (JSON) after routing
   --export-dsn <f>   write the routed design as a Specctra DSN file
   --import-ses <f>   apply an existing session file before routing
+  --threads <n>      optimizer worker threads (default 1)
   -h, --help         show this help";
 
 fn main() -> ExitCode {
@@ -156,7 +157,13 @@ fn main() -> ExitCode {
     );
 
     let opt_limit = TimeLimit::new(30_000);
-    let improved = freerouting::autoroute::optimize_route(&mut board, &request, Some(&opt_limit));
+    let opt_threads: usize = flag_value("--threads").and_then(|v| v.parse().ok()).unwrap_or(1);
+    let improved = freerouting::autoroute::optimize_route_multithreaded(
+        &mut board,
+        &request,
+        opt_threads,
+        Some(&opt_limit),
+    );
     if improved > 0 {
         println!("optimizer: {improved} nets improved");
     }
