@@ -1640,6 +1640,24 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   to the old 268 record that still shipped violations. NEW CANONICAL
   coldfire (CLI, 600 s + tl/5 recovery): 268/278, 0 violations.
 
+- 2026-07-15 (iter 203): FLEET CANONICAL REFRESH (CLI pipeline,
+  strip-wiring, caffeinated, post-memo + scaled recovery, -tl 300
+  except coldfire 600):
+    NormalPuzzle   72/72   216 ms  score 999.97
+    J2             24/24   101 ms  score 999.94
+    display        30/30   5.2 s   score 999.90
+    wavefolder     31/31   1.1 s   score 999.94
+    pic           111/111  300 ms  score 994.07 (1 design-inherent
+                                   factory pad violation, same as Java)
+    8088sbc       104/104  4.4 s   score 999.87 (was 14.1 s pre-memo)
+    interf_u      172/173 @300 s   score 990.20, 0 violations
+                                   (routing 169 + recovery 3; the old
+                                   full completion used ~2x budget)
+    coldfire      268/278 @600 s   score 950.43, 0 violations
+  Every board violation-free except pic's known factory artifact.
+  Wall clock is now decisively in Java's range or better on every
+  board measured.
+
 ## Notes / decisions log
 
 - 2026-07-14: crate scaffolded on branch `rust`; no external deps yet.
