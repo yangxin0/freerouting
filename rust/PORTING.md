@@ -1689,6 +1689,20 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   auctions); parked. The experiment stays env-gated for future
   reference.
 
+- 2026-07-15 (iter 207): straggler census (FR_STATS now prints
+  INCOMPLETE net name / pins / fragments at batch end). The 11
+  coldfire incompletes: GND (130 pins, 78 FRAGMENTS), +3.3V
+  (100 pins, 89 FRAGMENTS), and 9 small signal nets (2-5 pins each,
+  fully fragmented). ANOMALY: the power nets route FIRST (hybrid
+  order) and complete alone in ~1 s, yet end nearly UNROUTED — the
+  standing board apparently loses their copper wholesale somewhere
+  between the passes and the final state. Prime suspect: the restart
+  rounds' transactional undo depth (nested snapshot pairing inside
+  route_net_with_ripup during a rolled-back round). NEXT: print the
+  fragment census BEFORE the restart phase and compare — if
+  end-of-passes GND has few fragments, the restart undo is corrupting
+  the board and 267/278 understates the true achievable board.
+
 ## Notes / decisions log
 
 - 2026-07-14: crate scaffolded on branch `rust`; no external deps yet.

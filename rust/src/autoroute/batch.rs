@@ -818,6 +818,25 @@ pub fn batch_route_passes_with_time_limit(
         .iter()
         .filter(|&&n| !board.net_is_completely_connected(n))
         .count();
+    if crate::debug::stats() {
+        for &n in &net_nos {
+            if board.net_is_completely_connected(n) {
+                continue;
+            }
+            let name = board
+                .rules
+                .nets
+                .get_by_no(n)
+                .map(|x| x.name.clone())
+                .unwrap_or_default();
+            let pins = board
+                .items()
+                .filter(|(_, it)| it.base.contains_net(n) && it.is_connectable())
+                .count();
+            let fragments = net_components(board, n).len();
+            eprintln!("INCOMPLETE net {n} \"{name}\": {pins} pins, {fragments} fragments");
+        }
+    }
     total
 }
 
