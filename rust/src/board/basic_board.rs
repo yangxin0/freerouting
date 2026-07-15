@@ -344,21 +344,24 @@ impl BasicBoard {
         let Some(query) = shape.bounding_octagon() else {
             return Vec::new();
         };
-        let mut result: Vec<ItemId> = self
-            .search_tree
-            .overlaps(query)
-            .into_iter()
-            .map(|leaf| *self.search_tree.entry(leaf).object)
-            .filter(|entry| layer.is_none_or(|l| entry.layer == l))
-            .filter(|entry| {
-                // exact check against the item's real shape (the tree only
-                // stores bounding octagons)
-                self.get_item(entry.item_id)
-                    .and_then(|item| item.tile_shape(entry.shape_index, &self.padstacks))
-                    .is_some_and(|(s, _)| s.intersects(shape))
-            })
-            .map(|entry| entry.item_id)
-            .collect();
+        // callback traversal: the collecting variant allocated a LeafId
+        // vector per query, visible in the routing profile
+        let mut result: Vec<ItemId> = Vec::new();
+        self.search_tree.overlaps_with(query, |leaf| {
+            let entry = *self.search_tree.entry(leaf).object;
+            if layer.is_some_and(|l| entry.layer != l) {
+                return;
+            }
+            // exact check against the item's real shape (the tree only
+            // stores bounding octagons)
+            if self
+                .get_item(entry.item_id)
+                .and_then(|item| item.tile_shape(entry.shape_index, &self.padstacks))
+                .is_some_and(|(s, _)| s.intersects(shape))
+            {
+                result.push(entry.item_id);
+            }
+        });
         // planes live outside the tree; the few of them check linearly
         for &plane_id in &self.plane_items {
             let Some(item) = self.get_item(plane_id) else {

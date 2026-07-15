@@ -1577,6 +1577,19 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   allocator traffic (~14%, addressed by iter 197's thread-local
   scratch in remove_redundant_lines).
 
+- 2026-07-15 (iter 198): overlapping_items now traverses the search
+  tree with the callback API instead of collecting LeafIds into a
+  temporary vector per query (MinAreaTree::overlaps was ~21% of the
+  profile with the allocator close behind). Honest full-budget
+  coldfire PASS 0: 36.9 s -> 36.6 s. The micro-optimizations are
+  hitting diminishing returns (37.5 -> 36.6 s across three
+  iterations); the remaining ~1.5-2x vs Java is structural — Java
+  keeps per-clearance-class COMPENSATED search trees (obstacle
+  shapes pre-inflated inside the tree), so its completions query
+  ready-inflated geometry instead of inflating per query through a
+  cache. That is the next big lever; scoped as a future multi-
+  iteration task.
+
 ## Notes / decisions log
 
 - 2026-07-14: crate scaffolded on branch `rust`; no external deps yet.
