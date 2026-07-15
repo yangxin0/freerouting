@@ -258,6 +258,14 @@ rules package complete (except GUI print_info methods, intentionally out of scop
   completes rooms against neighbours, not the whole graph). The
   maze_route_with_engine / register_new_targets API is kept dormant
   for that future port.
+- 2026-07-15 (iter 180): COLDFIRE NEW BEST — 268/278 at 600 s
+  (Java 1.9: 11 unrouted at 199 s ⇒ ~267 — completion parity
+  reached; wall clock remains Java's). GND (77 connections!) and
+  +3.3V each route alone in ~1 s (probe_net) — the tail is pure
+  congestion competition among 482 connections. Pass trajectory:
+  16→10 failures through the penalty ladder, restarts plateau at
+  268. The fleet standing: 7/8 boards fully complete + zero
+  violations; coldfire 268/278 ≈ Java completion at 3× Java clock.
 - 2026-07-15 (iter 179): INTERF_U COMPLETE — 173/173, the VCC
   holdout falls. Diagnosis: VCC (22 connections, the biggest net)
   routes ALONE in 136 ms — the ascending-extent order simply routed
