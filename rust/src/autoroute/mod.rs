@@ -8,26 +8,25 @@ pub mod batch;
 pub mod drill_pages;
 pub mod engine;
 pub mod expansion_room;
-pub mod maze_search;
 pub mod fanout;
+pub mod maze_search;
 pub mod optimizer;
 pub mod pull_tight;
 pub mod room_completion;
-pub mod sorted_room_neighbours;
 pub mod simple_router;
+pub mod sorted_room_neighbours;
 
 pub use batch::{
     batch_route, batch_route_passes, batch_route_passes_with_time_limit, route_net,
     route_net_with_ripup, BatchRequest, BatchResult,
 };
 pub use engine::{AutorouteEngine, TargetDoor};
-pub use expansion_room::{
-    ExpansionDoor, ExpansionRoom, MazeSearchElement, RoomGraph, RoomKind,
-};
-pub use maze_search::{take_stats, 
-    find_connection, maze_route, maze_route_with_ripup, MazeSearchResult, RoutedConnection,
-};
+pub use expansion_room::{ExpansionDoor, ExpansionRoom, MazeSearchElement, RoomGraph, RoomKind};
 pub use fanout::{fanout_board, fanout_pin};
+pub use maze_search::{
+    find_connection, maze_route, maze_route_with_ripup, take_stats, MazeSearchResult,
+    RoutedConnection,
+};
 pub use optimizer::{
     optimize_route, optimize_route_multithreaded, optimize_route_multithreaded_with_strategy,
     optimize_route_pass, optimize_vias, BoardUpdateStrategy, ItemSelectionStrategy,

@@ -69,8 +69,7 @@ impl CalcShapeAndFromSide {
                     .border_line_index(&end_cutline.unwrap());
             }
             if let (Some(no), Some(cut_line)) = (from_side_no, curr_cut_line) {
-                let border_intersection =
-                    cut_line.intersection_approx(&curr_shape.border_line(no));
+                let border_intersection = cut_line.intersection_approx(&curr_shape.border_line(no));
                 curr_from_side = Some(CalcFromSide {
                     no: Some(no),
                     border_intersection: Some(border_intersection),
@@ -140,14 +139,10 @@ mod tests {
     #[test]
     fn single_segment_gets_cut_and_from_side() {
         // a single-segment trace: shape gets cut at both ends
-        let polyline = Polyline::from_int_points(&[
-            IntPoint::new(0, 0),
-            IntPoint::new(1000, 0),
-        ]);
+        let polyline = Polyline::from_int_points(&[IntPoint::new(0, 0), IntPoint::new(1000, 0)]);
         let shapes = polyline.offset_shapes(100);
         assert_eq!(shapes.len(), 1);
-        let result =
-            CalcShapeAndFromSide::new(&polyline, 100, 0, &shapes[0], false, false);
+        let result = CalcShapeAndFromSide::new(&polyline, 100, 0, &shapes[0], false, false);
         assert!(!result.shape.is_empty());
         // the dog-ear cut shape stays within the offset shape
         assert!(result
@@ -169,8 +164,7 @@ mod tests {
         ]);
         let shapes = polyline.offset_shapes(10);
         assert_eq!(shapes.len(), 3);
-        let result =
-            CalcShapeAndFromSide::new(&polyline, 10, 1, &shapes[1], false, true);
+        let result = CalcShapeAndFromSide::new(&polyline, 10, 1, &shapes[1], false, true);
         // in a shove check without end cuts, the from side stays
         // uncalculated
         assert!(!result.shape.is_empty());

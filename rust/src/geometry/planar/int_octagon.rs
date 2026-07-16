@@ -9,7 +9,9 @@
 //! `left_x`/`right_x` (vertical borders), `bottom_y`/`top_y` (horizontal
 //! borders), and the x-axis intersections of the four diagonal borders.
 
-use crate::geometry::planar::{limits, FloatPoint, IntBox, IntDirection, IntPoint, IntVector, Line, Side};
+use crate::geometry::planar::{
+    limits, FloatPoint, IntBox, IntDirection, IntPoint, IntVector, Line, Side,
+};
 
 /// The eight 45-degree directions, in the same order as the Java enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -177,14 +179,16 @@ impl IntOctagon {
         result += (self.lower_right_diagonal_x + self.bottom_y) as f64
             * (self.right_x - self.lower_right_diagonal_x - self.bottom_y) as f64;
         result += self.right_x as f64
-            * (self.upper_right_diagonal_x - 2 * self.right_x - self.bottom_y + self.top_y
+            * (self.upper_right_diagonal_x - 2 * self.right_x - self.bottom_y
+                + self.top_y
                 + self.lower_right_diagonal_x) as f64;
         result += (self.upper_right_diagonal_x - self.top_y) as f64
             * (self.top_y - self.upper_right_diagonal_x + self.right_x) as f64;
         result += (self.upper_left_diagonal_x + self.top_y) as f64
             * (self.left_x - self.upper_left_diagonal_x - self.top_y) as f64;
         result += self.left_x as f64
-            * (self.lower_left_diagonal_x - 2 * self.left_x - self.top_y + self.bottom_y
+            * (self.lower_left_diagonal_x - 2 * self.left_x - self.top_y
+                + self.bottom_y
                 + self.upper_left_diagonal_x) as f64;
         0.5 * result.abs()
     }
@@ -402,12 +406,7 @@ impl IntOctagon {
     }
 
     /// Like [`Self::side_of_border_line`] for a float point with tolerance.
-    pub fn border_line_side_of(
-        &self,
-        point: FloatPoint,
-        line_no: usize,
-        tolerance: f64,
-    ) -> Side {
+    pub fn border_line_side_of(&self, point: FloatPoint, line_no: usize, tolerance: f64) -> Side {
         let tmp = match line_no {
             0 => (self.bottom_y as f64) - point.y,
             2 => point.x - self.right_x as f64,
@@ -436,9 +435,11 @@ impl IntOctagon {
             self.right_x.min(other.right_x),
             self.top_y.min(other.top_y),
             self.upper_left_diagonal_x.max(other.upper_left_diagonal_x),
-            self.lower_right_diagonal_x.min(other.lower_right_diagonal_x),
+            self.lower_right_diagonal_x
+                .min(other.lower_right_diagonal_x),
             self.lower_left_diagonal_x.max(other.lower_left_diagonal_x),
-            self.upper_right_diagonal_x.min(other.upper_right_diagonal_x),
+            self.upper_right_diagonal_x
+                .min(other.upper_right_diagonal_x),
         )
         .normalize()
     }
@@ -451,9 +452,11 @@ impl IntOctagon {
             self.right_x.max(other.right_x),
             self.top_y.max(other.top_y),
             self.upper_left_diagonal_x.min(other.upper_left_diagonal_x),
-            self.lower_right_diagonal_x.max(other.lower_right_diagonal_x),
+            self.lower_right_diagonal_x
+                .max(other.lower_right_diagonal_x),
             self.lower_left_diagonal_x.min(other.lower_left_diagonal_x),
-            self.upper_right_diagonal_x.max(other.upper_right_diagonal_x),
+            self.upper_right_diagonal_x
+                .max(other.upper_right_diagonal_x),
         )
     }
 
@@ -480,9 +483,13 @@ impl IntOctagon {
         self.left_x.max(other.left_x) <= self.right_x.min(other.right_x)
             && self.bottom_y.max(other.bottom_y) <= self.top_y.min(other.top_y)
             && self.lower_left_diagonal_x.max(other.lower_left_diagonal_x)
-                <= self.upper_right_diagonal_x.min(other.upper_right_diagonal_x)
+                <= self
+                    .upper_right_diagonal_x
+                    .min(other.upper_right_diagonal_x)
             && self.upper_left_diagonal_x.max(other.upper_left_diagonal_x)
-                <= self.lower_right_diagonal_x.min(other.lower_right_diagonal_x)
+                <= self
+                    .lower_right_diagonal_x
+                    .min(other.lower_right_diagonal_x)
     }
 
     /// True if this octagon intersects `other` with a 2-dimensional
@@ -491,9 +498,13 @@ impl IntOctagon {
         self.left_x.max(other.left_x) < self.right_x.min(other.right_x)
             && self.bottom_y.max(other.bottom_y) < self.top_y.min(other.top_y)
             && self.lower_left_diagonal_x.max(other.lower_left_diagonal_x)
-                < self.upper_right_diagonal_x.min(other.upper_right_diagonal_x)
+                < self
+                    .upper_right_diagonal_x
+                    .min(other.upper_right_diagonal_x)
             && self.upper_left_diagonal_x.max(other.upper_left_diagonal_x)
-                < self.lower_right_diagonal_x.min(other.lower_right_diagonal_x)
+                < self
+                    .lower_right_diagonal_x
+                    .min(other.lower_right_diagonal_x)
     }
 
     /// The x value of the left boundary at `y`.
@@ -538,13 +549,29 @@ impl IntOctagon {
         };
         match edge_no {
             0 => cmp(self.bottom_y, other.bottom_y, true),
-            1 => cmp(self.lower_right_diagonal_x, other.lower_right_diagonal_x, false),
+            1 => cmp(
+                self.lower_right_diagonal_x,
+                other.lower_right_diagonal_x,
+                false,
+            ),
             2 => cmp(self.right_x, other.right_x, false),
-            3 => cmp(self.upper_right_diagonal_x, other.upper_right_diagonal_x, false),
+            3 => cmp(
+                self.upper_right_diagonal_x,
+                other.upper_right_diagonal_x,
+                false,
+            ),
             4 => cmp(self.top_y, other.top_y, false),
-            5 => cmp(self.upper_left_diagonal_x, other.upper_left_diagonal_x, true),
+            5 => cmp(
+                self.upper_left_diagonal_x,
+                other.upper_left_diagonal_x,
+                true,
+            ),
             6 => cmp(self.left_x, other.left_x, true),
-            7 => cmp(self.lower_left_diagonal_x, other.lower_left_diagonal_x, true),
+            7 => cmp(
+                self.lower_left_diagonal_x,
+                other.lower_left_diagonal_x,
+                true,
+            ),
             _ => panic!("IntOctagon::compare: edge_no out of range"),
         }
     }
@@ -593,26 +620,26 @@ impl IntOctagon {
                     .max(point.x - self.lower_right_diagonal_x);
             }
             Right45 => {
-                let x = (0.5 * (point.x - point.y + self.upper_right_diagonal_x) as f64).ceil()
-                    as i32;
+                let x =
+                    (0.5 * (point.x - point.y + self.upper_right_diagonal_x) as f64).ceil() as i32;
                 result_x = x.min(self.right_x).min(point.x - point.y + self.top_y);
                 result_y = point.y - point.x + result_x;
             }
             Up45 => {
-                let x = (0.5 * (point.x + point.y + self.upper_left_diagonal_x) as f64).floor()
-                    as i32;
+                let x =
+                    (0.5 * (point.x + point.y + self.upper_left_diagonal_x) as f64).floor() as i32;
                 result_x = x.max(self.left_x).max(point.x + point.y - self.top_y);
                 result_y = point.y + point.x - result_x;
             }
             Left45 => {
-                let x = (0.5 * (point.x - point.y + self.lower_left_diagonal_x) as f64).floor()
-                    as i32;
+                let x =
+                    (0.5 * (point.x - point.y + self.lower_left_diagonal_x) as f64).floor() as i32;
                 result_x = x.max(self.left_x).max(point.x - point.y + self.bottom_y);
                 result_y = point.y - point.x + result_x;
             }
             Down45 => {
-                let x = (0.5 * (point.x + point.y + self.lower_right_diagonal_x) as f64).ceil()
-                    as i32;
+                let x =
+                    (0.5 * (point.x + point.y + self.lower_right_diagonal_x) as f64).ceil() as i32;
                 result_x = x.min(self.right_x).min(point.x + point.y - self.bottom_y);
                 result_y = point.y + point.x - result_x;
             }
@@ -1290,7 +1317,9 @@ mod tests {
         assert!((d.area() - 32.0).abs() < 1e-12);
         assert!(d.is_normalized());
         // An inverted octagon normalizes to EMPTY.
-        assert!(IntOctagon::new(5, 0, -5, 0, 0, 0, 0, 0).normalize().is_empty());
+        assert!(IntOctagon::new(5, 0, -5, 0, 0, 0, 0, 0)
+            .normalize()
+            .is_empty());
         assert_eq!(IntOctagon::EMPTY.dimension(), -1);
     }
 
@@ -1305,7 +1334,10 @@ mod tests {
         // Interior point is on the left of every border line.
         for i in 0..8 {
             assert_eq!(d.side_of_border_line(0, 0, i), Side::OnTheLeft);
-            assert_eq!(d.border_line(i).side_of_int(IntPoint::new(0, 0)), Side::OnTheRight);
+            assert_eq!(
+                d.border_line(i).side_of_int(IntPoint::new(0, 0)),
+                Side::OnTheRight
+            );
         }
         // Corner points are collinear on their adjacent borders.
         assert_eq!(d.side_of_border_line(4, 0, 1), Side::Collinear);

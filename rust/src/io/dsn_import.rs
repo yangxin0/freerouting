@@ -49,8 +49,11 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
         Some(pos) => {
             let prefix = &content[..pos];
             let trimmed = prefix.trim_end();
-            format!("{}
-)", trimmed.strip_suffix(')').unwrap_or(trimmed))
+            format!(
+                "{}
+)",
+                trimmed.strip_suffix(')').unwrap_or(trimmed)
+            )
         }
         None => content.to_string(),
     };
@@ -129,9 +132,7 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     clearance_matrix.set_default_value(default_clearance);
     if let Some(rule) = structure.child("rule") {
         // both `(clearance ...)` and its alias `(clear ...)`
-        let typed = rule
-            .children("clearance")
-            .chain(rule.children("clear"));
+        let typed = rule.children("clearance").chain(rule.children("clear"));
         for clearance_node in typed {
             let Some(value) = clearance_node.arg_f64().map(&scale) else {
                 continue;
@@ -180,10 +181,7 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 .and_then(|a| a.arg())
                 .is_some_and(|v| v.eq_ignore_ascii_case("on"));
             let no = padstacks.add(name, shapes, attach, false);
-            padstack_nos.insert(
-                padstacks.get_by_no(no).unwrap().name.clone(),
-                no,
-            );
+            padstack_nos.insert(padstacks.get_by_no(no).unwrap().name.clone(), no);
         }
         for image_node in library.children("image") {
             let name = image_node.arg().ok_or_else(|| err("image without name"))?;
@@ -255,8 +253,10 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 .map(&scale)
                 .map(|w| (w / 2).max(1));
             // the net class's own trace clearance (scaled board units)
-            let class_clearance: Option<i32> =
-                class_node.child("rule").and_then(&clearance_child).map(&scale);
+            let class_clearance: Option<i32> = class_node
+                .child("rule")
+                .and_then(&clearance_child)
+                .map(&scale);
             let clearance_class_idx = match class_clearance {
                 Some(c) => {
                     if let Some(&idx) = class_for_clearance.get(&c) {
@@ -301,12 +301,8 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 class.set_trace_clearance_class(clearance_class_idx);
             }
             if let Some(padstack_no) = via_padstack {
-                let via_info = crate::rules::ViaInfo::new(
-                    format!("via::{class_name}"),
-                    padstack_no,
-                    1,
-                    false,
-                );
+                let via_info =
+                    crate::rules::ViaInfo::new(format!("via::{class_name}"), padstack_no, 1, false);
                 if let Some(via_info_id) = rules.via_infos.add(via_info) {
                     let mut via_rule = crate::rules::ViaRule::new(class_name);
                     via_rule.append_via(via_info_id);
@@ -347,18 +343,17 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
         let Some(polygon) = plane_node.child("polygon") else {
             continue;
         };
-        let Some(layer) = polygon
-            .arg()
-            .and_then(|n| board.layer_structure.get_no(n))
-        else {
+        let Some(layer) = polygon.arg().and_then(|n| board.layer_structure.get_no(n)) else {
             continue;
         };
-        let nums: Vec<f64> = polygon.args().skip(2).filter_map(|a| a.parse().ok()).collect();
+        let nums: Vec<f64> = polygon
+            .args()
+            .skip(2)
+            .filter_map(|a| a.parse().ok())
+            .collect();
         let corners: Vec<crate::geometry::planar::Point> = nums
             .chunks_exact(2)
-            .map(|c| {
-                crate::geometry::planar::Point::Int(IntPoint::new(scale(c[0]), scale(c[1])))
-            })
+            .map(|c| crate::geometry::planar::Point::Int(IntPoint::new(scale(c[0]), scale(c[1]))))
             .collect();
         if corners.len() < 3 {
             continue;
@@ -429,11 +424,7 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     // routes stay inside the board (Java: BoardOutline tree shapes)
     if let Some(boundary) = structure.child("boundary") {
         if let Some(path) = boundary.child("path") {
-            let coords: Vec<f64> = path
-                .args()
-                .skip(2)
-                .filter_map(|a| a.parse().ok())
-                .collect();
+            let coords: Vec<f64> = path.args().skip(2).filter_map(|a| a.parse().ok()).collect();
             let corners: Vec<IntPoint> = coords
                 .chunks_exact(2)
                 .map(|c| IntPoint::new(scale(c[0]), scale(c[1])))
@@ -571,10 +562,7 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                     }
                     let center = IntPoint::new(scale(x + dx), scale(y + dy));
                     let pin_ref = format!("{refdes}-{}", pin.pin_name);
-                    let net_nos = pin_nets
-                        .get(&pin_ref)
-                        .map(|n| vec![*n])
-                        .unwrap_or_default();
+                    let net_nos = pin_nets.get(&pin_ref).map(|n| vec![*n]).unwrap_or_default();
                     let (attach_allowed, clearance_class) = board
                         .padstacks
                         .get_by_no(padstack_no)
@@ -634,7 +622,9 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
             let protected = wire_node
                 .child("type")
                 .and_then(|t| t.arg())
-                .is_some_and(|t| t.eq_ignore_ascii_case("protect") || t.eq_ignore_ascii_case("fix"));
+                .is_some_and(|t| {
+                    t.eq_ignore_ascii_case("protect") || t.eq_ignore_ascii_case("fix")
+                });
             let polyline = crate::geometry::planar::Polyline::from_int_points(&corners);
             if polyline.is_empty() {
                 continue;
@@ -676,7 +666,9 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
             let protected = via_node
                 .child("type")
                 .and_then(|t| t.arg())
-                .is_some_and(|t| t.eq_ignore_ascii_case("protect") || t.eq_ignore_ascii_case("fix"));
+                .is_some_and(|t| {
+                    t.eq_ignore_ascii_case("protect") || t.eq_ignore_ascii_case("fix")
+                });
             let clearance_class = net_nos
                 .first()
                 .map(|&n| board.rules.get_trace_clearance_class(n))
@@ -745,16 +737,10 @@ fn keepout_corners(
 ) -> Vec<crate::geometry::planar::Point> {
     use crate::geometry::planar::Point;
     let kind = node.name().unwrap_or("");
-    let nums: Vec<f64> = node
-        .args()
-        .skip(1)
-        .filter_map(|a| a.parse().ok())
-        .collect();
+    let nums: Vec<f64> = node.args().skip(1).filter_map(|a| a.parse().ok()).collect();
     let octagon_corners = |oct: IntOctagon| -> Vec<Point> {
         let t = TileShape::Octagon(oct.normalize());
-        (0..t.border_line_count())
-            .map(|i| t.corner(i))
-            .collect()
+        (0..t.border_line_count()).map(|i| t.corner(i)).collect()
     };
     if kind.eq_ignore_ascii_case("polygon") {
         // (polygon LAYER aperture x1 y1 ...)
@@ -805,11 +791,7 @@ fn keepout_corners(
 fn read_pad_shape(node: &SExpr, scale: &dyn Fn(f64) -> i32) -> Option<(TileShape, String)> {
     let kind = node.name()?;
     let layer_name = node.arg()?.to_string();
-    let nums: Vec<f64> = node
-        .args()
-        .skip(1)
-        .filter_map(|a| a.parse().ok())
-        .collect();
+    let nums: Vec<f64> = node.args().skip(1).filter_map(|a| a.parse().ok()).collect();
     let shape = if kind.eq_ignore_ascii_case("circle") {
         // (circle LAYER diameter [cx cy])
         let diameter = *nums.first()?;
@@ -905,10 +887,16 @@ mod tests {
         let sig_cc = board.rules.get_trace_clearance_class(sig);
         let hv_cc = board.rules.get_trace_clearance_class(hv);
         // the larger-clearance net class must get its OWN clearance class
-        assert_ne!(sig_cc, hv_cc, "hv net class must not reuse the default class");
+        assert_ne!(
+            sig_cc, hv_cc,
+            "hv net class must not reuse the default class"
+        );
         // and that class must carry the hv spacing (800 um * resolution 10)
         assert_eq!(
-            board.rules.clearance_matrix.get_value(hv_cc, hv_cc, 0, false),
+            board
+                .rules
+                .clearance_matrix
+                .get_value(hv_cc, hv_cc, 0, false),
             8000,
             "hv clearance class value"
         );
@@ -924,7 +912,10 @@ mod tests {
                 _ => None,
             })
             .expect("pre-routed HV1 wire");
-        assert_eq!(wire_cc, hv_cc, "wiring must propagate the net's clearance class");
+        assert_eq!(
+            wire_cc, hv_cc,
+            "wiring must propagate the net's clearance class"
+        );
     }
 
     #[test]
@@ -1037,14 +1028,10 @@ mod tests {
             .all(|(_, i)| matches!(i.kind, ItemKind::ObstacleArea(_))));
         // the boundary blocks any net at the outline (coordinates from the
         // file, scaled by resolution 10): the left border is x = 1295400
-        let on_border = TileShape::Box(IntBox::from_coords(
-            1295300, -800000, 1295500, -799000,
-        ));
+        let on_border = TileShape::Box(IntBox::from_coords(1295300, -800000, 1295500, -799000));
         assert!(board.is_blocked(&on_border, 0, 1));
         // but the interior is free
-        let inside = TileShape::Box(IntBox::from_coords(
-            1500000, -800000, 1500200, -799800,
-        ));
+        let inside = TileShape::Box(IntBox::from_coords(1500000, -800000, 1500200, -799800));
         assert!(!board.is_blocked(&inside, 0, 1));
     }
 
@@ -1073,9 +1060,7 @@ mod tests {
         // they carry their nets
         assert!(protected_traces.iter().all(|(_, i)| i.base.net_count() > 0));
         // fixed traces are not routable (protected from ripup)
-        assert!(protected_traces
-            .iter()
-            .all(|(_, i)| !i.is_routable()));
+        assert!(protected_traces.iter().all(|(_, i)| !i.is_routable()));
     }
 
     #[test]

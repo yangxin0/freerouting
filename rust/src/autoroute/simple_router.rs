@@ -96,7 +96,15 @@ impl SimpleRouter {
             if current.layer == target.layer
                 && (current.x - target.x).abs() <= grid
                 && (current.y - target.y).abs() <= grid
-                && Self::segment_free(board, request, current.x, current.y, target.x, target.y, current.layer)
+                && Self::segment_free(
+                    board,
+                    request,
+                    current.x,
+                    current.y,
+                    target.x,
+                    target.y,
+                    current.layer,
+                )
             {
                 came_from.insert(target, current);
                 found = true;
@@ -118,7 +126,10 @@ impl SimpleRouter {
                     y: current.y + dy,
                     layer: current.layer,
                 };
-                if next.x < area.ll.x || next.x > area.ur.x || next.y < area.ll.y || next.y > area.ur.y
+                if next.x < area.ll.x
+                    || next.x > area.ur.x
+                    || next.y < area.ll.y
+                    || next.y > area.ur.y
                 {
                     continue;
                 }
@@ -131,8 +142,15 @@ impl SimpleRouter {
                 if g_score.get(&next).is_some_and(|&g| g <= tentative) {
                     continue;
                 }
-                if !Self::segment_free(board, request, current.x, current.y, next.x, next.y, current.layer)
-                {
+                if !Self::segment_free(
+                    board,
+                    request,
+                    current.x,
+                    current.y,
+                    next.x,
+                    next.y,
+                    current.layer,
+                ) {
                     continue;
                 }
                 g_score.insert(next, tentative);
@@ -246,8 +264,7 @@ impl SimpleRouter {
         let r = request.trace_half_width + request.clearance;
         let shape = if x1 == x2 || y1 == y2 || (x1 - x2).abs() == (y1 - y2).abs() {
             // orthogonal or diagonal: use the exact offset shape
-            let polyline =
-                Polyline::from_two_points(IntPoint::new(x1, y1), IntPoint::new(x2, y2));
+            let polyline = Polyline::from_two_points(IntPoint::new(x1, y1), IntPoint::new(x2, y2));
             if polyline.is_empty() {
                 return Self::via_layer_free(board, request, x1, y1, layer);
             }
@@ -308,10 +325,7 @@ mod tests {
     use crate::rules::{BoardRules, ClearanceMatrix};
 
     fn test_board() -> BasicBoard {
-        let stack = LayerStructure::new(vec![
-            Layer::new("F.Cu", true),
-            Layer::new("B.Cu", true),
-        ]);
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true), Layer::new("B.Cu", true)]);
         let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
         let mut rules = BoardRules::new(stack.clone(), matrix);
         rules.get_default_net_class();

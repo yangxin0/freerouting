@@ -23,7 +23,9 @@ fn net_violations(board: &BasicBoard, net_no: i32) -> usize {
                 if oid == *id {
                     continue;
                 }
-                let Some(other) = board.get_item(oid) else { continue };
+                let Some(other) = board.get_item(oid) else {
+                    continue;
+                };
                 if other.base.shares_net(&item.base) {
                     continue;
                 }
@@ -91,9 +93,7 @@ fn rip_net_route_items(board: &mut BasicBoard, net_no: i32) {
     let ids: Vec<ItemId> = board
         .items()
         .filter(|(_, it)| {
-            it.base.component_no == 0
-                && it.base.contains_net(net_no)
-                && it.is_routable()
+            it.base.component_no == 0 && it.base.contains_net(net_no) && it.is_routable()
         })
         .map(|(id, _)| *id)
         .collect();
@@ -196,9 +196,7 @@ pub fn optimize_nets_pass(
         let before = complete_before.as_ref().unwrap();
         let broke_a_net = local_keep
             && (1..=board.rules.nets.max_net_no()).any(|m| {
-                m != net_no
-                    && before[m as usize]
-                    && !board.net_is_completely_connected(m)
+                m != net_no && before[m as usize] && !board.net_is_completely_connected(m)
             });
         let keep = local_keep && !broke_a_net;
         if keep {
@@ -423,9 +421,7 @@ pub fn optimize_route_multithreaded_with_strategy(
                     let (vias_after, len_after) = net_route_cost(&clone, net_no);
                     let result = NetRouteResult {
                         net_no,
-                        incomplete_after: usize::from(
-                            !clone.net_is_completely_connected(net_no),
-                        ),
+                        incomplete_after: usize::from(!clone.net_is_completely_connected(net_no)),
                         vias_after,
                         len_after,
                     };
@@ -530,8 +526,8 @@ pub fn optimize_route(
         if score_near_maximum(score_before) {
             break;
         }
-        let improved = optimize_route_pass(board, request, time_limit)
-            + optimize_vias(board, time_limit);
+        let improved =
+            optimize_route_pass(board, request, time_limit) + optimize_vias(board, time_limit);
         total += improved;
         if improved == 0 {
             break;

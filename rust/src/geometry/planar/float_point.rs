@@ -142,11 +142,19 @@ impl FloatPoint {
     /// Checks if this point is contained in the box spanned by `p1` and `p2`
     /// with the given tolerance.
     pub fn is_contained_in_box(self, p1: FloatPoint, p2: FloatPoint, tolerance: f64) -> bool {
-        let (min_x, max_x) = if p1.x < p2.x { (p1.x, p2.x) } else { (p2.x, p1.x) };
+        let (min_x, max_x) = if p1.x < p2.x {
+            (p1.x, p2.x)
+        } else {
+            (p2.x, p1.x)
+        };
         if self.x < min_x - tolerance || self.x > max_x + tolerance {
             return false;
         }
-        let (min_y, max_y) = if p1.y < p2.y { (p1.y, p2.y) } else { (p2.y, p1.y) };
+        let (min_y, max_y) = if p1.y < p2.y {
+            (p1.y, p2.y)
+        } else {
+            (p2.y, p1.y)
+        };
         self.y >= min_y - tolerance && self.y <= max_y + tolerance
     }
 }

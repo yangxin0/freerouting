@@ -46,7 +46,10 @@ impl LineSegment {
     /// The `no`-th border segment of `shape`.
     pub fn from_shape(shape: &TileShape, no: usize) -> Self {
         let line_count = shape.border_line_count();
-        assert!(no < line_count, "LineSegment from TileShape: no out of range");
+        assert!(
+            no < line_count,
+            "LineSegment from TileShape: no out of range"
+        );
         let start = shape.border_line((no + line_count - 1) % line_count);
         let middle = shape.border_line(no);
         let end = shape.border_line((no + 1) % line_count);
@@ -348,26 +351,19 @@ impl LineSegment {
                 end_point
             } else if function_of_x {
                 let curr_x = start_point.x + i * stair_width;
-                let curr_y = self
-                    .get_line()
-                    .function_value_approx(curr_x as f64)
-                    .round() as i32;
+                let curr_y = self.get_line().function_value_approx(curr_x as f64).round() as i32;
                 IntPoint::new(curr_x, curr_y)
             } else {
                 let curr_y = start_point.y + i * stair_width;
                 // Note: the Java original calls function_value_approx here
                 // (not function_in_y_value_approx), which looks like a bug;
                 // ported faithfully.
-                let curr_x = self
-                    .get_line()
-                    .function_value_approx(curr_y as f64)
-                    .round() as i32;
+                let curr_x = self.get_line().function_value_approx(curr_y as f64).round() as i32;
                 IntPoint::new(curr_x, curr_y)
             };
             let (curr_x, curr_y);
             if function_of_x {
-                let diagonal_first =
-                    to_the_right && det < 0.0 || !to_the_right && det > 0.0;
+                let diagonal_first = to_the_right && det < 0.0 || !to_the_right && det > 0.0;
                 if diagonal_first {
                     curr_x = prev_line_point.x
                         + Signum::as_int(stair_width as f64)
@@ -382,8 +378,7 @@ impl LineSegment {
                 }
             } else {
                 // function of y
-                let diagonal_first =
-                    to_the_right && det > 0.0 || !to_the_right && det < 0.0;
+                let diagonal_first = to_the_right && det > 0.0 || !to_the_right && det < 0.0;
                 if diagonal_first {
                     curr_x = curr_line_point.x;
                     curr_y = prev_line_point.y
@@ -536,8 +531,7 @@ impl Polyline {
             let projection = self.arr[i].projection_approx(from_point_f);
             let curr_distance = projection.distance(from_point_f);
             if curr_distance < min_distance {
-                let Some(direction_towards_line) =
-                    self.arr[i].perpendicular_direction(from_point)
+                let Some(direction_towards_line) = self.arr[i].perpendicular_direction(from_point)
                 else {
                     continue;
                 };
@@ -546,8 +540,7 @@ impl Polyline {
                 let next_corner = self.corner(i);
                 let prev_corner_side = curr_result_line.side_of(&prev_corner);
                 let next_corner_side = curr_result_line.side_of(&next_corner);
-                if prev_corner_side == next_corner_side && prev_corner_side != Side::Collinear
-                {
+                if prev_corner_side == next_corner_side && prev_corner_side != Side::Collinear {
                     // the projection point is outside the line segment
                     continue;
                 }
@@ -676,7 +669,7 @@ mod tests {
         let borders = crossing.border_intersections(&shape);
         assert_eq!(borders.len(), 2);
         assert_eq!(borders, vec![3, 1]); // left border first (nearest to start)
-        // Segment ending inside: 1 intersection.
+                                         // Segment ending inside: 1 intersection.
         let entering = segment(-5, 5, 5, 5);
         assert_eq!(entering.border_intersections(&shape).len(), 1);
         // Segment fully inside: no border intersection.
@@ -697,10 +690,7 @@ mod tests {
         assert!(p.contains(IntPoint::new(5, 0)));
         assert!(p.contains(IntPoint::new(10, 5)));
         assert!(!p.contains(IntPoint::new(5, 5)));
-        assert_eq!(
-            p.offset_box(2, 0),
-            IntBox::from_coords(-2, -2, 12, 2)
-        );
+        assert_eq!(p.offset_box(2, 0), IntBox::from_coords(-2, -2, 12, 2));
         // From (4, 7) the vertical segment (distance 6) is nearer than the
         // horizontal one (distance 7).
         let proj = p.projection_line(IntPoint::new(4, 7)).unwrap();

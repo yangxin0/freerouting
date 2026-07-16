@@ -124,7 +124,10 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
         if hw > 0 {
             rules.net_classes.get_mut(class).set_trace_half_width(hw);
         }
-        rules.net_classes.get_mut(class).set_trace_clearance_class(i + 2);
+        rules
+            .net_classes
+            .get_mut(class)
+            .set_trace_clearance_class(i + 2);
         class_index.push((name, class));
     }
     if let Some((_, first)) = class_index.first() {
@@ -174,7 +177,13 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
             rules.net_classes.get_mut(class).set_via_rule(Some(rule_id));
         }
     };
-    add_via_rule(&mut rules, &mut padstacks, "default_via", def_via_d, default_class);
+    add_via_rule(
+        &mut rules,
+        &mut padstacks,
+        "default_via",
+        def_via_d,
+        default_class,
+    );
     for (i, c) in net_classes.iter().enumerate() {
         let name = c.str_or("name", "?");
         if name.eq_ignore_ascii_case("default") {
@@ -282,10 +291,7 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
             let (from_layer, to_layer) = if named.is_empty() {
                 (0, layer_count - 1)
             } else {
-                (
-                    *named.iter().min().unwrap(),
-                    *named.iter().max().unwrap(),
-                )
+                (*named.iter().min().unwrap(), *named.iter().max().unwrap())
             };
             let shapes: Vec<Option<TileShape>> = (0..layer_count)
                 .map(|l| (from_layer..=to_layer).contains(&l).then(|| shape.clone()))
@@ -298,11 +304,7 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
                 false,
             );
             let net = net_no_by_name(&board.rules, &pad.str_or("netName", ""));
-            let mut base = ItemBase::new(
-                component_no,
-                net.map(|n| vec![n]).unwrap_or_default(),
-                1,
-            );
+            let mut base = ItemBase::new(component_no, net.map(|n| vec![n]).unwrap_or_default(), 1);
             base.component_no = component_no;
             base.fixed_state = FixedState::SystemFixed;
             let item = Item::new_via(base, ps_no, IntPoint::new(x, y), true);
@@ -366,7 +368,9 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
             .map(to_int)
             .unwrap_or(def_via_d);
         let from = (v.num("startLayerIndex") as usize).min(layer_count - 1);
-        let to = (v.num("endLayerIndex") as usize).min(layer_count - 1).max(from);
+        let to = (v.num("endLayerIndex") as usize)
+            .min(layer_count - 1)
+            .max(from);
         let r = d / 2;
         let ps = board.padstacks.add_shape_on_layers(
             TileShape::Box(IntBox::from_coords(-r, -r, r, r)),
@@ -446,11 +450,7 @@ mod tests {
         assert_eq!(board.rules.clearance_matrix.get_value(a, b, 0, false), 3000);
         // per-class vias resolve through the via rules
         let vcc_via = board.rules.via_padstack_for_net(2).unwrap();
-        let d = board
-            .padstacks
-            .get_by_no(vcc_via)
-            .unwrap()
-            .bounding_box();
+        let d = board.padstacks.get_by_no(vcc_via).unwrap().bounding_box();
         assert_eq!(d.ur.x - d.ll.x, 8000, "0.8 mm Power via");
     }
 
@@ -469,9 +469,7 @@ mod tests {
         assert_eq!(traces, 1);
         let vias = board
             .items()
-            .filter(|(_, it)| {
-                it.base.component_no == 0 && matches!(it.kind, ItemKind::Via(_))
-            })
+            .filter(|(_, it)| it.base.component_no == 0 && matches!(it.kind, ItemKind::Via(_)))
             .count();
         assert_eq!(vias, 1);
         // KiCad Y points down: y=1.0 mm lands at board y = -10000
@@ -479,7 +477,9 @@ mod tests {
             .items()
             .find(|(_, it)| it.base.component_no == 0 && matches!(it.kind, ItemKind::Via(_)))
             .unwrap();
-        let ItemKind::Via(v) = &via.kind else { unreachable!() };
+        let ItemKind::Via(v) = &via.kind else {
+            unreachable!()
+        };
         assert_eq!(v.center, IntPoint::new(20000, -10000));
     }
 }

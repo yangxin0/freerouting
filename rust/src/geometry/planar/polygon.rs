@@ -102,8 +102,8 @@ mod tests {
     fn removes_duplicates_and_collinear() {
         let poly = Polygon::new(vec![
             p(0, 0),
-            p(0, 0),   // duplicate
-            p(5, 0),   // collinear with (0,0) and (10,0)
+            p(0, 0), // duplicate
+            p(5, 0), // collinear with (0,0) and (10,0)
             p(10, 0),
             p(10, 10),
         ]);

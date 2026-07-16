@@ -39,14 +39,7 @@ pub fn shove_aside(
     board.generate_snapshot();
     // shove blocking vias out first (Java: ForcedPadAlgo.forced_pad
     // starts with MoveDrillItemAlgo.shove_vias)
-    crate::board::move_drill_item::shove_vias(
-        board,
-        shove_shape,
-        layer,
-        own_net_nos,
-        cl_class,
-        2,
-    );
+    crate::board::move_drill_item::shove_vias(board, shove_shape, layer, own_net_nos, cl_class, 2);
     if shove_insert(
         board,
         shove_shape,
@@ -172,9 +165,9 @@ fn shove_insert(
         // (they are not on the board yet)
         let segment_shapes = polyline.offset_shapes(half_width);
         let hits_forbidden = segment_shapes.iter().any(|seg| {
-            forbidden.iter().any(|(f, fl)| {
-                *fl == piece_layer && f.intersection(seg).dimension() >= 2
-            })
+            forbidden
+                .iter()
+                .any(|(f, fl)| *fl == piece_layer && f.intersection(seg).dimension() >= 2)
         });
         if hits_forbidden {
             return false;
@@ -276,10 +269,8 @@ mod tests {
     #[test]
     fn shoves_a_crossing_trace_and_keeps_it_connected() {
         let mut board = test_board();
-        let polyline = Polyline::from_int_points(&[
-            IntPoint::new(-10000, 0),
-            IntPoint::new(10000, 0),
-        ]);
+        let polyline =
+            Polyline::from_int_points(&[IntPoint::new(-10000, 0), IntPoint::new(10000, 0)]);
         let victim = board.insert_trace(polyline, 0, 100, vec![2], 1);
         let shape = TileShape::Box(IntBox::from_coords(-1000, -1000, 1000, 1000));
         assert!(shove_aside(&mut board, &shape, 0, &[1], 1, &[]));
@@ -316,10 +307,7 @@ mod tests {
         let mut board = test_board();
         for (y, net) in [(0, 2), (-500, 3)] {
             board.insert_trace(
-                Polyline::from_int_points(&[
-                    IntPoint::new(-10000, y),
-                    IntPoint::new(10000, y),
-                ]),
+                Polyline::from_int_points(&[IntPoint::new(-10000, y), IntPoint::new(10000, y)]),
                 0,
                 100,
                 vec![net],
@@ -355,10 +343,7 @@ mod tests {
             1,
         );
         board.insert_trace(
-            Polyline::from_int_points(&[
-                IntPoint::new(-10000, 1500),
-                IntPoint::new(10000, 1500),
-            ]),
+            Polyline::from_int_points(&[IntPoint::new(-10000, 1500), IntPoint::new(10000, 1500)]),
             0,
             100,
             vec![3],
@@ -381,18 +366,14 @@ mod tests {
     #[test]
     fn refuses_when_the_substitute_is_blocked() {
         let mut board = test_board();
-        let polyline = Polyline::from_int_points(&[
-            IntPoint::new(-10000, 0),
-            IntPoint::new(10000, 0),
-        ]);
+        let polyline =
+            Polyline::from_int_points(&[IntPoint::new(-10000, 0), IntPoint::new(10000, 0)]);
         let victim = board.insert_trace(polyline, 0, 100, vec![2], 1);
         // a wall of foreign net 3 above and below the shove shape leaves
         // no room for the substitute
         for y in [-2200, 2200] {
-            let wall = Polyline::from_int_points(&[
-                IntPoint::new(-8000, y),
-                IntPoint::new(8000, y),
-            ]);
+            let wall =
+                Polyline::from_int_points(&[IntPoint::new(-8000, y), IntPoint::new(8000, y)]);
             let wall_id = board.insert_trace(wall, 0, 700, vec![3], 1);
             // shove-fixed walls: recursion must not push them
             board.set_fixed_state(wall_id, crate::board::FixedState::ShoveFixed);

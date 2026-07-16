@@ -65,7 +65,6 @@ pub fn cutout_trace(
     inserted
 }
 
-
 /// An entry point of a trace into the shove shape; the entries are kept
 /// sorted around the border of the shape (Java: inner class EntryPoint).
 #[derive(Debug, Clone)]
@@ -147,10 +146,7 @@ impl ShapeTraceEntries {
             let Some(item) = board.get_item(item_id) else {
                 continue;
             };
-            let contains_own_net = self
-                .own_net_nos
-                .iter()
-                .any(|n| item.base.contains_net(*n));
+            let contains_own_net = self.own_net_nos.iter().any(|n| item.base.contains_net(*n));
             match &item.kind {
                 ItemKind::ObstacleArea(a) => {
                     if a.via_only {
@@ -219,10 +215,7 @@ impl ShapeTraceEntries {
                 false,
             ) as f64
                 + C_OFFSET_ADD;
-            let offset_shape = self
-                .shape
-                .offset(first.half_width as f64)
-                .offset(cl_offset);
+            let offset_shape = self.shape.offset(first.half_width as f64).offset(cl_offset);
             let edge_count = self.shape.border_line_count();
             let edge_diff = last.edge_no - first.edge_no;
             // the substitute trace: the intersecting trace lines at both
@@ -273,10 +266,7 @@ impl ShapeTraceEntries {
                 continue;
             };
             let is_foreign_trace = matches!(item.kind, ItemKind::PolylineTrace(_))
-                && !self
-                    .own_net_nos
-                    .iter()
-                    .any(|n| item.base.contains_net(*n));
+                && !self.own_net_nos.iter().any(|n| item.base.contains_net(*n));
             if is_foreign_trace {
                 cutout_trace(board, item_id, &self.shape, self.cl_class);
             }
@@ -300,13 +290,10 @@ impl ShapeTraceEntries {
         ) as f64
             + C_OFFSET_ADD;
         // offset (not enlarge) because of the comparison in EntryPoint
-        let offset_shape = self
-            .shape
-            .offset(trace.half_width as f64)
-            .offset(cl_offset);
+        let offset_shape = self.shape.offset(trace.half_width as f64).offset(cl_offset);
         for (line_no, edge_no) in offset_shape.entrance_points(&trace.polyline) {
-            let entry_approx = trace.polyline.arr[line_no]
-                .intersection_approx(&offset_shape.border_line(edge_no));
+            let entry_approx =
+                trace.polyline.arr[line_no].intersection_approx(&offset_shape.border_line(edge_no));
             self.insert_entry_point(
                 trace_id,
                 item.base.net_nos.clone(),
@@ -319,10 +306,7 @@ impl ShapeTraceEntries {
             );
         }
         // a trace end inside the shape (e.g. when a via touches it)
-        let contains_own_net = self
-            .own_net_nos
-            .iter()
-            .any(|n| item.base.contains_net(*n));
+        let contains_own_net = self.own_net_nos.iter().any(|n| item.base.contains_net(*n));
         if !contains_own_net {
             for i in 0..2 {
                 let end_corner = if i == 0 {
@@ -333,8 +317,7 @@ impl ShapeTraceEntries {
                 if !offset_shape.contains(&end_corner) {
                     continue;
                 }
-                let contact_list =
-                    board.get_normal_contacts_at(trace_id, &end_corner, false);
+                let contact_list = board.get_normal_contacts_at(trace_id, &end_corner, false);
                 let mut store_end_corner = true;
                 for &contact_id in &contact_list {
                     let Some(contact) = board.get_item(contact_id) else {
@@ -348,8 +331,7 @@ impl ShapeTraceEntries {
                         ItemKind::PolylineTrace(ct) => {
                             if contact.base.is_shove_fixed()
                                 || ct.half_width != trace.half_width
-                                || contact.base.clearance_class
-                                    != item.base.clearance_class
+                                || contact.base.clearance_class != item.base.clearance_class
                             {
                                 if offset_shape.contains_inside(&end_corner) {
                                     self.found_obstacle = Some(contact_id);
@@ -364,8 +346,7 @@ impl ShapeTraceEntries {
                                 .find(|(_, l)| *l == self.layer)
                                 .map(|(s, _)| s.min_width() / 2.0)
                                 .unwrap_or(0.0);
-                            let mut via_trace_diff =
-                                via_radius - trace.half_width as f64;
+                            let mut via_trace_diff = via_radius - trace.half_width as f64;
                             let via_clearance = board.rules.clearance_matrix.get_value(
                                 contact.base.clearance_class,
                                 self.cl_class,
@@ -379,17 +360,14 @@ impl ShapeTraceEntries {
                                 false,
                             );
                             if trace_clearance > via_clearance {
-                                via_trace_diff +=
-                                    (via_clearance - trace_clearance) as f64;
+                                via_trace_diff += (via_clearance - trace_clearance) as f64;
                             }
                             if via_trace_diff < 0.0 {
                                 // the via is smaller than the trace
                                 self.found_obstacle = Some(contact_id);
                                 return false;
                             }
-                            if via_trace_diff == 0.0
-                                && !offset_shape.contains_inside(&end_corner)
-                            {
+                            if via_trace_diff == 0.0 && !offset_shape.contains_inside(&end_corner) {
                                 store_end_corner = false;
                             }
                         }
@@ -397,9 +375,7 @@ impl ShapeTraceEntries {
                     }
                 }
                 if contact_list.len() == 1 && store_end_corner {
-                    if let Some(projection) =
-                        offset_shape.nearest_border_point(&end_corner)
-                    {
+                    if let Some(projection) = offset_shape.nearest_border_point(&end_corner) {
                         if let Some(projection_side) =
                             offset_shape.contains_on_border_line_no(&projection)
                         {
@@ -420,9 +396,7 @@ impl ShapeTraceEntries {
                             );
                         }
                     }
-                } else if contact_list.is_empty()
-                    && offset_shape.contains_inside(&end_corner)
-                {
+                } else if contact_list.is_empty() && offset_shape.contains_inside(&end_corner) {
                     self.shape_contains_trace_tails = true;
                 }
             }
@@ -487,8 +461,7 @@ impl ShapeTraceEntries {
             }
             if entry.edge_no == from_side_no {
                 let hit = if let Some(fpp) = from_point_projection {
-                    let curr_projection =
-                        border_fline.perpendicular_projection(entry.entry_approx);
+                    let curr_projection = border_fline.perpendicular_projection(entry.entry_approx);
                     curr_projection.distance_square(compare_corner_1) >= from_point_dist
                         && curr_projection.distance_square(fpp)
                             <= curr_projection.distance_square(compare_corner_1)
@@ -514,14 +487,10 @@ impl ShapeTraceEntries {
         // remove interior intersections of the same connected set
         let mut i = 0;
         while i + 2 < self.entries.len() {
-            let equal_1 = Self::net_nos_equal(
-                &self.entries[i].net_nos,
-                &self.entries[i + 1].net_nos,
-            );
-            let equal_2 = Self::net_nos_equal(
-                &self.entries[i + 1].net_nos,
-                &self.entries[i + 2].net_nos,
-            );
+            let equal_1 =
+                Self::net_nos_equal(&self.entries[i].net_nos, &self.entries[i + 1].net_nos);
+            let equal_2 =
+                Self::net_nos_equal(&self.entries[i + 1].net_nos, &self.entries[i + 2].net_nos);
             if equal_1 && equal_2 {
                 self.entries.remove(i + 1);
             } else {
@@ -582,8 +551,7 @@ impl ShapeTraceEntries {
                 if Self::net_nos_equal(&self.entries[check_idx].net_nos, &curr_net_nos) {
                     index_of_last_occurrence_of_set = next_index;
                     last_own_entry = Some(check_idx);
-                    self.entries[check_idx].stack_level =
-                        self.entries[curr_idx].stack_level;
+                    self.entries[check_idx].stack_level = self.entries[curr_idx].stack_level;
                 } else if index_of_next_foreign_set == 0 {
                     index_of_next_foreign_set = next_index;
                     first_foreign_entry = Some(check_idx);
@@ -725,10 +693,8 @@ mod tests {
     #[test]
     fn cuts_crossing_trace_into_two_pieces() {
         let mut board = test_board();
-        let polyline = Polyline::from_int_points(&[
-            IntPoint::new(-10000, 0),
-            IntPoint::new(10000, 0),
-        ]);
+        let polyline =
+            Polyline::from_int_points(&[IntPoint::new(-10000, 0), IntPoint::new(10000, 0)]);
         let trace = board.insert_trace(polyline, 0, 100, vec![1], 1);
         let shape = TileShape::Box(IntBox::from_coords(-1000, -1000, 1000, 1000));
         let pieces = cutout_trace(&mut board, trace, &shape, 1);
@@ -754,10 +720,8 @@ mod tests {
     fn substitute_piece_avoids_the_shove_shape() {
         let mut board = test_board();
         // a foreign trace (net 2) crossing the shove shape of net 1
-        let polyline = Polyline::from_int_points(&[
-            IntPoint::new(-10000, 0),
-            IntPoint::new(10000, 0),
-        ]);
+        let polyline =
+            Polyline::from_int_points(&[IntPoint::new(-10000, 0), IntPoint::new(10000, 0)]);
         let trace = board.insert_trace(polyline, 0, 100, vec![2], 1);
         let shape = TileShape::Box(IntBox::from_coords(-1000, -1000, 1000, 1000));
         let mut entries = ShapeTraceEntries::new(
@@ -777,9 +741,10 @@ mod tests {
         // the substitute goes around the shove shape: no corner inside
         for c in piece.corner_approx_arr() {
             assert!(
-                !shape.contains_inside(&crate::geometry::planar::Point::Int(
-                    IntPoint::new(c.x.round() as i32, c.y.round() as i32)
-                )),
+                !shape.contains_inside(&crate::geometry::planar::Point::Int(IntPoint::new(
+                    c.x.round() as i32,
+                    c.y.round() as i32
+                ))),
                 "substitute corner {c:?} inside the shove shape"
             );
         }
@@ -790,10 +755,8 @@ mod tests {
     #[test]
     fn disjoint_trace_is_untouched() {
         let mut board = test_board();
-        let polyline = Polyline::from_int_points(&[
-            IntPoint::new(5000, 5000),
-            IntPoint::new(9000, 5000),
-        ]);
+        let polyline =
+            Polyline::from_int_points(&[IntPoint::new(5000, 5000), IntPoint::new(9000, 5000)]);
         let trace = board.insert_trace(polyline, 0, 100, vec![1], 1);
         let shape = TileShape::Box(IntBox::from_coords(-1000, -1000, 1000, 1000));
         let pieces = cutout_trace(&mut board, trace, &shape, 1);

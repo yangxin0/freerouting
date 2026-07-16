@@ -31,11 +31,13 @@ fn main() {
     let t0 = Instant::now();
     let mut board = import_dsn(&content).expect("import failed");
     let angle = args_value("--angle").unwrap_or_else(|| "none".to_string());
-    board.rules.set_trace_angle_restriction(match angle.as_str() {
-        "90" => freerouting::board::AngleRestriction::NinetyDegree,
-        "45" => freerouting::board::AngleRestriction::FortyfiveDegree,
-        _ => freerouting::board::AngleRestriction::None,
-    });
+    board
+        .rules
+        .set_trace_angle_restriction(match angle.as_str() {
+            "90" => freerouting::board::AngleRestriction::NinetyDegree,
+            "45" => freerouting::board::AngleRestriction::FortyfiveDegree,
+            _ => freerouting::board::AngleRestriction::None,
+        });
     println!(
         "imported {} in {:?}: {} layers, {} padstacks, {} nets, {} items",
         path,
@@ -95,8 +97,7 @@ fn main() {
             freerouting::autoroute::fanout_board(&mut board, &request, 20, Some(&time_limit));
         println!("fanout: {fanned} pins fanned out");
     }
-    let result =
-        batch_route_passes_with_time_limit(&mut board, &request, 99, Some(&time_limit));
+    let result = batch_route_passes_with_time_limit(&mut board, &request, 99, Some(&time_limit));
     let mut complete_nets = 0usize;
     let mut incomplete_nets = Vec::new();
     for net_no in 1..=net_count {
@@ -128,9 +129,11 @@ fn main() {
     let opt_budget = 30_000u64;
     let t_opt = Instant::now();
     let opt_limit = freerouting::datastructures::TimeLimit::new(opt_budget);
-    let improved =
-        freerouting::autoroute::optimize_route(&mut board, &request, Some(&opt_limit));
-    println!("optimizer: {improved} nets improved in {:?}", t_opt.elapsed());
+    let improved = freerouting::autoroute::optimize_route(&mut board, &request, Some(&opt_limit));
+    println!(
+        "optimizer: {improved} nets improved in {:?}",
+        t_opt.elapsed()
+    );
 
     // normalize (combine fragmented trace chains), then pull tight
     let combined = freerouting::autoroute::combine_all_traces(&mut board);

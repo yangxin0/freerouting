@@ -23,10 +23,7 @@ impl RationalPoint {
     /// Creates a point from projective coordinates. The denominator `z` must
     /// be non-negative (Java throws IllegalArgumentException).
     pub fn new(x: BigInt, y: BigInt, z: BigInt) -> Self {
-        assert!(
-            !z.is_negative(),
-            "RationalPoint: z is expected to be >= 0"
-        );
+        assert!(!z.is_negative(), "RationalPoint: z is expected to be >= 0");
         RationalPoint { x, y, z }
     }
 

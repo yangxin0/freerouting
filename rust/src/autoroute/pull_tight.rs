@@ -210,7 +210,9 @@ fn polyline_keeps_clearance(
         };
         let query = seg.offset(2.0 * max_cl as f64);
         for oid in board.overlapping_items(&query, Some(layer)) {
-            let Some(other) = board.get_item(oid) else { continue };
+            let Some(other) = board.get_item(oid) else {
+                continue;
+            };
             if other.base.contains_net(net_no) {
                 continue;
             }
@@ -258,7 +260,9 @@ pub fn audit_foreign_clearance(board: &BasicBoard, id: ItemId, tag: &str) {
     };
     for (s, l) in item.tile_shapes(&board.padstacks) {
         for oid in board.overlapping_items(&s.offset(10_000.0), Some(*l)) {
-            let Some(other) = board.get_item(oid) else { continue };
+            let Some(other) = board.get_item(oid) else {
+                continue;
+            };
             if oid == id || other.base.shares_net(&item.base) {
                 continue;
             }

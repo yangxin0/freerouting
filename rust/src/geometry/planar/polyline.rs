@@ -59,8 +59,7 @@ impl Polyline {
             let mut i = 1;
             while i + 1 < pts.len() {
                 let (a, b, c) = (pts[i - 1], pts[i], pts[i + 1]);
-                let cross = (i64::from(b.x) - i64::from(a.x))
-                    * (i64::from(c.y) - i64::from(b.y))
+                let cross = (i64::from(b.x) - i64::from(a.x)) * (i64::from(c.y) - i64::from(b.y))
                     - (i64::from(b.y) - i64::from(a.y)) * (i64::from(c.x) - i64::from(b.x));
                 if cross == 0 {
                     // spikes may leave equal neighbours behind
@@ -219,7 +218,11 @@ impl Polyline {
     /// junction splitting at the returned point always succeeds.
     pub fn nearest_lattice_point(&self, from: FloatPoint) -> Option<IntPoint> {
         fn gcd(a: i64, b: i64) -> i64 {
-            if b == 0 { a.abs().max(1) } else { gcd(b, a % b) }
+            if b == 0 {
+                a.abs().max(1)
+            } else {
+                gcd(b, a % b)
+            }
         }
         let corners = self.corner_approx_arr();
         let mut best: Option<(f64, IntPoint)> = None;
@@ -232,13 +235,9 @@ impl Polyline {
             let g = gcd(dx, dy);
             let (sx, sy) = (dx / g, dy / g);
             let step2 = (sx * sx + sy * sy) as f64;
-            let t = ((from.x - a.x as f64) * sx as f64 + (from.y - a.y as f64) * sy as f64)
-                / step2;
+            let t = ((from.x - a.x as f64) * sx as f64 + (from.y - a.y as f64) * sy as f64) / step2;
             let k = t.round().clamp(0.0, g as f64) as i64;
-            let cand = IntPoint::new(
-                a.x + (k * sx) as i32,
-                a.y + (k * sy) as i32,
-            );
+            let cand = IntPoint::new(a.x + (k * sx) as i32, a.y + (k * sy) as i32);
             let d = from.distance(FloatPoint::new(cand.x as f64, cand.y as f64));
             if best.is_none_or(|(bd, _)| d < bd) {
                 best = Some((d, cand));
@@ -258,12 +257,7 @@ impl Polyline {
 
     /// The polyline with reversed order of lines.
     pub fn reverse(&self) -> Self {
-        let reversed = self
-            .arr
-            .iter()
-            .rev()
-            .map(Line::opposite)
-            .collect();
+        let reversed = self.arr.iter().rev().map(Line::opposite).collect();
         Polyline { arr: reversed }
     }
 
@@ -307,8 +301,7 @@ impl Polyline {
             lines.push(self.arr[i].translate(-hw));
 
             // the front line of the offset shape
-            let next_dir_from_curr_dir =
-                next_dir.get_vector().side_of(curr_dir.get_vector());
+            let next_dir_from_curr_dir = next_dir.get_vector().side_of(curr_dir.get_vector());
             if next_dir_from_curr_dir == Side::OnTheLeft {
                 // next right line
                 lines.push(self.arr[i + 1].translate(-hw));
@@ -321,8 +314,7 @@ impl Polyline {
             lines.push(self.arr[i].opposite().translate(-hw));
 
             // the back line of the offset shape
-            let curr_dir_from_prev_dir =
-                curr_dir.get_vector().side_of(prev_dir.get_vector());
+            let curr_dir_from_prev_dir = curr_dir.get_vector().side_of(prev_dir.get_vector());
             if curr_dir_from_prev_dir == Side::OnTheLeft {
                 // previous line translated to the right
                 lines.push(self.arr[i - 1].translate(-hw));
@@ -357,23 +349,19 @@ impl Polyline {
                         corner_to_check = curr_line.intersection_approx(&check_line);
                     }
                     let tmp_next_dir = self.arr[j].direction();
-                    let tmp_next_dir_from_tmp_curr_dir = tmp_next_dir
-                        .get_vector()
-                        .side_of(tmp_curr_dir.get_vector());
-                    direction_changed =
-                        tmp_next_dir_from_tmp_curr_dir != next_dir_from_curr_dir;
+                    let tmp_next_dir_from_tmp_curr_dir =
+                        tmp_next_dir.get_vector().side_of(tmp_curr_dir.get_vector());
+                    direction_changed = tmp_next_dir_from_tmp_curr_dir != next_dir_from_curr_dir;
                     if !direction_changed {
-                        let next_border_line =
-                            if tmp_next_dir_from_tmp_curr_dir == Side::OnTheLeft {
-                                self.arr[j].translate(-hw)
-                            } else {
-                                self.arr[j].opposite().translate(-hw)
-                            };
-                        if next_border_line.side_of_float(corner_to_check, 0.0)
-                            == Side::OnTheLeft
+                        let next_border_line = if tmp_next_dir_from_tmp_curr_dir == Side::OnTheLeft
+                        {
+                            self.arr[j].translate(-hw)
+                        } else {
+                            self.arr[j].opposite().translate(-hw)
+                        };
+                        if next_border_line.side_of_float(corner_to_check, 0.0) == Side::OnTheLeft
                             && next_border_line.side_of(&self.corner(i)) == Side::OnTheRight
-                            && next_border_line.side_of(&self.corner(i - 1))
-                                == Side::OnTheRight
+                            && next_border_line.side_of(&self.corner(i - 1)) == Side::OnTheRight
                         {
                             // an outstanding corner
                             cut_dog_ear_lines.push(next_border_line);
@@ -405,23 +393,19 @@ impl Polyline {
                         corner_to_check = curr_line.intersection_approx(&check_line);
                     }
                     let tmp_prev_dir = self.arr[j].direction();
-                    let tmp_curr_dir_from_tmp_prev_dir = tmp_curr_dir
-                        .get_vector()
-                        .side_of(tmp_prev_dir.get_vector());
-                    direction_changed =
-                        tmp_curr_dir_from_tmp_prev_dir != curr_dir_from_prev_dir;
+                    let tmp_curr_dir_from_tmp_prev_dir =
+                        tmp_curr_dir.get_vector().side_of(tmp_prev_dir.get_vector());
+                    direction_changed = tmp_curr_dir_from_tmp_prev_dir != curr_dir_from_prev_dir;
                     if !direction_changed {
-                        let prev_border_line =
-                            if tmp_curr_dir_from_tmp_prev_dir == Side::OnTheLeft {
-                                self.arr[j].translate(-hw)
-                            } else {
-                                self.arr[j].opposite().translate(-hw)
-                            };
-                        if prev_border_line.side_of_float(corner_to_check, 0.0)
-                            == Side::OnTheLeft
+                        let prev_border_line = if tmp_curr_dir_from_tmp_prev_dir == Side::OnTheLeft
+                        {
+                            self.arr[j].translate(-hw)
+                        } else {
+                            self.arr[j].opposite().translate(-hw)
+                        };
+                        if prev_border_line.side_of_float(corner_to_check, 0.0) == Side::OnTheLeft
                             && prev_border_line.side_of(&self.corner(i)) == Side::OnTheRight
-                            && prev_border_line.side_of(&self.corner(i - 1))
-                                == Side::OnTheRight
+                            && prev_border_line.side_of(&self.corner(i - 1)) == Side::OnTheRight
                         {
                             // an outstanding corner
                             cut_dog_ear_lines.push(prev_border_line);
@@ -797,9 +781,7 @@ fn remove_overlaps(line_arr: Vec<Line>) -> Vec<Line> {
     }
     tmp_arr.push(line_arr[n - 2]);
     // Guard like the Java original: need at least 2 entries to look back.
-    if tmp_arr.len() >= 2
-        && !line_arr[n - 1].is_equal_or_opposite(&tmp_arr[tmp_arr.len() - 2])
-    {
+    if tmp_arr.len() >= 2 && !line_arr[n - 1].is_equal_or_opposite(&tmp_arr[tmp_arr.len() - 2]) {
         tmp_arr.push(line_arr[n - 1]);
     }
     // else skip the last line
@@ -939,9 +921,6 @@ mod tests {
         let p = zigzag();
         let shortened = p.shorten(4, 5.0);
         assert_eq!(shortened.corner_count(), 3);
-        assert_eq!(
-            shortened.last_corner(),
-            Point::Int(IntPoint::new(10, 5))
-        );
+        assert_eq!(shortened.last_corner(), Point::Int(IntPoint::new(10, 5)));
     }
 }

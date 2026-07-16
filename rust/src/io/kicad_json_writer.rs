@@ -60,7 +60,9 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
         if item.base.component_no == 0 {
             continue;
         }
-        let ItemKind::Via(v) = &item.kind else { continue };
+        let ItemKind::Via(v) = &item.kind else {
+            continue;
+        };
         let net_name = item
             .base
             .net_nos
@@ -69,10 +71,7 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
             .map(|x| x.name.clone())
             .unwrap_or_default();
         let bb = item.bounding_box(&board.padstacks);
-        let (w, h) = (
-            (bb.ur.x - bb.ll.x) as f64,
-            (bb.ur.y - bb.ll.y) as f64,
-        );
+        let (w, h) = ((bb.ur.x - bb.ll.x) as f64, (bb.ur.y - bb.ll.y) as f64);
         let through = board
             .padstacks
             .get_by_no(v.padstack)
@@ -156,8 +155,8 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::kicad_json::import_kicad_json;
     use crate::io::import_dsn;
+    use crate::io::kicad_json::import_kicad_json;
 
     const MINI_DSN: &str = r#"(pcb "mini.dsn"
   (resolution um 10)

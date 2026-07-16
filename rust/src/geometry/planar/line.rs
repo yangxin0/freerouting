@@ -120,8 +120,8 @@ impl Line {
         // same determinant as side_of_float, scaled by det
         let sdx = i128::from(self.b.x) - i128::from(self.a.x);
         let sdy = i128::from(self.b.y) - i128::from(self.a.y);
-        let scaled = sdy * (nx - i128::from(self.a.x) * det)
-            - sdx * (ny - i128::from(self.a.y) * det);
+        let scaled =
+            sdy * (nx - i128::from(self.a.x) * det) - sdx * (ny - i128::from(self.a.y) * det);
         match (scaled.signum() * det.signum()) as i32 {
             1 => Side::OnTheLeft,
             -1 => Side::OnTheRight,
@@ -142,8 +142,7 @@ impl Line {
     /// True if the 2 lines define the same set of points (directions may be
     /// opposite).
     pub fn overlaps(&self, other: &Line) -> bool {
-        self.side_of_int(other.a) == Side::Collinear
-            && self.side_of_int(other.b) == Side::Collinear
+        self.side_of_int(other.a) == Side::Collinear && self.side_of_int(other.b) == Side::Collinear
     }
 
     /// Alias of [`Line::overlaps`] (Java keeps both).
@@ -170,16 +169,10 @@ impl Line {
                 return Point::Int(IntPoint::new(self.a.x, other.a.y));
             }
             if delta_2.x == delta_2.y {
-                return Point::Int(IntPoint::new(
-                    self.a.x,
-                    other.a.y + self.a.x - other.a.x,
-                ));
+                return Point::Int(IntPoint::new(self.a.x, other.a.y + self.a.x - other.a.x));
             }
             if delta_2.x == -delta_2.y {
-                return Point::Int(IntPoint::new(
-                    self.a.x,
-                    other.a.y + other.a.x - self.a.x,
-                ));
+                return Point::Int(IntPoint::new(self.a.x, other.a.y + other.a.x - self.a.x));
             }
         } else if delta_1.y == 0 {
             // this line is horizontal
@@ -187,44 +180,26 @@ impl Line {
                 return Point::Int(IntPoint::new(other.a.x, self.a.y));
             }
             if delta_2.x == delta_2.y {
-                return Point::Int(IntPoint::new(
-                    other.a.x + self.a.y - other.a.y,
-                    self.a.y,
-                ));
+                return Point::Int(IntPoint::new(other.a.x + self.a.y - other.a.y, self.a.y));
             }
             if delta_2.x == -delta_2.y {
-                return Point::Int(IntPoint::new(
-                    other.a.x + other.a.y - self.a.y,
-                    self.a.y,
-                ));
+                return Point::Int(IntPoint::new(other.a.x + other.a.y - self.a.y, self.a.y));
             }
         } else if delta_1.x == delta_1.y {
             // this line is right diagonal
             if delta_2.x == 0 {
-                return Point::Int(IntPoint::new(
-                    other.a.x,
-                    self.a.y + other.a.x - self.a.x,
-                ));
+                return Point::Int(IntPoint::new(other.a.x, self.a.y + other.a.x - self.a.x));
             }
             if delta_2.y == 0 {
-                return Point::Int(IntPoint::new(
-                    self.a.x + other.a.y - self.a.y,
-                    other.a.y,
-                ));
+                return Point::Int(IntPoint::new(self.a.x + other.a.y - self.a.y, other.a.y));
             }
         } else if delta_1.x == -delta_1.y {
             // this line is left diagonal
             if delta_2.x == 0 {
-                return Point::Int(IntPoint::new(
-                    other.a.x,
-                    self.a.y + self.a.x - other.a.x,
-                ));
+                return Point::Int(IntPoint::new(other.a.x, self.a.y + self.a.x - other.a.x));
             }
             if delta_2.y == 0 {
-                return Point::Int(IntPoint::new(
-                    self.a.x + self.a.y - other.a.y,
-                    other.a.y,
-                ));
+                return Point::Int(IntPoint::new(self.a.x + self.a.y - other.a.y, other.a.y));
             }
         }
 
@@ -479,18 +454,14 @@ impl Line {
     /// Mirrors this line at the vertical line through `pole`. Note the Java
     /// original also swaps the endpoints to keep the direction consistent.
     pub fn mirror_vertical(&self, pole: IntPoint) -> Self {
-        let mirror = |p: IntPoint| {
-            pole.translate_by(p.difference_by(pole).mirror_at_y_axis())
-        };
+        let mirror = |p: IntPoint| pole.translate_by(p.difference_by(pole).mirror_at_y_axis());
         Line::new(mirror(self.b), mirror(self.a))
     }
 
     /// Mirrors this line at the horizontal line through `pole`, swapping the
     /// endpoints like the Java original.
     pub fn mirror_horizontal(&self, pole: IntPoint) -> Self {
-        let mirror = |p: IntPoint| {
-            pole.translate_by(p.difference_by(pole).mirror_at_x_axis())
-        };
+        let mirror = |p: IntPoint| pole.translate_by(p.difference_by(pole).mirror_at_x_axis());
         Line::new(mirror(self.b), mirror(self.a))
     }
 

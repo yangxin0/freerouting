@@ -86,9 +86,7 @@ impl Point {
         match (self, vector) {
             (Point::Int(p), Vector::Int(v)) => Point::Int(p.translate_by(*v)),
             _ => {
-                let result = self
-                    .to_rational()
-                    .translate_by(&vector_to_rational(vector));
+                let result = self.to_rational().translate_by(&vector_to_rational(vector));
                 Point::Rational(result)
             }
         }
@@ -253,14 +251,8 @@ mod tests {
     fn turns_and_mirrors() {
         let p = Point::Int(IntPoint::new(3, 1));
         let pole = Point::Int(IntPoint::new(1, 1));
-        assert_eq!(
-            p.turn_90_degree(1, &pole),
-            Point::Int(IntPoint::new(1, 3))
-        );
-        assert_eq!(
-            p.mirror_vertical(&pole),
-            Point::Int(IntPoint::new(-1, 1))
-        );
+        assert_eq!(p.turn_90_degree(1, &pole), Point::Int(IntPoint::new(1, 3)));
+        assert_eq!(p.mirror_vertical(&pole), Point::Int(IntPoint::new(-1, 1)));
         assert_eq!(p.mirror_horizontal(&pole), p);
     }
 

@@ -23,7 +23,10 @@ struct Lcg(u64);
 
 impl Lcg {
     fn next_below(&mut self, bound: usize) -> usize {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((self.0 >> 33) as usize) % bound.max(1)
     }
 }
@@ -392,12 +395,10 @@ impl PolygonShape {
             // no concave corner: already convex
             return Some(vec![self.clone()]);
         };
-        let (projection, corner_no_after_projection) =
-            self.division_point(concave_corner_no)?;
+        let (projection, corner_no_after_projection) = self.division_point(concave_corner_no)?;
 
         // construct the two result pieces
-        let mut corner_count =
-            corner_no_after_projection as isize - concave_corner_no as isize;
+        let mut corner_count = corner_no_after_projection as isize - concave_corner_no as isize;
         if corner_count < 0 {
             corner_count += n as isize;
         }
@@ -411,8 +412,7 @@ impl PolygonShape {
         first_arr.push(Point::Int(projection.round()));
         let first_piece = PolygonShape::new(first_arr);
 
-        let mut corner_count =
-            concave_corner_no as isize - corner_no_after_projection as isize;
+        let mut corner_count = concave_corner_no as isize - corner_no_after_projection as isize;
         if corner_count < 0 {
             corner_count += n as isize;
         }
@@ -476,9 +476,15 @@ impl PolygonShape {
                 // try a horizontal division
                 let (min_y, max_y) =
                     if corner_after_projection_approx.y > corner_before_projection_approx.y {
-                        (corner_before_projection_approx.y, corner_after_projection_approx.y)
+                        (
+                            corner_before_projection_approx.y,
+                            corner_after_projection_approx.y,
+                        )
                     } else {
-                        (corner_after_projection_approx.y, corner_before_projection_approx.y)
+                        (
+                            corner_after_projection_approx.y,
+                            corner_before_projection_approx.y,
+                        )
                     };
                 if concave_corner.y >= min_y && concave_corner.y <= max_y {
                     let curr_line =
@@ -504,9 +510,15 @@ impl PolygonShape {
                 // try a vertical division
                 let (min_x, max_x) =
                     if corner_after_projection_approx.x > corner_before_projection_approx.x {
-                        (corner_before_projection_approx.x, corner_after_projection_approx.x)
+                        (
+                            corner_before_projection_approx.x,
+                            corner_after_projection_approx.x,
+                        )
                     } else {
-                        (corner_after_projection_approx.x, corner_before_projection_approx.x)
+                        (
+                            corner_after_projection_approx.x,
+                            corner_before_projection_approx.x,
+                        )
                     };
                 if concave_corner.x >= min_x && concave_corner.x <= max_x {
                     let curr_line =

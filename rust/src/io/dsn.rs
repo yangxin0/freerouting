@@ -23,7 +23,11 @@ pub struct ParseError {
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "DSN parse error at byte {}: {}", self.position, self.message)
+        write!(
+            f,
+            "DSN parse error at byte {}: {}",
+            self.position, self.message
+        )
     }
 }
 
@@ -220,8 +224,8 @@ mod tests {
                 // fixture not present in this checkout: skip
                 continue;
             };
-            let expr = parse_dsn(&content)
-                .unwrap_or_else(|e| panic!("failed to parse {fixture}: {e}"));
+            let expr =
+                parse_dsn(&content).unwrap_or_else(|e| panic!("failed to parse {fixture}: {e}"));
             assert_eq!(expr.name(), Some("pcb"), "{fixture} root");
             let structure = expr.child("structure").expect("structure");
             assert!(structure.children("layer").count() >= 2, "{fixture} layers");
@@ -229,8 +233,7 @@ mod tests {
             // the boundary path has coordinates
             let path_node = structure.child("boundary").unwrap().child("path");
             if let Some(p) = path_node {
-                let coords: Vec<f64> =
-                    p.args().skip(2).filter_map(|a| a.parse().ok()).collect();
+                let coords: Vec<f64> = p.args().skip(2).filter_map(|a| a.parse().ok()).collect();
                 assert!(coords.len() >= 8, "{fixture} boundary coords");
             }
         }

@@ -98,9 +98,7 @@ impl CalcFromSide {
             };
             let next_side = check_line.side_of_float(next_corner, 0.0);
             if prev_side != next_side {
-                let curr_intersection = shape
-                    .border_line(i - 1)
-                    .intersection_approx(&check_line);
+                let curr_intersection = shape.border_line(i - 1).intersection_approx(&check_line);
                 if curr_intersection.distance_square(start_corner)
                     < curr_intersection.distance_square(end_corner)
                 {
@@ -154,8 +152,7 @@ mod tests {
 
     #[test]
     fn nearest_side_of_point() {
-        let from_side =
-            CalcFromSide::from_point(&Point::Int(IntPoint::new(0, -250)), &square());
+        let from_side = CalcFromSide::from_point(&Point::Int(IntPoint::new(0, -250)), &square());
         assert_eq!(from_side.no, Some(0)); // the bottom side
     }
 
@@ -164,10 +161,7 @@ mod tests {
         // On a 4-sided box both shove directions give the same (opposite)
         // side: +-2 mod 4 coincide, like in Java. On an octagon they
         // differ.
-        let polyline = Polyline::from_int_points(&[
-            IntPoint::new(-300, 0),
-            IntPoint::new(300, 0),
-        ]);
+        let polyline = Polyline::from_int_points(&[IntPoint::new(-300, 0), IntPoint::new(300, 0)]);
         let seg = LineSegment::from_polyline(&polyline, 1);
         let left = CalcFromSide::from_segment(&seg, &square(), true);
         let right = CalcFromSide::from_segment(&seg, &square(), false);
@@ -175,8 +169,7 @@ mod tests {
         assert_eq!(left.no, right.no);
 
         let octagon = TileShape::Octagon(
-            crate::geometry::planar::Circle::new(IntPoint::new(0, 0), 100)
-                .bounding_octagon(),
+            crate::geometry::planar::Circle::new(IntPoint::new(0, 0), 100).bounding_octagon(),
         );
         let left = CalcFromSide::from_segment(&seg, &octagon, true);
         let right = CalcFromSide::from_segment(&seg, &octagon, false);

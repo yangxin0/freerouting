@@ -54,11 +54,7 @@ fn main() {
     }
     stats.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
     let total: f64 = stats.iter().map(|s| s.0).sum();
-    println!(
-        "{} routed traces, total length {:.3e}",
-        stats.len(),
-        total
-    );
+    println!("{} routed traces, total length {:.3e}", stats.len(), total);
     println!("top 10 by length (length, max|corner|, corners, net):");
     for (len, max_c, n, net) in stats.iter().take(10) {
         println!("  len {len:.3e}  max|corner| {max_c:.3e}  corners {n}  net {net}");

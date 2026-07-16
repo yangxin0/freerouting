@@ -12,9 +12,9 @@ pub mod ses_import;
 
 pub use dsn::{parse_dsn, SExpr};
 pub use dsn_export::export_dsn;
+pub use dsn_import::{import_dsn, ImportError};
 pub use kicad_json::import_kicad_json;
 pub use kicad_json_writer::export_kicad_json;
 pub use rules_io::{read_rules, write_rules};
-pub use ses_import::{import_ses, SesImportSummary};
-pub use dsn_import::{import_dsn, ImportError};
 pub use ses_export::export_ses;
+pub use ses_import::{import_ses, SesImportSummary};

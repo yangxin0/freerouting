@@ -187,10 +187,7 @@ pub fn complete_shape_tracked(
                 .map(|(id, _)| *id)
                 .collect();
             // direct tree view of the same region on this layer
-            let tree_view = board.overlapping_items(
-                &TileShape::Box(region),
-                Some(room.layer),
-            );
+            let tree_view = board.overlapping_items(&TileShape::Box(region), Some(room.layer));
             eprintln!(
                 "COMPLETE net {net_no} ripup={ignore_rippable} ignore={ignore_item:?} \
                  layer {} contained {:?} region-obstacles {:?} tree-sees {:?}",
@@ -402,7 +399,11 @@ fn restrain_shape_prepared(
             layer: room.layer,
             contained_shape: shape_to_be_contained.intersection(&opposite_half_plane),
         };
-        result.extend(restrain_shape_prepared(&rest_room, obstacle_tile, depth - 1));
+        result.extend(restrain_shape_prepared(
+            &rest_room,
+            obstacle_tile,
+            depth - 1,
+        ));
     }
     result
 }
@@ -416,10 +417,7 @@ mod tests {
     use crate::rules::{BoardRules, ClearanceMatrix};
 
     fn test_board() -> BasicBoard {
-        let stack = LayerStructure::new(vec![
-            Layer::new("F.Cu", true),
-            Layer::new("B.Cu", true),
-        ]);
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true), Layer::new("B.Cu", true)]);
         let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
         let mut rules = BoardRules::new(stack.clone(), matrix);
         rules.get_default_net_class();

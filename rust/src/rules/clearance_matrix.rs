@@ -38,7 +38,9 @@ impl Row {
     fn new(name: String, class_count: usize, layer_count: usize) -> Self {
         Row {
             name,
-            column: (0..class_count).map(|_| MatrixEntry::new(layer_count)).collect(),
+            column: (0..class_count)
+                .map(|_| MatrixEntry::new(layer_count))
+                .collect(),
             max_value: vec![0; layer_count],
         }
     }

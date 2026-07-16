@@ -99,7 +99,8 @@ pub struct BasicBoard {
     /// reached 43M search-tree queries in one coldfire pass. Any board
     /// change invalidates the whole cache (checks come in bursts between
     /// changes). Not cloned: a cloned board starts cold.
-    contact_cache: std::cell::RefCell<crate::datastructures::FxHashMap<ItemId, std::sync::Arc<Vec<ItemId>>>>,
+    contact_cache:
+        std::cell::RefCell<crate::datastructures::FxHashMap<ItemId, std::sync::Arc<Vec<ItemId>>>>,
     contact_cache_log: std::cell::Cell<(u64, usize)>,
     #[allow(clippy::type_complexity)]
     inflation_cache: std::cell::RefCell<
@@ -400,9 +401,10 @@ impl BasicBoard {
             let Some(item) = self.get_item(plane_id) else {
                 continue;
             };
-            let matches = item.tile_shapes(&self.padstacks).iter().any(|(s, l)| {
-                layer.is_none_or(|want| *l == want) && s.intersects(shape)
-            });
+            let matches = item
+                .tile_shapes(&self.padstacks)
+                .iter()
+                .any(|(s, l)| layer.is_none_or(|want| *l == want) && s.intersects(shape));
             if matches {
                 result.push(plane_id);
             }
@@ -417,11 +419,7 @@ impl BasicBoard {
     /// overlaps `shape` (plus the planes matching by bbox). Callers must
     /// do their own exact filtering; use when the candidate set is large
     /// and downstream work discards far items cheaply anyway.
-    pub fn overlapping_items_coarse(
-        &self,
-        shape: &TileShape,
-        layer: Option<usize>,
-    ) -> Vec<ItemId> {
+    pub fn overlapping_items_coarse(&self, shape: &TileShape, layer: Option<usize>) -> Vec<ItemId> {
         let Some(query) = shape.bounding_octagon() else {
             return Vec::new();
         };
@@ -438,8 +436,7 @@ impl BasicBoard {
                 continue;
             };
             let matches = item.tile_shapes(&self.padstacks).iter().any(|(s, l)| {
-                layer.is_none_or(|want| *l == want)
-                    && s.bounding_box().intersects(query_bbox)
+                layer.is_none_or(|want| *l == want) && s.bounding_box().intersects(query_bbox)
             });
             if matches {
                 result.push(plane_id);
@@ -534,23 +531,19 @@ impl BasicBoard {
                 // the tile shapes are built.
                 ItemKind::Via(v) => {
                     *point == Point::Int(v.center)
-                        || (self
-                            .padstacks
-                            .get_by_no(v.padstack)
-                            .is_some_and(|p| {
-                                let bb = p.bounding_box();
-                                !bb.is_empty() && {
-                                    let f = point.to_float();
-                                    f.x >= (v.center.x + bb.ll.x) as f64
-                                        && f.x <= (v.center.x + bb.ur.x) as f64
-                                        && f.y >= (v.center.y + bb.ll.y) as f64
-                                        && f.y <= (v.center.y + bb.ur.y) as f64
-                                }
-                            })
-                            && other
-                                .tile_shapes(&self.padstacks)
-                                .iter()
-                                .any(|(s, _)| s.contains(point)))
+                        || (self.padstacks.get_by_no(v.padstack).is_some_and(|p| {
+                            let bb = p.bounding_box();
+                            !bb.is_empty() && {
+                                let f = point.to_float();
+                                f.x >= (v.center.x + bb.ll.x) as f64
+                                    && f.x <= (v.center.x + bb.ur.x) as f64
+                                    && f.y >= (v.center.y + bb.ll.y) as f64
+                                    && f.y <= (v.center.y + bb.ur.y) as f64
+                            }
+                        }) && other
+                            .tile_shapes(&self.padstacks)
+                            .iter()
+                            .any(|(s, _)| s.contains(point)))
                 }
                 ItemKind::ObstacleArea(a) => a.is_conduction && a.area.contains(point),
             };
@@ -578,9 +571,7 @@ impl BasicBoard {
             return hit.clone();
         }
         let computed = std::sync::Arc::new(self.get_normal_contacts(id));
-        self.contact_cache
-            .borrow_mut()
-            .insert(id, computed.clone());
+        self.contact_cache.borrow_mut().insert(id, computed.clone());
         computed
     }
 
@@ -653,8 +644,7 @@ impl BasicBoard {
                     }
                     let touches = match &other.kind {
                         ItemKind::PolylineTrace(t) => {
-                            a.area.contains(&t.first_corner())
-                                || a.area.contains(&t.last_corner())
+                            a.area.contains(&t.first_corner()) || a.area.contains(&t.last_corner())
                         }
                         ItemKind::Via(v) => a.area.contains(&Point::Int(v.center)),
                         ItemKind::ObstacleArea(_) => false,
@@ -697,7 +687,9 @@ impl BasicBoard {
     /// default `ignore_cycles_with_areas` — planes must not make every
     /// plane-touching trace a cycle).
     pub fn trace_is_cycle(&self, id: ItemId) -> bool {
-        let Some(item) = self.get_item(id) else { return false };
+        let Some(item) = self.get_item(id) else {
+            return false;
+        };
         if !matches!(item.kind, ItemKind::PolylineTrace(_)) {
             return false;
         }
@@ -745,8 +737,12 @@ impl BasicBoard {
     fn get_trace_tail(&self, point: &Point, layer: usize, net_nos: &[i32]) -> Option<ItemId> {
         let search_shape = TileShape::Box(point.surrounding_box());
         for other_id in self.overlapping_items(&search_shape, Some(layer)) {
-            let Some(other) = self.get_item(other_id) else { continue };
-            let ItemKind::PolylineTrace(t) = &other.kind else { continue };
+            let Some(other) = self.get_item(other_id) else {
+                continue;
+            };
+            let ItemKind::PolylineTrace(t) = &other.kind else {
+                continue;
+            };
             if t.layer != layer || other.base.net_nos != net_nos {
                 continue;
             }
@@ -764,7 +760,9 @@ impl BasicBoard {
     /// tails the removal created at its endpoints (Java:
     /// `BasicBoard.remove_if_cycle`). Fixed traces are never removed.
     pub fn remove_if_cycle(&mut self, id: ItemId) -> bool {
-        let Some(item) = self.get_item(id) else { return false };
+        let Some(item) = self.get_item(id) else {
+            return false;
+        };
         if item.base.is_user_fixed() {
             return false;
         }
@@ -807,9 +805,7 @@ impl BasicBoard {
                                     ot.first_corner().to_float().round() == cp
                                         || ot.last_corner().to_float().round() == cp
                                 }
-                                ItemKind::Via(v) => {
-                                    it.base.component_no == 0 && v.center == cp
-                                }
+                                ItemKind::Via(v) => it.base.component_no == 0 && v.center == cp,
                                 _ => false,
                             }
                     })
@@ -851,8 +847,7 @@ impl BasicBoard {
             // follow the freshly created tail chain outward
             let mut at = corner.clone();
             while let Some(tail) = self.get_trace_tail(&at, layer, &net_nos) {
-                let Some(ItemKind::PolylineTrace(tt)) =
-                    self.get_item(tail).map(|i| i.kind.clone())
+                let Some(ItemKind::PolylineTrace(tt)) = self.get_item(tail).map(|i| i.kind.clone())
                 else {
                     break;
                 };
@@ -1160,10 +1155,7 @@ mod tests {
     use crate::rules::ClearanceMatrix;
 
     fn test_board() -> BasicBoard {
-        let stack = LayerStructure::new(vec![
-            Layer::new("F.Cu", true),
-            Layer::new("B.Cu", true),
-        ]);
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true), Layer::new("B.Cu", true)]);
         let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
         let mut rules = BoardRules::new(stack.clone(), matrix);
         rules.get_default_net_class();
@@ -1189,13 +1181,7 @@ mod tests {
     fn via_over_passthrough_trace_registers_contact_after_split() {
         let mut board = test_board();
         // a same-net trace running straight through (5000,0), not ending there
-        let trace = board.insert_trace(
-            trace_polyline(&[(0, 0), (10000, 0)]),
-            0,
-            100,
-            vec![1],
-            1,
-        );
+        let trace = board.insert_trace(trace_polyline(&[(0, 0), (10000, 0)]), 0, 100, vec![1], 1);
         let via = board.insert_via(1, IntPoint::new(5000, 0), vec![1], 1, false);
         // before splitting, the pass-through trace does not contact the via
         // (contact requires a trace endpoint inside the via shape)
@@ -1225,13 +1211,7 @@ mod tests {
     #[test]
     fn insert_query_remove_items() {
         let mut board = test_board();
-        let trace = board.insert_trace(
-            trace_polyline(&[(0, 0), (5000, 0)]),
-            0,
-            100,
-            vec![1],
-            1,
-        );
+        let trace = board.insert_trace(trace_polyline(&[(0, 0), (5000, 0)]), 0, 100, vec![1], 1);
         let via = board.insert_via(1, IntPoint::new(5000, 0), vec![1], 1, false);
         assert_eq!(board.item_count(), 2);
 
@@ -1275,13 +1255,7 @@ mod tests {
         let mut board = test_board();
         // a diagonal trace: its bounding octagon covers the corner area,
         // but the exact shape does not
-        board.insert_trace(
-            trace_polyline(&[(0, 0), (4000, 4000)]),
-            0,
-            100,
-            vec![1],
-            1,
-        );
+        board.insert_trace(trace_polyline(&[(0, 0), (4000, 4000)]), 0, 100, vec![1], 1);
         // a box near the diagonal but not touching the trace shape
         let far_corner = query_box(3000, 0, 3400, 400);
         assert!(board.overlapping_items(&far_corner, Some(0)).is_empty());
@@ -1296,13 +1270,7 @@ mod tests {
         // net 1: pin-like via at (0,0), trace to (5000,0), via there,
         // trace on layer 1 onwards
         let via_a = board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
-        let trace_1 = board.insert_trace(
-            trace_polyline(&[(0, 0), (5000, 0)]),
-            0,
-            100,
-            vec![1],
-            1,
-        );
+        let trace_1 = board.insert_trace(trace_polyline(&[(0, 0), (5000, 0)]), 0, 100, vec![1], 1);
         let via_b = board.insert_via(1, IntPoint::new(5000, 0), vec![1], 1, false);
         let trace_2 = board.insert_trace(
             trace_polyline(&[(5000, 0), (5000, 4000)]),
@@ -1409,13 +1377,7 @@ mod tests {
     fn split_trace_makes_t_junction_connect() {
         let mut board = test_board();
         // trace A along the x axis, trace B ending in the middle of A
-        let a = board.insert_trace(
-            trace_polyline(&[(0, 0), (10000, 0)]),
-            0,
-            100,
-            vec![1],
-            1,
-        );
+        let a = board.insert_trace(trace_polyline(&[(0, 0), (10000, 0)]), 0, 100, vec![1], 1);
         let b = board.insert_trace(
             trace_polyline(&[(5000, 5000), (5000, 0)]),
             0,
@@ -1449,7 +1411,9 @@ mod tests {
             let mut board = test_board();
             let mut rng = seed;
             let mut next = || {
-                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                rng = rng
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 (rng >> 33) as usize
             };
             // shadow: stack of saved alive-sets; current alive set
@@ -1493,8 +1457,7 @@ mod tests {
                         }
                     }
                 }
-                let mut board_alive: Vec<ItemId> =
-                    board.items().map(|(id, _)| *id).collect();
+                let mut board_alive: Vec<ItemId> = board.items().map(|(id, _)| *id).collect();
                 board_alive.sort_unstable();
                 let mut shadow = alive.clone();
                 shadow.sort_unstable();
@@ -1650,13 +1613,7 @@ mod tests {
     #[test]
     fn undo_redo_resyncs_search_tree() {
         let mut board = test_board();
-        let trace = board.insert_trace(
-            trace_polyline(&[(0, 0), (5000, 0)]),
-            0,
-            100,
-            vec![1],
-            1,
-        );
+        let trace = board.insert_trace(trace_polyline(&[(0, 0), (5000, 0)]), 0, 100, vec![1], 1);
         board.generate_snapshot();
         let via = board.insert_via(1, IntPoint::new(2500, 0), vec![1], 1, false);
         board.remove_item(trace);

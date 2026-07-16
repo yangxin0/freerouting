@@ -175,7 +175,10 @@ impl Circle {
     }
 
     pub fn rotate_approx(&self, angle: f64, pole: FloatPoint) -> Self {
-        Circle::new(self.center.to_float().rotate(angle, pole).round(), self.radius)
+        Circle::new(
+            self.center.to_float().rotate(angle, pole).round(),
+            self.radius,
+        )
     }
 
     pub fn mirror_vertical(&self, pole: IntPoint) -> Self {
@@ -289,7 +292,9 @@ mod tests {
         let far_tile = TileShape::Box(IntBox::from_coords(11, 11, 20, 20));
         assert!(!a.intersects_tile(&far_tile));
 
-        let turned = a.translate_by(IntVector::new(5, 0)).turn_90_degree(1, IntPoint::ZERO);
+        let turned = a
+            .translate_by(IntVector::new(5, 0))
+            .turn_90_degree(1, IntPoint::ZERO);
         assert_eq!(turned.center, IntPoint::new(0, 5));
         assert_eq!(a.offset(2.0).radius, 12);
         assert_eq!(a.shrink(15.0).radius, 1);

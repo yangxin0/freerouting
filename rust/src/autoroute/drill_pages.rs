@@ -136,21 +136,17 @@ impl DrillPageArray {
                 if page_box.is_empty() {
                     continue;
                 }
-                let page = self
-                    .pages
-                    .entry(key)
-                    .or_insert_with(|| DrillPage {
-                        shape: page_box,
-                        base_drills: None,
-                        nets_present: Vec::new(),
-                        net_drills: None,
-                        net_no: -1,
-                        base_margin: -1,
-                        net_margin: -1,
-                    });
+                let page = self.pages.entry(key).or_insert_with(|| DrillPage {
+                    shape: page_box,
+                    base_drills: None,
+                    nets_present: Vec::new(),
+                    net_drills: None,
+                    net_no: -1,
+                    base_margin: -1,
+                    net_margin: -1,
+                });
                 if page.base_drills.is_none() || page.base_margin != via_margin {
-                    let (drills, nets) =
-                        calculate_page_drills(board, page.shape, -1, via_margin);
+                    let (drills, nets) = calculate_page_drills(board, page.shape, -1, via_margin);
                     page.base_drills = Some(drills);
                     page.nets_present = nets;
                     page.net_drills = None;
@@ -167,9 +163,8 @@ impl DrillPageArray {
                     {
                         page.net_no = net_no;
                         page.net_margin = via_margin;
-                        page.net_drills = Some(
-                            calculate_page_drills(board, page.shape, net_no, via_margin).0,
-                        );
+                        page.net_drills =
+                            Some(calculate_page_drills(board, page.shape, net_no, via_margin).0);
                     }
                     page.net_drills.as_ref().unwrap()
                 } else {
@@ -201,7 +196,9 @@ fn calculate_page_drills(
     let mut holes: Vec<(i32, Arc<TileShape>)> = Vec::new();
     let mut nets_present: Vec<i32> = Vec::new();
     for item_id in board.overlapping_items_coarse(&query, None) {
-        let Some(item) = board.get_item(item_id) else { continue };
+        let Some(item) = board.get_item(item_id) else {
+            continue;
+        };
         nets_present.extend(item.base.net_nos.iter().copied());
         // drillable for this net: own-net items and conduction planes
         if item.base.contains_net(net_no) {
@@ -251,10 +248,7 @@ mod tests {
     use crate::rules::{BoardRules, ClearanceMatrix};
 
     fn test_board() -> BasicBoard {
-        let stack = LayerStructure::new(vec![
-            Layer::new("F.Cu", true),
-            Layer::new("B.Cu", true),
-        ]);
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true), Layer::new("B.Cu", true)]);
         let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
         let mut rules = BoardRules::new(stack.clone(), matrix);
         rules.get_default_net_class();
@@ -286,7 +280,8 @@ mod tests {
                 }
                 for (s, _) in it.tile_shapes(&board.padstacks) {
                     assert!(
-                        !s.offset(500.0).contains(&crate::geometry::planar::Point::Int(d.location)),
+                        !s.offset(500.0)
+                            .contains(&crate::geometry::planar::Point::Int(d.location)),
                         "drill at {:?} lands on a foreign via",
                         d.location
                     );

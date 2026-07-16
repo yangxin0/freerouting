@@ -321,7 +321,9 @@ impl RoomGraph {
     fn allocate_sections(&mut self, door: DoorId, section_count: usize) {
         let sections = &mut self.doors[door].sections;
         if sections.len() != section_count {
-            *sections = (0..section_count).map(|_| MazeSearchElement::default()).collect();
+            *sections = (0..section_count)
+                .map(|_| MazeSearchElement::default())
+                .collect();
         }
     }
 
@@ -355,11 +357,7 @@ mod tests {
         let mut graph = RoomGraph::new();
         // two free-space rooms sharing the edge x = 100
         let left = graph.add_room(box_shape(0, 0, 100, 100), 0, RoomKind::CompleteFreeSpace);
-        let right = graph.add_room(
-            box_shape(100, 0, 200, 100),
-            0,
-            RoomKind::CompleteFreeSpace,
-        );
+        let right = graph.add_room(box_shape(100, 0, 200, 100), 0, RoomKind::CompleteFreeSpace);
         let door = graph.add_door(left, right);
         assert_eq!(graph.door(door).dimension, 1);
         assert_eq!(graph.other_room(door, left), Some(right));

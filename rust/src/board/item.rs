@@ -269,9 +269,7 @@ impl Item {
                     return None;
                 }
                 let shape = padstack.get_shape(layer)?;
-                let translated = shape.translate_by(
-                    via.center.difference_by(IntPoint::ZERO),
-                );
+                let translated = shape.translate_by(via.center.difference_by(IntPoint::ZERO));
                 Some((translated, layer))
             }
             ItemKind::PolylineTrace(trace) => {
@@ -504,12 +502,7 @@ mod tests {
     #[test]
     fn via_translate() {
         let padstacks = padstacks();
-        let mut via = Item::new_via(
-            ItemBase::new(1, vec![1], 1),
-            1,
-            IntPoint::new(0, 0),
-            false,
-        );
+        let mut via = Item::new_via(ItemBase::new(1, vec![1], 1), 1, IntPoint::new(0, 0), false);
         if let ItemKind::Via(v) = &mut via.kind {
             v.translate_by(IntVector::new(500, -500));
         }

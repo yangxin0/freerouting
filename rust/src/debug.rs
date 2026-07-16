@@ -61,9 +61,7 @@ pub fn stats() -> bool {
 /// falls back to the interim frontier expansion.
 pub fn srn() -> bool {
     static C: OnceLock<bool> = OnceLock::new();
-    *C.get_or_init(|| {
-        std::env::var("FR_SRN").map(|v| v != "0").unwrap_or(true)
-    })
+    *C.get_or_init(|| std::env::var("FR_SRN").map(|v| v != "0").unwrap_or(true))
 }
 
 /// FR_OBSTACLE_ROOMS: route ripup through obstacle expansion rooms
@@ -72,7 +70,9 @@ pub fn srn() -> bool {
 pub fn obstacle_rooms() -> bool {
     static C: OnceLock<bool> = OnceLock::new();
     *C.get_or_init(|| {
-        std::env::var("FR_OBSTACLE_ROOMS").map(|v| v != "0").unwrap_or(true)
+        std::env::var("FR_OBSTACLE_ROOMS")
+            .map(|v| v != "0")
+            .unwrap_or(true)
     })
 }
 

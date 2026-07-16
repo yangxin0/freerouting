@@ -40,7 +40,9 @@ pub fn import_ses(board: &mut BasicBoard, content: &str) -> Result<SesImportSumm
     }
     crate::board::basic_board::set_birth_tag(1);
     for net_node in network.children("net") {
-        let Some(net_name) = net_node.arg() else { continue };
+        let Some(net_name) = net_node.arg() else {
+            continue;
+        };
         let net_nos: Vec<i32> = board
             .rules
             .nets
@@ -55,9 +57,10 @@ pub fn import_ses(board: &mut BasicBoard, content: &str) -> Result<SesImportSumm
             .map(|&n| board.rules.get_trace_clearance_class(n))
             .unwrap_or_else(crate::rules::BoardRules::default_clearance_class);
         for wire in net_node.children("wire") {
-            let Some(path) = wire.child("path") else { continue };
-            let Some(layer) = path.arg().and_then(|n| board.layer_structure.get_no(n))
-            else {
+            let Some(path) = wire.child("path") else {
+                continue;
+            };
+            let Some(layer) = path.arg().and_then(|n| board.layer_structure.get_no(n)) else {
                 continue;
             };
             let nums: Vec<f64> = path.args().skip(1).filter_map(|a| a.parse().ok()).collect();
@@ -73,7 +76,13 @@ pub fn import_ses(board: &mut BasicBoard, content: &str) -> Result<SesImportSumm
             if polyline.is_empty() {
                 continue;
             }
-            board.insert_trace(polyline, layer, half_width, net_nos.clone(), clearance_class);
+            board.insert_trace(
+                polyline,
+                layer,
+                half_width,
+                net_nos.clone(),
+                clearance_class,
+            );
             summary.wires += 1;
         }
         for via in net_node.children("via") {
@@ -81,7 +90,9 @@ pub fn import_ses(board: &mut BasicBoard, content: &str) -> Result<SesImportSumm
             if args.len() < 3 {
                 continue;
             }
-            let Some(&padstack_no) = padstack_nos.get(args[0]) else { continue };
+            let Some(&padstack_no) = padstack_nos.get(args[0]) else {
+                continue;
+            };
             let (Ok(x), Ok(y)) = (args[1].parse::<f64>(), args[2].parse::<f64>()) else {
                 continue;
             };

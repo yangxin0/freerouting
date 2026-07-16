@@ -5,7 +5,9 @@ use freerouting::autoroute::{route_net, BatchRequest};
 use freerouting::io::import_dsn;
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: net_debug <dsn> [net]");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: net_debug <dsn> [net]");
     let net_name = std::env::args().nth(2);
     let content = std::fs::read_to_string(&path).expect("read failed");
     let content = match content.find("  (wiring") {
@@ -105,9 +107,7 @@ fn main() {
                         shape.bounding_box()
                     );
                     // replicate complete_shape's restrain loop step by step
-                    use freerouting::autoroute::room_completion::{
-                        restrain_shape, IncompleteRoom,
-                    };
+                    use freerouting::autoroute::room_completion::{restrain_shape, IncompleteRoom};
                     let mut pieces = vec![IncompleteRoom {
                         shape: freerouting::geometry::planar::TileShape::Box(
                             board.bounding_box().offset(1000.0),

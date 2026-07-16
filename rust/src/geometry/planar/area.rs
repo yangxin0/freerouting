@@ -149,10 +149,7 @@ impl PolylineArea {
     pub fn mirror_vertical(&self, pole: IntPoint) -> Self {
         PolylineArea::new(
             self.border_shape.mirror_vertical(pole),
-            self.holes
-                .iter()
-                .map(|h| h.mirror_vertical(pole))
-                .collect(),
+            self.holes.iter().map(|h| h.mirror_vertical(pole)).collect(),
         )
     }
 
@@ -241,7 +238,9 @@ mod tests {
         assert_eq!(moved.bounding_box(), IntBox::from_coords(100, 0, 110, 10));
         let turned = area.turn_90_degree(1, IntPoint::new(0, 0));
         assert_eq!(turned.bounding_box(), IntBox::from_coords(-10, 0, 0, 10));
-        let near = area.nearest_point_approx(FloatPoint::new(20.0, 5.0)).unwrap();
+        let near = area
+            .nearest_point_approx(FloatPoint::new(20.0, 5.0))
+            .unwrap();
         assert_eq!(near, FloatPoint::new(10.0, 5.0));
     }
 }

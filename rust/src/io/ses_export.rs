@@ -39,10 +39,14 @@ pub fn export_ses(board: &BasicBoard, design_name: &str, resolution: i32) -> Str
     via_padstacks.dedup();
     out.push_str("    (library_out \n");
     for ps_no in via_padstacks {
-        let Some(ps) = board.padstacks.get_by_no(ps_no) else { continue };
+        let Some(ps) = board.padstacks.get_by_no(ps_no) else {
+            continue;
+        };
         out.push_str(&format!("      (padstack \"{}\"\n", ps.name));
         for layer in 0..board.layer_structure.layer_count() {
-            let Some(shape) = ps.get_shape(layer) else { continue };
+            let Some(shape) = ps.get_shape(layer) else {
+                continue;
+            };
             let layer_name = &board.layer_structure.arr[layer].name;
             match shape {
                 crate::geometry::planar::TileShape::Box(b) => {
@@ -55,11 +59,7 @@ pub fn export_ses(board: &BasicBoard, design_name: &str, resolution: i32) -> Str
                     out.push_str(&format!("        (shape (polygon {} 0", layer_name));
                     for i in 0..other.border_line_count() {
                         let c = other.corner_approx(i);
-                        out.push_str(&format!(
-                            " {} {}",
-                            c.x.round() as i64,
-                            c.y.round() as i64
-                        ));
+                        out.push_str(&format!(" {} {}", c.x.round() as i64, c.y.round() as i64));
                     }
                     out.push_str("))\n");
                 }
@@ -135,10 +135,7 @@ mod tests {
 
     #[test]
     fn exports_wires_and_vias() {
-        let stack = LayerStructure::new(vec![
-            Layer::new("F.Cu", true),
-            Layer::new("B.Cu", true),
-        ]);
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true), Layer::new("B.Cu", true)]);
         let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
         let mut rules = BoardRules::new(stack.clone(), matrix);
         rules.get_default_net_class();

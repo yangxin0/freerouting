@@ -60,10 +60,7 @@ impl Padstack {
     /// The last layer with a shape (`board_layer_count()` underflows to a
     /// huge value in Java when empty; here we mirror with a saturating 0).
     pub fn to_layer(&self) -> usize {
-        self.shapes
-            .iter()
-            .rposition(Option::is_some)
-            .unwrap_or(0)
+        self.shapes.iter().rposition(Option::is_some).unwrap_or(0)
     }
 
     /// The layer count of the board of this padstack.
@@ -163,7 +160,9 @@ impl Padstack {
 }
 
 fn strip_non_numeric(s: &str) -> String {
-    s.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect()
+    s.chars()
+        .filter(|c| c.is_ascii_digit() || *c == '.')
+        .collect()
 }
 
 /// A library of padstacks; padstack numbers are 1-based like in Java.
@@ -301,12 +300,7 @@ mod tests {
         assert!((p.get_drill_radius() - 200.0).abs() < 1e-9);
 
         // no parsable name: 45% of the smallest radius
-        let no = padstacks.add(
-            "round_pad",
-            vec![Some(box_shape(400)), None],
-            false,
-            false,
-        );
+        let no = padstacks.add("round_pad", vec![Some(box_shape(400)), None], false, false);
         let p = padstacks.get_by_no(no).unwrap();
         assert!((p.get_drill_radius() - 400.0 * 0.45).abs() < 1e-9);
     }

@@ -135,9 +135,10 @@ fn job_json(job: &RoutingJob) -> String {
         job.id,
         job.state.as_str(),
         job.score.map_or("null".to_string(), |s| format!("{s:.2}")),
-        job.error
-            .as_ref()
-            .map_or("null".to_string(), |e| format!("\"{}\"", e.replace('"', "'"))),
+        job.error.as_ref().map_or("null".to_string(), |e| format!(
+            "\"{}\"",
+            e.replace('"', "'")
+        )),
     )
 }
 
@@ -148,7 +149,11 @@ fn route(
     jobs: &Jobs,
     route_seconds: u64,
 ) -> (&'static str, &'static str, String) {
-    let not_found = ("404 Not Found", "application/json", "{\"error\": \"not found\"}".to_string());
+    let not_found = (
+        "404 Not Found",
+        "application/json",
+        "{\"error\": \"not found\"}".to_string(),
+    );
     let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
     match (method, segments.as_slice()) {
         ("GET", ["v1", "system", "status"]) => (
@@ -180,18 +185,26 @@ fn route(
             )
         }
         ("POST", ["v1", "jobs", id, "input"]) => {
-            let Ok(id) = id.parse::<u64>() else { return not_found };
+            let Ok(id) = id.parse::<u64>() else {
+                return not_found;
+            };
             let mut map = jobs.lock().unwrap();
-            let Some(job) = map.get_mut(&id) else { return not_found };
+            let Some(job) = map.get_mut(&id) else {
+                return not_found;
+            };
             job.input_dsn = Some(String::from_utf8_lossy(body).to_string());
             job.state = JobState::ReadyToStart;
             ("200 OK", "application/json", job_json(job))
         }
         ("PUT", ["v1", "jobs", id, "start"]) => {
-            let Ok(id) = id.parse::<u64>() else { return not_found };
+            let Ok(id) = id.parse::<u64>() else {
+                return not_found;
+            };
             let (input, cancel) = {
                 let mut map = jobs.lock().unwrap();
-                let Some(job) = map.get_mut(&id) else { return not_found };
+                let Some(job) = map.get_mut(&id) else {
+                    return not_found;
+                };
                 if job.state != JobState::ReadyToStart {
                     return (
                         "409 Conflict",
@@ -200,7 +213,10 @@ fn route(
                     );
                 }
                 job.state = JobState::Running;
-                (job.input_dsn.clone().unwrap_or_default(), job.cancel.clone())
+                (
+                    job.input_dsn.clone().unwrap_or_default(),
+                    job.cancel.clone(),
+                )
             };
             let jobs_bg = jobs.clone();
             std::thread::spawn(move || {
@@ -231,22 +247,34 @@ fn route(
             )
         }
         ("PUT", ["v1", "jobs", id, "cancel"]) => {
-            let Ok(id) = id.parse::<u64>() else { return not_found };
+            let Ok(id) = id.parse::<u64>() else {
+                return not_found;
+            };
             let map = jobs.lock().unwrap();
-            let Some(job) = map.get(&id) else { return not_found };
+            let Some(job) = map.get(&id) else {
+                return not_found;
+            };
             job.cancel.store(true, Ordering::SeqCst);
             ("200 OK", "application/json", job_json(job))
         }
         ("GET", ["v1", "jobs", id]) => {
-            let Ok(id) = id.parse::<u64>() else { return not_found };
+            let Ok(id) = id.parse::<u64>() else {
+                return not_found;
+            };
             let map = jobs.lock().unwrap();
-            let Some(job) = map.get(&id) else { return not_found };
+            let Some(job) = map.get(&id) else {
+                return not_found;
+            };
             ("200 OK", "application/json", job_json(job))
         }
         ("GET", ["v1", "jobs", id, "output"]) => {
-            let Ok(id) = id.parse::<u64>() else { return not_found };
+            let Ok(id) = id.parse::<u64>() else {
+                return not_found;
+            };
             let map = jobs.lock().unwrap();
-            let Some(job) = map.get(&id) else { return not_found };
+            let Some(job) = map.get(&id) else {
+                return not_found;
+            };
             match &job.output_ses {
                 Some(ses) => ("200 OK", "text/plain", ses.clone()),
                 None => (
@@ -365,11 +393,7 @@ fn mcp_error(id: crate::io::json::Json, code: i32, message: &str) -> String {
     )
 }
 
-fn run_job(
-    dsn: &str,
-    route_seconds: u64,
-    _cancel: &AtomicBool,
-) -> Result<(String, f64), String> {
+fn run_job(dsn: &str, route_seconds: u64, _cancel: &AtomicBool) -> Result<(String, f64), String> {
     let mut board = import_dsn(dsn).map_err(|e| format!("{e}"))?;
     let all_layers = board.layer_structure.layer_count().saturating_sub(1);
     let via_padstack = (1..=board.padstacks.count())

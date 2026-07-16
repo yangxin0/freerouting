@@ -84,8 +84,7 @@ impl BoardStatistics {
         let penalties = self.incomplete_count as f64 * s.unrouted_net_penalty
             + self.clearance_violations as f64 * s.clearance_violation_penalty
             + self.bends as f64 * s.bend_penalty;
-        let costs =
-            self.total_length_mm * s.trace_cost + self.via_count as f64 * s.via_costs;
+        let costs = self.total_length_mm * s.trace_cost + self.via_count as f64 * s.via_costs;
         maximum - penalties - costs
     }
 

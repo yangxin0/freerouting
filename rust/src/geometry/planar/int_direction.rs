@@ -206,10 +206,7 @@ impl Ord for IntDirection {
         }
         // Both in the same open horizontal half plane: compare by determinant.
         // det(other, self) > 0 means self is counterclockwise from other.
-        other
-            .get_vector()
-            .determinant(self.get_vector())
-            .cmp(&0)
+        other.get_vector().determinant(self.get_vector()).cmp(&0)
     }
 }
 

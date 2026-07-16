@@ -34,7 +34,9 @@ fn needs_fanout(board: &BasicBoard, pin_id: ItemId) -> Option<i32> {
     // the whole connected set must be stuck on the pin's layer
     let connected = board.get_connected_set(pin_id, net_no);
     for id in &connected {
-        let Some(it) = board.get_item(*id) else { continue };
+        let Some(it) = board.get_item(*id) else {
+            continue;
+        };
         if it
             .tile_shapes(&board.padstacks)
             .iter()

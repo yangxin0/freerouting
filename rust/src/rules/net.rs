@@ -105,7 +105,12 @@ impl Nets {
     }
 
     /// Adds a new net; returns its net number.
-    pub fn add(&mut self, name: impl Into<String>, subnet_number: usize, contains_plane: bool) -> i32 {
+    pub fn add(
+        &mut self,
+        name: impl Into<String>,
+        subnet_number: usize,
+        contains_plane: bool,
+    ) -> i32 {
         let new_net_no = self.net_arr.len() as i32 + 1;
         self.net_arr.push(Net {
             name: name.into(),

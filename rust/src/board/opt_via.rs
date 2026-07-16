@@ -110,8 +110,8 @@ pub fn opt_via_location(board: &mut BasicBoard, via_id: ItemId, max_recursion: u
         if cand == via_center {
             continue;
         }
-        let len_after = c1.to_float().distance(cand.to_float())
-            + c2.to_float().distance(cand.to_float());
+        let len_after =
+            c1.to_float().distance(cand.to_float()) + c2.to_float().distance(cand.to_float());
         if len_after + 2.0 * hw1.max(hw2) as f64 >= len_before {
             continue;
         }
@@ -137,47 +137,49 @@ pub fn opt_via_location(board: &mut BasicBoard, via_id: ItemId, max_recursion: u
             && net_nos
                 .iter()
                 .all(|&n| board.net_is_completely_connected(n));
-        let stubs_clear = all_connected
-            && [t1, t2].iter().all(|_| true)
-            && {
-                let mut clear = true;
-                'outer: for (id, item) in board.items() {
-                    if item.base.component_no != 0
-                        || !item.base.net_nos.iter().any(|n| net_nos.contains(n))
-                    {
-                        continue;
-                    }
-                    for (s, l) in item.tile_shapes(&board.padstacks) {
-                        for oid in board.overlapping_items(&s.offset(10_000.0), Some(*l)) {
-                            if oid == *id {
+        let stubs_clear = all_connected && [t1, t2].iter().all(|_| true) && {
+            let mut clear = true;
+            'outer: for (id, item) in board.items() {
+                if item.base.component_no != 0
+                    || !item.base.net_nos.iter().any(|n| net_nos.contains(n))
+                {
+                    continue;
+                }
+                for (s, l) in item.tile_shapes(&board.padstacks) {
+                    for oid in board.overlapping_items(&s.offset(10_000.0), Some(*l)) {
+                        if oid == *id {
+                            continue;
+                        }
+                        let Some(other) = board.get_item(oid) else {
+                            continue;
+                        };
+                        if other.base.shares_net(&item.base) {
+                            continue;
+                        }
+                        if let ItemKind::ObstacleArea(a) = &other.kind {
+                            if a.is_conduction {
                                 continue;
                             }
-                            let Some(other) = board.get_item(oid) else { continue };
-                            if other.base.shares_net(&item.base) {
-                                continue;
-                            }
-                            if let ItemKind::ObstacleArea(a) = &other.kind {
-                                if a.is_conduction {
-                                    continue;
-                                }
-                            }
-                            let cl = board.rules.clearance_matrix.get_value(
-                                item.base.clearance_class,
-                                other.base.clearance_class,
-                                *l,
-                                false,
-                            ) as f64;
-                            if other.tile_shapes(&board.padstacks).iter().any(|(os, ol)| {
-                                ol == l && s.euclidean_distance_to(os) < cl - 1.0
-                            }) {
-                                clear = false;
-                                break 'outer;
-                            }
+                        }
+                        let cl = board.rules.clearance_matrix.get_value(
+                            item.base.clearance_class,
+                            other.base.clearance_class,
+                            *l,
+                            false,
+                        ) as f64;
+                        if other
+                            .tile_shapes(&board.padstacks)
+                            .iter()
+                            .any(|(os, ol)| ol == l && s.euclidean_distance_to(os) < cl - 1.0)
+                        {
+                            clear = false;
+                            break 'outer;
                         }
                     }
                 }
-                clear
-            };
+            }
+            clear
+        };
         if stubs_clear {
             board.pop_snapshot();
             return true;
@@ -308,10 +310,7 @@ mod tests {
     use crate::rules::{BoardRules, ClearanceMatrix};
 
     fn test_board() -> BasicBoard {
-        let stack = LayerStructure::new(vec![
-            Layer::new("F.Cu", true),
-            Layer::new("B.Cu", true),
-        ]);
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true), Layer::new("B.Cu", true)]);
         let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
         let mut rules = BoardRules::new(stack.clone(), matrix);
         rules.get_default_net_class();
@@ -363,10 +362,7 @@ mod tests {
             1,
         );
         board.insert_trace(
-            Polyline::from_int_points(&[
-                IntPoint::new(10000, 10000),
-                IntPoint::new(20000, 10000),
-            ]),
+            Polyline::from_int_points(&[IntPoint::new(10000, 10000), IntPoint::new(20000, 10000)]),
             1,
             100,
             vec![1],
@@ -375,6 +371,9 @@ mod tests {
         assert!(board.net_is_completely_connected(1));
         let moved = opt_via_location(&mut board, via, 3);
         assert!(moved, "the dogleg via should find a shorter location");
-        assert!(board.net_is_completely_connected(1), "net must stay connected");
+        assert!(
+            board.net_is_completely_connected(1),
+            "net must stay connected"
+        );
     }
 }

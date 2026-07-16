@@ -235,9 +235,8 @@ impl NetClass {
     /// True if the trace width differs between signal layers.
     pub fn trace_width_is_layer_dependent(&self) -> bool {
         let compare_value = self.trace_half_width_arr[0];
-        (1..self.trace_half_width_arr.len()).any(|i| {
-            self.layer_is_signal[i] && self.trace_half_width_arr[i] != compare_value
-        })
+        (1..self.trace_half_width_arr.len())
+            .any(|i| self.layer_is_signal[i] && self.trace_half_width_arr[i] != compare_value)
     }
 
     /// True if the trace width differs between inner signal layers.
@@ -253,9 +252,8 @@ impl NetClass {
             return false;
         }
         let compare_width = self.trace_half_width_arr[first_inner];
-        (first_inner + 1..len - 1).any(|i| {
-            self.layer_is_signal[i] && self.trace_half_width_arr[i] != compare_width
-        })
+        (first_inner + 1..len - 1)
+            .any(|i| self.layer_is_signal[i] && self.trace_half_width_arr[i] != compare_width)
     }
 }
 
@@ -391,10 +389,7 @@ mod tests {
         nc.set_trace_half_width_on_layer(1, 999);
         assert!(!nc.trace_width_is_layer_dependent());
 
-        assert_eq!(
-            nc.default_item_clearance_classes.get(ItemClass::Via),
-            1
-        );
+        assert_eq!(nc.default_item_clearance_classes.get(ItemClass::Via), 1);
         nc.default_item_clearance_classes.set(ItemClass::Via, 2);
         assert_eq!(nc.default_item_clearance_classes.get(ItemClass::Via), 2);
         assert_eq!(nc.default_item_clearance_classes.get(ItemClass::None), 0);

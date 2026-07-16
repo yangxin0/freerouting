@@ -50,7 +50,9 @@ fn main() -> ExitCode {
             .map(|s| s.as_str())
     };
     if let Some(port) = flag_value("--api-server").and_then(|v| v.parse::<u16>().ok()) {
-        let seconds: u64 = flag_value("-tl").and_then(|v| v.parse().ok()).unwrap_or(300);
+        let seconds: u64 = flag_value("-tl")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
         return match freerouting::api::serve(port, seconds) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -63,12 +65,10 @@ fn main() -> ExitCode {
         eprintln!("error: -de <input.dsn> is required\n\n{USAGE}");
         return ExitCode::FAILURE;
     };
-    let output = flag_value("-do")
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            let stem = design.strip_suffix(".dsn").unwrap_or(design);
-            format!("{stem}.ses")
-        });
+    let output = flag_value("-do").map(str::to_string).unwrap_or_else(|| {
+        let stem = design.strip_suffix(".dsn").unwrap_or(design);
+        format!("{stem}.ses")
+    });
     // like the Java jar, passes are effectively unlimited by default and
     // the wall clock (-tl) is the real bound; a JSON profile (Java:
     // RouterSettings) provides defaults that explicit flags override
@@ -76,7 +76,10 @@ fn main() -> ExitCode {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|t| freerouting::io::json::parse_json(&t).ok());
     let prof_num = |key: &str| -> Option<f64> {
-        profile.as_ref().and_then(|p| p.get(key)).and_then(|v| v.as_f64())
+        profile
+            .as_ref()
+            .and_then(|p| p.get(key))
+            .and_then(|v| v.as_f64())
     };
     let prof_str = |key: &str| -> Option<String> {
         profile
@@ -141,11 +144,13 @@ fn main() -> ExitCode {
             }
         }
     };
-    board.rules.set_trace_angle_restriction(match angle_mode.as_str() {
-        "none" | "any" => freerouting::board::AngleRestriction::None,
-        "90" => freerouting::board::AngleRestriction::NinetyDegree,
-        _ => freerouting::board::AngleRestriction::FortyfiveDegree,
-    });
+    board
+        .rules
+        .set_trace_angle_restriction(match angle_mode.as_str() {
+            "none" | "any" => freerouting::board::AngleRestriction::None,
+            "90" => freerouting::board::AngleRestriction::NinetyDegree,
+            _ => freerouting::board::AngleRestriction::FortyfiveDegree,
+        });
     println!(
         "imported {design} in {:?}: {} layers, {} nets, {} items",
         t0.elapsed(),
@@ -204,7 +209,8 @@ fn main() -> ExitCode {
     let t1 = Instant::now();
     let time_limit = TimeLimit::new(limit_s.saturating_mul(1000));
     if args.iter().any(|a| a == "--fanout") {
-        let fanned = freerouting::autoroute::fanout_board(&mut board, &request, 20, Some(&time_limit));
+        let fanned =
+            freerouting::autoroute::fanout_board(&mut board, &request, 20, Some(&time_limit));
         println!("fanout: {fanned} pins fanned out");
     }
     let result =
@@ -220,8 +226,7 @@ fn main() -> ExitCode {
         result.failed_connections
     );
     let stats = freerouting::scoring::BoardStatistics::collect(&board);
-    let score =
-        stats.normalized_score(&freerouting::scoring::ScoringSettings::default());
+    let score = stats.normalized_score(&freerouting::scoring::ScoringSettings::default());
     println!(
         "score: {score:.2} ({} unrouted, {} violations, {} vias, {:.1} mm)",
         stats.incomplete_count, stats.clearance_violations, stats.via_count, stats.total_length_mm
@@ -279,9 +284,7 @@ fn main() -> ExitCode {
     let removed = pull_tight_all(&mut board, 3);
     let len_after = total_trace_length(&board);
     if len_before > 0.0 {
-        println!(
-            "pull tight: {removed} corners removed, length {len_before:.0} -> {len_after:.0}"
-        );
+        println!("pull tight: {removed} corners removed, length {len_before:.0} -> {len_after:.0}");
     }
     if improved > 0 || removed > 0 || combined > 0 {
         let stats = freerouting::scoring::BoardStatistics::collect(&board);

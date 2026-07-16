@@ -11,8 +11,8 @@
 //! shove follow later. The found connection is backtracked through the
 //! node chain and inserted as per-layer polyline traces joined by vias.
 
-use std::cmp::Reverse;
 use crate::datastructures::FxHashSet as HashSet;
+use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 thread_local! {
@@ -251,8 +251,7 @@ fn find_connection_inner(
             // an earlier layer's expansion may already have completed
             // rooms covering this pad (new rooms must not overlap them);
             // those existing rooms then serve as the start
-            start_rooms =
-                engine.rooms_containing(start_center.round(), *layer, board);
+            start_rooms = engine.rooms_containing(start_center.round(), *layer, board);
         }
         // set FR_DEBUG_MAZE=1 to diagnose instantly failing connections
         if crate::debug::maze() {
@@ -290,13 +289,8 @@ fn find_connection_inner(
                 .iter()
                 .find(|t| request.is_dest(t.item))
             {
-                let dest_point = destination_point(
-                    board,
-                    t.item,
-                    *layer,
-                    Some(&room_shape),
-                    start_point,
-                );
+                let dest_point =
+                    destination_point(board, t.item, *layer, Some(&room_shape), start_point);
                 // coincident points would insert nothing (stacked pads of
                 // one net whose contact never registers): fall through to
                 // the search instead of returning a degenerate route
@@ -339,9 +333,10 @@ fn find_connection_inner(
     // arrive at. Like start rooms, these keep (a sliver of) the dest
     // shape by the contained-shape privilege and carry its target door.
     for dest_id in request.dest_set() {
-        let Some(dest) = board.get_item(dest_id) else { continue };
-        let dest_shapes: Vec<(TileShape, usize)> =
-            dest.tile_shapes(&board.padstacks).to_vec();
+        let Some(dest) = board.get_item(dest_id) else {
+            continue;
+        };
+        let dest_shapes: Vec<(TileShape, usize)> = dest.tile_shapes(&board.padstacks).to_vec();
         for (dest_shape, layer) in dest_shapes {
             engine.create_start_rooms(board, dest_shape, layer);
         }
@@ -500,8 +495,7 @@ fn seed_room(
         // Java's ALREADY_RIPPED_COSTS: moving between obstacle rooms of
         // the SAME item (consecutive segments of one trace) is free —
         // the rip was charged at first entry
-        let already_ripped =
-            other_item.is_some() && other_item == engine.obstacle_room_item(room);
+        let already_ripped = other_item.is_some() && other_item == engine.obstacle_room_item(room);
         let segments = engine.graph.door_section_segments(door, offset);
         // shovable traces cost a fraction of the rip penalty (Java:
         // MazeShoveTraceAlgo passages carry no ripup cost; the corridor
@@ -524,19 +518,16 @@ fn seed_room(
             // a lateral slide is only possible entering through the FIRST
             // or LAST door section — interior sections would need the
             // trace to pass through the entry point
-            let section_discount = if shove_discount < 1.0
-                && (section == 0 || section + 1 == section_count)
-            {
-                shove_discount
-            } else {
-                1.0
-            };
+            let section_discount =
+                if shove_discount < 1.0 && (section == 0 || section + 1 == section_count) {
+                    shove_discount
+                } else {
+                    1.0
+                };
             let ripup_cost = if already_ripped {
                 0.0
             } else {
-                request.ripup_penalty
-                    * engine.rippable_items(other).len() as f64
-                    * section_discount
+                request.ripup_penalty * engine.rippable_items(other).len() as f64 * section_discount
             };
             let cost = base_cost + location.distance(midpoint) + ripup_cost;
             // occupy ON PUSH (Java: expand_to_door_section sets is_occupied
@@ -591,12 +582,10 @@ fn seed_room(
         let room_shape = engine.graph.room(room).shape.clone();
         let bb = room_shape.bounding_box();
         if engine.drill_pages.is_none() {
-            engine.drill_pages = Some(
-                crate::autoroute::drill_pages::DrillPageArray::new(
-                    board,
-                    request.via_padstack,
-                ),
-            );
+            engine.drill_pages = Some(crate::autoroute::drill_pages::DrillPageArray::new(
+                board,
+                request.via_padstack,
+            ));
         }
         let via_margin = padstack
             .get_shape(from)
@@ -609,9 +598,7 @@ fn seed_room(
             if drill_points.len() >= 17 {
                 break;
             }
-            if room_shape
-                .contains(&crate::geometry::planar::Point::Int(drill.location))
-            {
+            if room_shape.contains(&crate::geometry::planar::Point::Int(drill.location)) {
                 drill_points.push(drill.location);
             }
         }
@@ -689,7 +676,12 @@ fn via_free(board: &BasicBoard, request: &MazeRouteRequest, point: IntPoint) -> 
             let pairwise = board
                 .rules
                 .clearance_matrix
-                .get_value(item.base.clearance_class, request.clearance_class, layer, false)
+                .get_value(
+                    item.base.clearance_class,
+                    request.clearance_class,
+                    layer,
+                    false,
+                )
                 .max(0) as f64;
             let check = via_shape.offset(pairwise);
             let conflicts = item
@@ -721,11 +713,15 @@ fn pin_exit_corner(
     let cp = corner.round();
     let query = TileShape::Box(IntBox::from_coords(cp.x - 1, cp.y - 1, cp.x + 1, cp.y + 1));
     for oid in board.overlapping_items(&query, Some(layer)) {
-        let Some(item) = board.get_item(oid) else { continue };
+        let Some(item) = board.get_item(oid) else {
+            continue;
+        };
         if !item.base.contains_net(net_no) {
             continue;
         }
-        let crate::board::ItemKind::Via(v) = &item.kind else { continue };
+        let crate::board::ItemKind::Via(v) = &item.kind else {
+            continue;
+        };
         if v.center == cp {
             return None; // already at the connection point
         }
@@ -783,9 +779,7 @@ fn destination_point(
                 // arrival room; a far tap crosses whatever lies between
                 if let Some(room) = arrival_room {
                     let pt = crate::geometry::planar::Point::Int(tap);
-                    if !room.contains(&pt)
-                        && !room.to_simplex().offset(2.0).contains(&pt)
-                    {
+                    if !room.contains(&pt) && !room.to_simplex().offset(2.0).contains(&pt) {
                         return Some(fallback);
                     }
                 }
@@ -925,22 +919,19 @@ pub fn maze_route_with_engine(
                 // ROOM itself overlaps an obstacle
                 let (ra, rb) = (a.round(), b.round());
                 if ra != rb {
-                    if let Some(seg) = Polyline::from_two_points(ra, rb)
-                        .offset_shape(request.trace_half_width, 0)
+                    if let Some(seg) =
+                        Polyline::from_two_points(ra, rb).offset_shape(request.trace_half_width, 0)
                     {
                         let cl = board
                             .rules
                             .clearance_matrix
-                            .get_value(
-                                request.clearance_class,
-                                request.clearance_class,
-                                la,
-                                false,
-                            )
+                            .get_value(request.clearance_class, request.clearance_class, la, false)
                             .max(0) as f64;
                         let check = seg.offset(cl - 2.0);
                         for id in board.overlapping_items(&check, Some(la)) {
-                            let Some(item) = board.get_item(id) else { continue };
+                            let Some(item) = board.get_item(id) else {
+                                continue;
+                            };
                             if item.base.contains_net(request.net_no) {
                                 continue;
                             }
@@ -949,9 +940,11 @@ pub fn maze_route_with_engine(
                                     continue;
                                 }
                             }
-                            if !item.tile_shapes(&board.padstacks).iter().any(|(s, l)| {
-                                *l == la && s.intersection(&check).dimension() >= 2
-                            }) {
+                            if !item
+                                .tile_shapes(&board.padstacks)
+                                .iter()
+                                .any(|(s, l)| *l == la && s.intersection(&check).dimension() >= 2)
+                            {
                                 continue;
                             }
                             eprintln!(
@@ -960,7 +953,10 @@ pub fn maze_route_with_engine(
                                  but item {id} (nets {:?}, birth {}, bbox {:?}) blocks",
                                 request.net_no,
                                 shape.bounding_box(),
-                                ra.x, ra.y, rb.x, rb.y,
+                                ra.x,
+                                ra.y,
+                                rb.x,
+                                rb.y,
                                 item.base.net_nos,
                                 item.base.birth,
                                 item.bounding_box(&board.padstacks),
@@ -986,10 +982,7 @@ pub fn maze_route_with_engine(
                             let still = re.iter().any(|p| {
                                 item.tile_shapes(&board.padstacks).iter().any(|(s, l)| {
                                     *l == la
-                                        && s.offset(cl_m)
-                                            .intersection(&p.shape)
-                                            .dimension()
-                                            >= 2
+                                        && s.offset(cl_m).intersection(&p.shape).dimension() >= 2
                                 })
                             });
                             eprintln!("  RECOMPLETE pieces {} still-dirty {still}", re.len());
@@ -1032,7 +1025,9 @@ pub fn maze_route_with_engine(
             let room_bbox = r.shape.bounding_box();
             let query = TileShape::Box(room_bbox).offset(8000.0);
             for id in board.overlapping_items(&query, Some(r.layer)) {
-                let Some(item) = board.get_item(id) else { continue };
+                let Some(item) = board.get_item(id) else {
+                    continue;
+                };
                 if item.base.contains_net(request.net_no) {
                     continue;
                 }
@@ -1162,13 +1157,8 @@ pub fn maze_route_with_engine(
                 // rip everything within CLEARANCE of the new copper, not
                 // only what touches it (leaving clearance-range items in
                 // place was a DRC leak)
-                let max_cl = board
-                    .rules
-                    .clearance_matrix
-                    .max_value(layer_a)
-                    .max(0);
-                if let Some(shape) =
-                    polyline.offset_shape(request.trace_half_width + max_cl + 1, 0)
+                let max_cl = board.rules.clearance_matrix.max_value(layer_a).max(0);
+                if let Some(shape) = polyline.offset_shape(request.trace_half_width + max_cl + 1, 0)
                 {
                     // prefer shoving the corridor segment's trace victims
                     // aside (they stay connected, no victim reroute
@@ -1184,10 +1174,7 @@ pub fn maze_route_with_engine(
                     );
                     for id in board.overlapping_items(&shape, Some(layer_a)) {
                         if board.get_item(id).is_some_and(|item| {
-                            crate::autoroute::room_completion::is_rippable(
-                                item,
-                                request.net_no,
-                            )
+                            crate::autoroute::room_completion::is_rippable(item, request.net_no)
                         }) {
                             to_rip.push(id);
                         }
@@ -1200,15 +1187,10 @@ pub fn maze_route_with_engine(
                 if let Some(padstack) = board.padstacks.get_by_no(request.via_padstack) {
                     for layer in padstack.from_layer()..=padstack.to_layer() {
                         if let Some(shape) = padstack.get_shape(layer) {
-                            let max_cl = board
-                                .rules
-                                .clearance_matrix
-                                .max_value(layer)
-                                .max(0) as f64;
+                            let max_cl =
+                                board.rules.clearance_matrix.max_value(layer).max(0) as f64;
                             let q = shape
-                                .translate_by(
-                                    crate::geometry::planar::IntVector::new(pb.x, pb.y),
-                                )
+                                .translate_by(crate::geometry::planar::IntVector::new(pb.x, pb.y))
                                 .offset(max_cl + 1.0);
                             for id in board.overlapping_items(&q, Some(layer)) {
                                 if board.get_item(id).is_some_and(|item| {
@@ -1286,17 +1268,33 @@ fn calculate_additional_corner(
             let abs_dy = (to.y - from.y).abs();
             if abs_dx <= abs_dy {
                 if horizontal_first {
-                    let y = if to.y >= from.y { from.y + abs_dx } else { from.y - abs_dx };
+                    let y = if to.y >= from.y {
+                        from.y + abs_dx
+                    } else {
+                        from.y - abs_dx
+                    };
                     FloatPoint::new(to.x, y)
                 } else {
-                    let y = if to.y > from.y { to.y - abs_dx } else { to.y + abs_dx };
+                    let y = if to.y > from.y {
+                        to.y - abs_dx
+                    } else {
+                        to.y + abs_dx
+                    };
                     FloatPoint::new(from.x, y)
                 }
             } else if horizontal_first {
-                let x = if to.x > from.x { to.x - abs_dy } else { to.x + abs_dy };
+                let x = if to.x > from.x {
+                    to.x - abs_dy
+                } else {
+                    to.x + abs_dy
+                };
                 FloatPoint::new(x, from.y)
             } else {
-                let x = if to.x > from.x { from.x + abs_dy } else { from.x - abs_dy };
+                let x = if to.x > from.x {
+                    from.x + abs_dy
+                } else {
+                    from.x - abs_dy
+                };
                 FloatPoint::new(x, to.y)
             }
         }
@@ -1349,8 +1347,7 @@ fn restrict_corners(
                     let shape = &engine.graph.room(r).shape;
                     let inside = |p: FloatPoint| {
                         let ip = crate::geometry::planar::Point::Int(p.round());
-                        shape.contains(&ip)
-                            || shape.to_simplex().offset(2.0).contains(&ip)
+                        shape.contains(&ip) || shape.to_simplex().offset(2.0).contains(&ip)
                     };
                     if !inside(extra) {
                         let alt = calculate_additional_corner(a, b, false, restriction);
@@ -1383,11 +1380,15 @@ fn via_site_is_clear(board: &BasicBoard, request: &MazeRouteRequest, p: IntPoint
     };
     let matrix = &board.rules.clearance_matrix;
     for layer in ps.from_layer()..=ps.to_layer() {
-        let Some(shape) = ps.get_shape(layer) else { continue };
+        let Some(shape) = ps.get_shape(layer) else {
+            continue;
+        };
         let shape = shape.translate_by(crate::geometry::planar::IntVector::new(p.x, p.y));
         let max_cl = matrix.max_value(layer).max(0) as f64;
         for other_id in board.overlapping_items(&shape.offset(max_cl), Some(layer)) {
-            let Some(other) = board.get_item(other_id) else { continue };
+            let Some(other) = board.get_item(other_id) else {
+                continue;
+            };
             if other.base.contains_net(request.net_no) {
                 continue;
             }
@@ -1429,7 +1430,9 @@ fn trace_run_is_clear(
     let max_cl = matrix.max_value(layer).max(0) as f64;
     for seg in polyline.offset_shapes(request.trace_half_width) {
         for other_id in board.overlapping_items(&seg.offset(max_cl), Some(layer)) {
-            let Some(other) = board.get_item(other_id) else { continue };
+            let Some(other) = board.get_item(other_id) else {
+                continue;
+            };
             if other.base.contains_net(request.net_no) {
                 continue;
             }
@@ -1488,7 +1491,11 @@ fn insert_connection(
     let mut run: Vec<IntPoint> = Vec::new();
     let mut run_layer = corners.first()?.1;
     let flush =
-        |board: &mut BasicBoard, run: &mut Vec<IntPoint>, layer: usize, items: &mut Vec<ItemId>| -> bool {
+        |board: &mut BasicBoard,
+         run: &mut Vec<IntPoint>,
+         layer: usize,
+         items: &mut Vec<ItemId>|
+         -> bool {
             run.dedup();
             if run.len() > 1 {
                 let polyline = Polyline::from_int_points(run);
@@ -1498,11 +1505,7 @@ fn insert_connection(
                 // insert when even that cannot clear it (coldfire: maze
                 // traces 998 from pre-existing vias at required 1500)
                 if !trace_run_is_clear(board, request, &polyline, layer) {
-                    let max_cl = board
-                        .rules
-                        .clearance_matrix
-                        .max_value(layer)
-                        .max(0) as f64;
+                    let max_cl = board.rules.clearance_matrix.max_value(layer).max(0) as f64;
                     for seg in polyline.offset_shapes(request.trace_half_width) {
                         let _ = crate::board::shove_trace_algo::shove_aside(
                             board,
@@ -1524,11 +1527,18 @@ fn insert_connection(
                         let cl = board
                             .rules
                             .clearance_matrix
-                            .get_value(request.clearance_class, request.clearance_class, layer, false)
+                            .get_value(
+                                request.clearance_class,
+                                request.clearance_class,
+                                layer,
+                                false,
+                            )
                             .max(0) as f64;
                         let check = seg.offset(cl - 2.0);
                         for id in board.overlapping_items(&check, Some(layer)) {
-                            let Some(item) = board.get_item(id) else { continue };
+                            let Some(item) = board.get_item(id) else {
+                                continue;
+                            };
                             if item.base.contains_net(request.net_no) {
                                 continue;
                             }
@@ -1540,8 +1550,7 @@ fn insert_connection(
                             // exact: only report 2D overlaps (the tree
                             // query also returns boundary touches)
                             if !item.tile_shapes(&board.padstacks).iter().any(|(s, l)| {
-                                *l == layer
-                                    && s.intersection(&check).dimension() >= 2
+                                *l == layer && s.intersection(&check).dimension() >= 2
                             }) {
                                 continue;
                             }
@@ -1565,7 +1574,10 @@ fn insert_connection(
                     request.clearance_class,
                 );
                 if crate::debug::maze() {
-                    eprintln!("INSERTED trace {new_id} net {} layer {layer}", request.net_no);
+                    eprintln!(
+                        "INSERTED trace {new_id} net {} layer {layer}",
+                        request.net_no
+                    );
                 }
                 items.push(new_id);
             }
@@ -1722,10 +1734,7 @@ mod tests {
     use crate::rules::{BoardRules, ClearanceMatrix};
 
     fn test_board() -> BasicBoard {
-        let stack = LayerStructure::new(vec![
-            Layer::new("F.Cu", true),
-            Layer::new("B.Cu", true),
-        ]);
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true), Layer::new("B.Cu", true)]);
         let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
         let mut rules = BoardRules::new(stack.clone(), matrix);
         rules.get_default_net_class();
@@ -1774,10 +1783,7 @@ mod tests {
         // foreign-net wall between them on BOTH layers, gap below y = -2000
         for layer in 0..2 {
             board.insert_trace(
-                Polyline::from_int_points(&[
-                    IntPoint::new(4500, -2000),
-                    IntPoint::new(4500, 9000),
-                ]),
+                Polyline::from_int_points(&[IntPoint::new(4500, -2000), IntPoint::new(4500, 9000)]),
                 layer,
                 300,
                 vec![2],
@@ -1793,14 +1799,9 @@ mod tests {
                 if !item.base.contains_net(1) {
                     continue;
                 }
-                detoured |= t
-                    .polyline
-                    .corner_approx_arr()
-                    .windows(2)
-                    .any(|w| {
-                        (w[0].x <= 4500.0 && w[1].x >= 4500.0)
-                            && (w[0].y + w[1].y) / 2.0 < -1500.0
-                    });
+                detoured |= t.polyline.corner_approx_arr().windows(2).any(|w| {
+                    (w[0].x <= 4500.0 && w[1].x >= 4500.0) && (w[0].y + w[1].y) / 2.0 < -1500.0
+                });
             }
         }
         assert!(detoured, "trace did not detour below the wall");
@@ -1813,10 +1814,7 @@ mod tests {
         let b = board.insert_via(1, IntPoint::new(9000, 0), vec![1], 1, false);
         // an impassable wall on layer 0 only
         board.insert_trace(
-            Polyline::from_int_points(&[
-                IntPoint::new(4500, -50000),
-                IntPoint::new(4500, 50000),
-            ]),
+            Polyline::from_int_points(&[IntPoint::new(4500, -50000), IntPoint::new(4500, 50000)]),
             0,
             300,
             vec![2],

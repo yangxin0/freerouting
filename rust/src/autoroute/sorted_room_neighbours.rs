@@ -46,10 +46,10 @@ impl Neighbour {
         } else if self.neighbour_touch_is_corner {
             self.neighbour_shape.corner(self.side_of_neighbour)
         } else {
-            let curr = self
-                .neighbour_shape
-                .to_simplex()
-                .corner(next_no(&self.neighbour_shape.to_simplex(), self.side_of_neighbour));
+            let curr = self.neighbour_shape.to_simplex().corner(next_no(
+                &self.neighbour_shape.to_simplex(),
+                self.side_of_neighbour,
+            ));
             let prev_line = room_shape.border_line(prev_no(room_shape, self.side_of_room));
             if prev_line.side_of(&curr) == crate::geometry::planar::Side::OnTheRight {
                 curr
@@ -66,7 +66,10 @@ impl Neighbour {
         } else if self.neighbour_touch_is_corner {
             self.neighbour_shape.corner(self.side_of_neighbour)
         } else {
-            let curr = self.neighbour_shape.to_simplex().corner(self.side_of_neighbour);
+            let curr = self
+                .neighbour_shape
+                .to_simplex()
+                .corner(self.side_of_neighbour);
             let next_line = room_shape.border_line(next_no(room_shape, self.side_of_room));
             if next_line.side_of(&curr) == crate::geometry::planar::Side::OnTheRight {
                 curr
@@ -93,7 +96,11 @@ fn equals_corner(s: &Simplex, point: &Point) -> Option<usize> {
 
 /// The border side numbers of `room` and `other` containing their
 /// 1-dimensional intersection (Java: `TileShape.touching_sides`).
-fn touching_sides(room: &Simplex, other: &Simplex, intersection: &TileShape) -> Option<(usize, usize)> {
+fn touching_sides(
+    room: &Simplex,
+    other: &Simplex,
+    intersection: &TileShape,
+) -> Option<(usize, usize)> {
     let corners: Vec<Point> = (0..intersection.to_simplex().border_line_count())
         .map(|i| intersection.to_simplex().corner(i))
         .collect();
@@ -119,19 +126,29 @@ pub fn sort_neighbours(room_shape: &Simplex, neighbours: &mut [Neighbour]) {
             return a.side_of_room.cmp(&b.side_of_room);
         }
         let compare_corner = room_shape.corner_approx(a.side_of_room);
-        let da = a.first_corner(room_shape).to_float().distance(compare_corner);
-        let db = b.first_corner(room_shape).to_float().distance(compare_corner);
+        let da = a
+            .first_corner(room_shape)
+            .to_float()
+            .distance(compare_corner);
+        let db = b
+            .first_corner(room_shape)
+            .to_float()
+            .distance(compare_corner);
         let mut delta = da - db;
         if delta.abs() <= 1.0 && a.first_corner(room_shape) == b.first_corner(room_shape) {
-            let da2 = a.last_corner(room_shape).to_float().distance(compare_corner);
-            let db2 = b.last_corner(room_shape).to_float().distance(compare_corner);
+            let da2 = a
+                .last_corner(room_shape)
+                .to_float()
+                .distance(compare_corner);
+            let db2 = b
+                .last_corner(room_shape)
+                .to_float()
+                .distance(compare_corner);
             delta = da2 - db2;
         }
         match delta.partial_cmp(&0.0) {
             Some(std::cmp::Ordering::Equal) | None => a.object.id().cmp(&b.object.id()),
-            Some(ord) if delta.abs() <= 1.0 => {
-                a.object.id().cmp(&b.object.id()).then(ord)
-            }
+            Some(ord) if delta.abs() <= 1.0 => a.object.id().cmp(&b.object.id()).then(ord),
             Some(ord) => ord,
         }
     });
@@ -239,8 +256,8 @@ pub fn calculate_new_incomplete_rooms(
         if next_starts_at_corner {
             last_side = prev_no(room_shape, last_side);
         }
-        let neighbours_touch = sorted.len() > 1
-            && prev.last_corner(room_shape) == next.first_corner(room_shape);
+        let neighbours_touch =
+            sorted.len() > 1 && prev.last_corner(room_shape) == next.first_corner(room_shape);
         if !neighbours_touch {
             let mut last_bounding = prev.side_of_neighbour;
             if !(prev_ends_at_corner || prev.room_touch_is_corner) {
@@ -336,8 +353,7 @@ mod tests {
         sort_neighbours(&room, &mut sorted);
         let mut completed = TileShape::Simplex(room.clone());
         let contained = TileShape::Box(IntBox::from_coords(400, 400, 600, 600));
-        let gaps =
-            calculate_new_incomplete_rooms(&room, &mut completed, &contained, &sorted);
+        let gaps = calculate_new_incomplete_rooms(&room, &mut completed, &contained, &sorted);
         assert!(!gaps.is_empty(), "uncovered sides must produce gap rooms");
         // every gap room lies outside the room's interior side of the
         // touched border and contains part of the completed shape edge

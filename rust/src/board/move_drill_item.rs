@@ -38,8 +38,7 @@ pub fn try_shove_via_points(
         .max(0) as f64;
     // enlarge by half the via extent + clearance (+2 tolerance, like
     // Java's empirical diagonal-shove constant)
-    let shove_distance =
-        0.5 * via_shape.bounding_box().max_width() as f64 + clearance + 2.0;
+    let shove_distance = 0.5 * via_shape.bounding_box().max_width() as f64 + clearance + 2.0;
     let center = via_shape.centre_of_gravity().round();
     let offset_box = obstacle_shape.bounding_box().offset(shove_distance);
     let try_count = if extended_check { 4 } else { 1 };
@@ -66,7 +65,9 @@ pub fn move_via(
     }
     // like Java: only vias connected exclusively to traces may move
     for contact in board.get_normal_contacts(via_id) {
-        let Some(c) = board.get_item(contact) else { continue };
+        let Some(c) = board.get_item(contact) else {
+            continue;
+        };
         if !matches!(c.kind, ItemKind::PolylineTrace(_)) {
             if let ItemKind::ObstacleArea(a) = &c.kind {
                 if a.is_conduction {
@@ -124,11 +125,7 @@ pub fn move_via(
         })
         .collect();
     for (shape, layer) in &layer_shapes {
-        let cl = board
-            .rules
-            .clearance_matrix
-            .max_value(*layer)
-            .max(0) as f64;
+        let cl = board.rules.clearance_matrix.max_value(*layer).max(0) as f64;
         let inflated = shape.offset(cl);
         if !shove_aside(board, &inflated, *layer, &net_nos, cl_class, &[]) {
             board.undo();
@@ -140,12 +137,10 @@ pub fn move_via(
             .overlapping_items(&inflated, Some(*layer))
             .into_iter()
             .any(|id| {
-                board
-                    .get_item(id)
-                    .is_some_and(|it| {
-                        !it.base.net_nos.iter().any(|n| net_nos.contains(n))
-                            && !matches!(&it.kind, ItemKind::ObstacleArea(a) if a.is_conduction)
-                    })
+                board.get_item(id).is_some_and(|it| {
+                    !it.base.net_nos.iter().any(|n| net_nos.contains(n))
+                        && !matches!(&it.kind, ItemKind::ObstacleArea(a) if a.is_conduction)
+                })
             });
         if blocked {
             let _ = max_via_recursion; // deeper via-shove recursion: future work
@@ -153,12 +148,19 @@ pub fn move_via(
             return false;
         }
     }
-    board.insert_via(padstack, new_center, net_nos.clone(), cl_class, attach_allowed);
+    board.insert_via(
+        padstack,
+        new_center,
+        net_nos.clone(),
+        cl_class,
+        attach_allowed,
+    );
     // Bridge each previously-contacting trace from the old via center to the
     // new one, preserving connectivity (Java: DrillItem.move_by insert_trace).
     if old_center != new_center {
         for (layer, half_width, trace_cl_class) in bridge_contacts {
-            let bridge = crate::geometry::planar::Polyline::from_int_points(&[old_center, new_center]);
+            let bridge =
+                crate::geometry::planar::Polyline::from_int_points(&[old_center, new_center]);
             board.insert_trace(bridge, layer, half_width, net_nos.clone(), trace_cl_class);
         }
     }
@@ -181,9 +183,7 @@ pub fn shove_vias(
     if max_via_recursion == 0 {
         return true;
     }
-    let query = obstacle_shape.offset(
-        board.rules.clearance_matrix.max_value(layer).max(0) as f64,
-    );
+    let query = obstacle_shape.offset(board.rules.clearance_matrix.max_value(layer).max(0) as f64);
     let vias: Vec<ItemId> = board
         .overlapping_items(&query, Some(layer))
         .into_iter()
@@ -198,9 +198,10 @@ pub fn shove_vias(
         .collect();
     let shape_radius = 0.5 * obstacle_shape.bounding_box().min_width() as f64;
     for via_id in vias {
-        let candidates =
-            try_shove_via_points(board, obstacle_shape, layer, via_id, cl_class, true);
-        let Some(via) = board.get_item(via_id) else { continue };
+        let candidates = try_shove_via_points(board, obstacle_shape, layer, via_id, cl_class, true);
+        let Some(via) = board.get_item(via_id) else {
+            continue;
+        };
         let via_bb = via.bounding_box(&board.padstacks);
         let via_center = crate::geometry::planar::FloatPoint::new(
             (via_bb.ll.x as f64 + via_bb.ur.x as f64) / 2.0,
@@ -208,11 +209,10 @@ pub fn shove_vias(
         );
         let max_dist = 0.5 * via_bb.max_width() as f64 + shape_radius;
         for (i, cand) in candidates.iter().enumerate() {
-            let d = via_center
-                .distance(crate::geometry::planar::FloatPoint::new(
-                    cand.x as f64,
-                    cand.y as f64,
-                ));
+            let d = via_center.distance(crate::geometry::planar::FloatPoint::new(
+                cand.x as f64,
+                cand.y as f64,
+            ));
             if i > 0 && d > max_dist {
                 continue;
             }
@@ -233,10 +233,7 @@ mod tests {
     use crate::rules::{BoardRules, ClearanceMatrix};
 
     fn test_board() -> BasicBoard {
-        let stack = LayerStructure::new(vec![
-            Layer::new("F.Cu", true),
-            Layer::new("B.Cu", true),
-        ]);
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true), Layer::new("B.Cu", true)]);
         let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
         let mut rules = BoardRules::new(stack.clone(), matrix);
         rules.get_default_net_class();
@@ -256,7 +253,13 @@ mod tests {
     fn via_is_shoved_out_of_a_corridor() {
         let mut board = test_board();
         // a foreign via sitting in the corridor
-        let via = board.insert_via(1, crate::geometry::planar::IntPoint::new(0, 0), vec![2], 1, false);
+        let via = board.insert_via(
+            1,
+            crate::geometry::planar::IntPoint::new(0, 0),
+            vec![2],
+            1,
+            false,
+        );
         // wide anchor traces so the board bbox is meaningful
         board.insert_trace(
             Polyline::from_int_points(&[
@@ -318,7 +321,13 @@ mod tests {
     #[test]
     fn fixed_and_pin_vias_never_move() {
         let mut board = test_board();
-        let pin = board.insert_via(1, crate::geometry::planar::IntPoint::new(0, 0), vec![2], 1, false);
+        let pin = board.insert_via(
+            1,
+            crate::geometry::planar::IntPoint::new(0, 0),
+            vec![2],
+            1,
+            false,
+        );
         board.set_component_no(pin, 7);
         let corridor = TileShape::Box(IntBox::from_coords(-5000, -700, 5000, 700));
         assert!(shove_vias(&mut board, &corridor, 0, &[1], 1, 2));

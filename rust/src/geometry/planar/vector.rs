@@ -50,10 +50,7 @@ impl Vector {
             let crit = BigInt::from(limits::CRIT_INT);
             if x.abs() <= crit && y.abs() <= crit {
                 use num_traits::ToPrimitive;
-                return Vector::Int(IntVector::new(
-                    x.to_i32().unwrap(),
-                    y.to_i32().unwrap(),
-                ));
+                return Vector::Int(IntVector::new(x.to_i32().unwrap(), y.to_i32().unwrap()));
             }
         }
         Vector::Rational(RationalVector::new(x, y, z))

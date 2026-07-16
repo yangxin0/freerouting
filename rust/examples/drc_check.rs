@@ -12,7 +12,9 @@ use freerouting::datastructures::TimeLimit;
 use freerouting::io::import_dsn;
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: drc_check <dsn> [seconds]");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: drc_check <dsn> [seconds]");
     let limit_s: u64 = std::env::args()
         .nth(2)
         .and_then(|v| v.parse().ok())
@@ -23,13 +25,13 @@ fn main() {
         None => content,
     };
     let mut board = import_dsn(&content).expect("import failed");
-    board.rules.set_trace_angle_restriction(
-        match std::env::var("FR_ANGLE").as_deref() {
+    board
+        .rules
+        .set_trace_angle_restriction(match std::env::var("FR_ANGLE").as_deref() {
             Ok("45") => freerouting::board::AngleRestriction::FortyfiveDegree,
             Ok("90") => freerouting::board::AngleRestriction::NinetyDegree,
             _ => freerouting::board::AngleRestriction::None,
-        },
-    );
+        });
 
     let all_layers = board.layer_structure.layer_count().saturating_sub(1);
     let via_padstack = (1..=board.padstacks.count())
@@ -83,11 +85,7 @@ fn main() {
         let Some(item) = board.get_item(id) else {
             continue;
         };
-        let shapes: Vec<_> = item
-            .tile_shapes(&board.padstacks)
-            .iter()
-            .cloned()
-            .collect();
+        let shapes: Vec<_> = item.tile_shapes(&board.padstacks).iter().cloned().collect();
         for (shape, layer) in shapes {
             for other_id in board.overlapping_items(&shape.offset(10_000.0), Some(layer)) {
                 if other_id == id {
@@ -138,9 +136,7 @@ fn main() {
                         let mid = (lo + hi) / 2.0;
                         let deep = other.tile_shapes(&board.padstacks).iter().any(|(s, l)| {
                             *l == layer
-                                && s.intersection(&shape.offset(clearance - mid))
-                                    .dimension()
-                                    >= 2
+                                && s.intersection(&shape.offset(clearance - mid)).dimension() >= 2
                         });
                         if deep {
                             lo = mid;

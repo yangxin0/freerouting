@@ -46,9 +46,7 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
     // silently dropped copper-vs-lower-id-obstacle pairs entirely.
     let candidates: Vec<ItemId> = board
         .items()
-        .filter(|(_, it)| {
-            it.base.net_count() > 0 || matches!(&it.kind, ItemKind::ObstacleArea(_))
-        })
+        .filter(|(_, it)| it.base.net_count() > 0 || matches!(&it.kind, ItemKind::ObstacleArea(_)))
         .map(|(id, _)| *id)
         .collect();
     // One violation per (item pair, layer): an item with several tile shapes on
@@ -57,7 +55,9 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
     let mut seen: std::collections::HashSet<(ItemId, ItemId, usize)> =
         std::collections::HashSet::new();
     for &id in &candidates {
-        let Some(item) = board.get_item(id) else { continue };
+        let Some(item) = board.get_item(id) else {
+            continue;
+        };
         let item_obstacle = matches!(&item.kind, ItemKind::ObstacleArea(_));
         let shapes: Vec<_> = item.tile_shapes(&board.padstacks).to_vec();
         for (shape, layer) in shapes {
@@ -72,7 +72,9 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                 if other_id <= id {
                     continue; // dedup: A-B equals B-A (both sides are outer items)
                 }
-                let Some(other) = board.get_item(other_id) else { continue };
+                let Some(other) = board.get_item(other_id) else {
+                    continue;
+                };
                 if other.base.shares_net(&item.base) {
                     continue;
                 }
@@ -179,7 +181,11 @@ impl DrcReport {
         out.push_str(&format!("  \"source\": \"{}\",\n", json_escape(source)));
         out.push_str("  \"violations\": [\n");
         for (i, v) in self.violations.iter().enumerate() {
-            let comma = if i + 1 < self.violations.len() { "," } else { "" };
+            let comma = if i + 1 < self.violations.len() {
+                ","
+            } else {
+                ""
+            };
             out.push_str(&format!(
                 "    {{\"type\": \"clearance\", \"severity\": \"error\", \
                  \"description\": \"Clearance violation ({:.4} mm < {:.4} mm) on layer {}\", \
@@ -205,7 +211,11 @@ impl DrcReport {
         out.push_str("  ],\n");
         out.push_str("  \"unconnected_items\": [\n");
         for (i, u) in self.unconnected.iter().enumerate() {
-            let comma = if i + 1 < self.unconnected.len() { "," } else { "" };
+            let comma = if i + 1 < self.unconnected.len() {
+                ","
+            } else {
+                ""
+            };
             out.push_str(&format!(
                 "    {{\"type\": \"unconnected_items\", \"severity\": \"warning\", \
                  \"description\": \"Net '{}' is not completely connected\", \"items\": []}}{comma}\n",

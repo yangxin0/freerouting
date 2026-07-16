@@ -211,7 +211,9 @@ mod tests {
         via_infos
             .add(ViaInfo::new("via_through", through, 1, false))
             .unwrap();
-        via_infos.add(ViaInfo::new("via_blind", blind, 1, true)).unwrap();
+        via_infos
+            .add(ViaInfo::new("via_blind", blind, 1, true))
+            .unwrap();
         (padstacks, via_infos)
     }
 
@@ -222,7 +224,9 @@ mod tests {
         assert_eq!(via_infos.get_by_name("via_through"), Some(0));
         assert!(via_infos.name_exists("via_blind"));
         // duplicate name rejected
-        assert!(via_infos.add(ViaInfo::new("via_blind", 1, 1, false)).is_none());
+        assert!(via_infos
+            .add(ViaInfo::new("via_blind", 1, 1, false))
+            .is_none());
         via_infos.get_mut(0).set_clearance_class(2);
         assert_eq!(via_infos.get(0).get_clearance_class(), 2);
     }
@@ -239,14 +243,8 @@ mod tests {
         assert!(!rule.contains_padstack(9, &via_infos));
 
         // layer-range search
-        assert_eq!(
-            rule.get_layer_range(0, 3, &via_infos, &padstacks),
-            Some(0)
-        );
-        assert_eq!(
-            rule.get_layer_range(0, 1, &via_infos, &padstacks),
-            Some(1)
-        );
+        assert_eq!(rule.get_layer_range(0, 3, &via_infos, &padstacks), Some(0));
+        assert_eq!(rule.get_layer_range(0, 1, &via_infos, &padstacks), Some(1));
         assert_eq!(rule.get_layer_range(1, 2, &via_infos, &padstacks), None);
 
         // preference order and swap

@@ -76,7 +76,11 @@ impl Simplex {
         if self.lines.len() == 1 {
             return false;
         }
-        let prev_no = if no == 0 { self.lines.len() - 1 } else { no - 1 };
+        let prev_no = if no == 0 {
+            self.lines.len() - 1
+        } else {
+            no - 1
+        };
         let prev_dir = self.lines[prev_no].direction();
         let curr_dir = self.lines[no].direction();
         prev_dir.determinant(curr_dir) > 0
@@ -116,7 +120,9 @@ impl Simplex {
     }
 
     pub fn corner_approx_arr(&self) -> Vec<FloatPoint> {
-        (0..self.lines.len()).map(|i| self.corner_approx(i)).collect()
+        (0..self.lines.len())
+            .map(|i| self.corner_approx(i))
+            .collect()
     }
 
     /// The dimension of this simplex: 2, 1, 0 or -1 (empty). Assumes the
@@ -242,8 +248,7 @@ impl Simplex {
     /// True if all border lines are orthogonal and all corners bounded, so
     /// the simplex describes an [`IntBox`].
     pub fn is_int_box(&self) -> bool {
-        (0..self.lines.len())
-            .all(|i| self.lines[i].is_orthogonal() && self.corner_is_bounded(i))
+        (0..self.lines.len()).all(|i| self.lines[i].is_orthogonal() && self.corner_is_bounded(i))
     }
 
     /// True if all border lines are multiples of 45 degree and all corners
@@ -433,8 +438,7 @@ impl Simplex {
         if self.is_empty() || other.is_empty() {
             return Simplex::EMPTY;
         }
-        let sorted =
-            |lines: &[Line]| lines.windows(2).all(|w| w[0] <= w[1]);
+        let sorted = |lines: &[Line]| lines.windows(2).all(|w| w[0] <= w[1]);
         let mut new_lines = Vec::with_capacity(self.lines.len() + other.lines.len());
         if sorted(&self.lines) && sorted(&other.lines) {
             // both line arrays are angular-sorted: merge instead of sort
@@ -548,7 +552,8 @@ impl Simplex {
                         merge_first_division_line = true;
                     }
                 }
-                let mut piece_lines = vec![curr_division_lines[1].opposite(), curr_division_lines[0]];
+                let mut piece_lines =
+                    vec![curr_division_lines[1].opposite(), curr_division_lines[0]];
                 if merge_prev_division_line {
                     piece_lines.push(prev_division_line.unwrap());
                 }
@@ -653,18 +658,15 @@ impl Simplex {
 
         for _ in 0..outer_simplex.lines.len() {
             let outer_line = outer_simplex.lines[outer_line_no];
-            let Some(curr_projection_dir) = outer_line.perpendicular_direction(inner_corner)
-            else {
+            let Some(curr_projection_dir) = outer_line.perpendicular_direction(inner_corner) else {
                 // inner corner is on the outer line
                 return Some(vec![Line::new(inner_corner, inner_corner)]);
             };
             let projection_visible = prev_inner_dir.determinant(curr_projection_dir) >= 0;
             if projection_visible {
-                let mut curr_distance =
-                    outer_line.signed_distance(inner_corner.to_float()).abs();
+                let mut curr_distance = outer_line.signed_distance(inner_corner.to_float()).abs();
                 // A second division may be necessary at a sharp corner.
-                let second_division_necessary =
-                    curr_projection_dir.determinant(next_inner_dir) < 0;
+                let second_division_necessary = curr_projection_dir.determinant(next_inner_dir) < 0;
                 let mut curr_second_projection_dir = curr_projection_dir;
                 if second_division_necessary {
                     // Search the first projection dir between
@@ -707,7 +709,10 @@ impl Simplex {
             return None;
         }
         if first_projection_dir == second_projection_dir {
-            Some(vec![Line::from_direction(inner_corner, first_projection_dir)])
+            Some(vec![Line::from_direction(
+                inner_corner,
+                first_projection_dir,
+            )])
         } else {
             Some(vec![
                 Line::from_direction(inner_corner, first_projection_dir),
@@ -731,120 +736,120 @@ impl Simplex {
                 std::cell::RefCell::new((Vec::new(), Vec::new()));
         }
         SCRATCH.with(|scratch| {
-        let mut scratch = scratch.borrow_mut();
-        let (line_arr, intersection_sides) = &mut *scratch;
-        // Copy the sorted lines, skipping duplicates (equal line and
-        // direction).
-        line_arr.clear();
-        line_arr.push(self.lines[0]);
-        for line in &self.lines[1..] {
-            if *line != *line_arr.last().unwrap() {
-                line_arr.push(*line);
+            let mut scratch = scratch.borrow_mut();
+            let (line_arr, intersection_sides) = &mut *scratch;
+            // Copy the sorted lines, skipping duplicates (equal line and
+            // direction).
+            line_arr.clear();
+            line_arr.push(self.lines[0]);
+            for line in &self.lines[1..] {
+                if *line != *line_arr.last().unwrap() {
+                    line_arr.push(*line);
+                }
             }
-        }
-        let mut new_length = line_arr.len();
-        // On which side of line `ind` the previous and next lines intersect.
-        intersection_sides.clear();
-        intersection_sides.resize(new_length, None);
+            let mut new_length = line_arr.len();
+            // On which side of line `ind` the previous and next lines intersect.
+            intersection_sides.clear();
+            intersection_sides.resize(new_length, None);
 
-        let mut try_again = new_length > 2;
-        let mut index_of_last_removed_line = new_length as isize;
-        while try_again {
-            try_again = false;
-            let mut prev_ind = new_length - 1;
-            let mut prev_line = line_arr[prev_ind];
-            let mut curr_line = line_arr[0];
-            let mut ind: isize = 0;
-            while (ind as usize) < new_length {
-                let uind = ind as usize;
-                let next_ind = if uind == new_length - 1 { 0 } else { uind + 1 };
-                let next_line = line_arr[next_ind];
+            let mut try_again = new_length > 2;
+            let mut index_of_last_removed_line = new_length as isize;
+            while try_again {
+                try_again = false;
+                let mut prev_ind = new_length - 1;
+                let mut prev_line = line_arr[prev_ind];
+                let mut curr_line = line_arr[0];
+                let mut ind: isize = 0;
+                while (ind as usize) < new_length {
+                    let uind = ind as usize;
+                    let next_ind = if uind == new_length - 1 { 0 } else { uind + 1 };
+                    let next_line = line_arr[next_ind];
 
-                let mut remove_line = false;
-                let det = prev_line.direction_determinant_sign(&next_line);
-                if det != 0 {
-                    // prev_line and next_line are not parallel
-                    if intersection_sides[uind].is_none() {
-                        intersection_sides[uind] =
-                            Some(curr_line.side_of_intersection(&prev_line, &next_line));
-                    }
-                    if det > 0 {
-                        // If the intersection of prev_line and next_line is
-                        // on the left of curr_line, curr_line does not
-                        // contribute to the shape of the simplex.
-                        remove_line = intersection_sides[uind] != Some(Side::OnTheLeft);
-                    } else if intersection_sides[uind] == Some(Side::OnTheLeft) {
-                        if prev_line.direction_determinant_sign(&curr_line) > 0 {
-                            // The half plane of curr_line does not intersect
-                            // the simplex of prev_line and next_line: empty.
+                    let mut remove_line = false;
+                    let det = prev_line.direction_determinant_sign(&next_line);
+                    if det != 0 {
+                        // prev_line and next_line are not parallel
+                        if intersection_sides[uind].is_none() {
+                            intersection_sides[uind] =
+                                Some(curr_line.side_of_intersection(&prev_line, &next_line));
+                        }
+                        if det > 0 {
+                            // If the intersection of prev_line and next_line is
+                            // on the left of curr_line, curr_line does not
+                            // contribute to the shape of the simplex.
+                            remove_line = intersection_sides[uind] != Some(Side::OnTheLeft);
+                        } else if intersection_sides[uind] == Some(Side::OnTheLeft) {
+                            if prev_line.direction_determinant_sign(&curr_line) > 0 {
+                                // The half plane of curr_line does not intersect
+                                // the simplex of prev_line and next_line: empty.
+                                new_length = 0;
+                                try_again = false;
+                                break;
+                            }
+                        }
+                    } else {
+                        // prev_line and next_line are parallel
+                        if prev_line.side_of_int(next_line.a) == Side::OnTheLeft {
+                            // Their half planes do not intersect.
                             new_length = 0;
                             try_again = false;
                             break;
                         }
                     }
-                } else {
-                    // prev_line and next_line are parallel
-                    if prev_line.side_of_int(next_line.a) == Side::OnTheLeft {
-                        // Their half planes do not intersect.
-                        new_length = 0;
-                        try_again = false;
+                    if remove_line {
+                        try_again = true;
+                        new_length -= 1;
+                        for i in uind..new_length {
+                            line_arr[i] = line_arr[i + 1];
+                            intersection_sides[i] = intersection_sides[i + 1];
+                        }
+                        if new_length < 3 {
+                            try_again = false;
+                            break;
+                        }
+                        // Reset the precalculated sides around the removal.
+                        if uind == 0 {
+                            prev_ind = new_length - 1;
+                        }
+                        intersection_sides[prev_ind] = None;
+                        let reset_ind = if uind >= new_length { 0 } else { uind };
+                        intersection_sides[reset_ind] = None;
+                        ind -= 1;
+                        index_of_last_removed_line = ind;
+                    } else {
+                        prev_line = curr_line;
+                        prev_ind = uind;
+                    }
+                    curr_line = next_line;
+                    if !try_again && ind >= index_of_last_removed_line {
+                        // tried all lines without removing one
                         break;
                     }
+                    ind += 1;
                 }
-                if remove_line {
-                    try_again = true;
-                    new_length -= 1;
-                    for i in uind..new_length {
-                        line_arr[i] = line_arr[i + 1];
-                        intersection_sides[i] = intersection_sides[i + 1];
-                    }
-                    if new_length < 3 {
-                        try_again = false;
-                        break;
-                    }
-                    // Reset the precalculated sides around the removal.
-                    if uind == 0 {
-                        prev_ind = new_length - 1;
-                    }
-                    intersection_sides[prev_ind] = None;
-                    let reset_ind = if uind >= new_length { 0 } else { uind };
-                    intersection_sides[reset_ind] = None;
-                    ind -= 1;
-                    index_of_last_removed_line = ind;
-                } else {
-                    prev_line = curr_line;
-                    prev_ind = uind;
-                }
-                curr_line = next_line;
-                if !try_again && ind >= index_of_last_removed_line {
-                    // tried all lines without removing one
-                    break;
-                }
-                ind += 1;
             }
-        }
 
-        if new_length == 2 && line_arr[0].is_parallel(&line_arr[1]) {
-            if line_arr[0].direction() == line_arr[1].direction() {
-                // one of the two remaining lines is redundant
-                if line_arr[1].side_of_int(line_arr[0].a) == Side::OnTheLeft {
-                    line_arr[0] = line_arr[1];
-                }
-                new_length -= 1;
-            } else {
-                // opposite directions: the simplex may be empty
-                if line_arr[1].side_of_int(line_arr[0].a) == Side::OnTheLeft {
-                    new_length = 0;
+            if new_length == 2 && line_arr[0].is_parallel(&line_arr[1]) {
+                if line_arr[0].direction() == line_arr[1].direction() {
+                    // one of the two remaining lines is redundant
+                    if line_arr[1].side_of_int(line_arr[0].a) == Side::OnTheLeft {
+                        line_arr[0] = line_arr[1];
+                    }
+                    new_length -= 1;
+                } else {
+                    // opposite directions: the simplex may be empty
+                    if line_arr[1].side_of_int(line_arr[0].a) == Side::OnTheLeft {
+                        new_length = 0;
+                    }
                 }
             }
-        }
-        if new_length == self.lines.len() {
-            return self.clone(); // nothing removed
-        }
-        if new_length == 0 {
-            return Simplex::EMPTY;
-        }
-        Simplex::new(line_arr[..new_length].to_vec())
+            if new_length == self.lines.len() {
+                return self.clone(); // nothing removed
+            }
+            if new_length == 0 {
+                return Simplex::EMPTY;
+            }
+            Simplex::new(line_arr[..new_length].to_vec())
         })
     }
 }
@@ -1037,7 +1042,10 @@ mod tests {
             "pieces_area {pieces_area} != expected {expected}"
         );
         for (i, piece) in pieces.iter().enumerate() {
-            assert!(piece.is_empty() || piece.is_bounded(), "piece {i} unbounded");
+            assert!(
+                piece.is_empty() || piece.is_bounded(),
+                "piece {i} unbounded"
+            );
             // No piece may reach the interior of the hole.
             assert!(
                 !piece.contains_inside(&Point::Int(IntPoint::new(10, 10))),

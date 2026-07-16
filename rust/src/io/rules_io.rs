@@ -18,10 +18,7 @@ pub fn write_rules(board: &BasicBoard, design_name: &str) -> String {
     };
     out.push_str(&format!("  (snap_angle {angle})\n"));
     let hw = board.rules.get_min_trace_half_width();
-    let cl = board
-        .rules
-        .clearance_matrix
-        .get_value(1, 1, 0, false);
+    let cl = board.rules.clearance_matrix.get_value(1, 1, 0, false);
     out.push_str(&format!(
         "  (rule\n    (width {})\n    (clearance {})\n  )\n",
         (2 * hw) as f64 / board.resolution.max(1) as f64,
@@ -73,7 +70,10 @@ pub fn read_rules(board: &mut BasicBoard, content: &str) -> Result<usize, String
         {
             let layers = board.rules.clearance_matrix.get_layer_count();
             for layer in 0..layers {
-                board.rules.clearance_matrix.set_value(1, 1, layer, scale(c));
+                board
+                    .rules
+                    .clearance_matrix
+                    .set_value(1, 1, layer, scale(c));
             }
             applied += 1;
         }

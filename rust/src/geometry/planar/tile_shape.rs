@@ -464,7 +464,9 @@ impl TileShape {
         let mut prev_ind = line_count - 2;
         let mut curr_ind = line_count - 1;
         for next_ind in 0..line_count {
-            let projection = self.border_line(curr_ind).perpendicular_projection(from_point);
+            let projection = self
+                .border_line(curr_ind)
+                .perpendicular_projection(from_point);
             if (!self.corner_is_bounded(curr_ind)
                 || self.border_line(prev_ind).side_of(&projection) == Side::OnTheRight)
                 && (!self.corner_is_bounded(next_ind)
@@ -532,8 +534,7 @@ impl TileShape {
         for next_ind in 0..line_count {
             let projection = self.border_line(curr_ind).projection_approx(from_point);
             if (!self.corner_is_bounded(curr_ind)
-                || self.border_line(prev_ind).side_of_float(projection, 0.0)
-                    == Side::OnTheRight)
+                || self.border_line(prev_ind).side_of_float(projection, 0.0) == Side::OnTheRight)
                 && (!self.corner_is_bounded(next_ind)
                     || self.border_line(next_ind).side_of_float(projection, 0.0)
                         == Side::OnTheRight)
@@ -628,7 +629,10 @@ impl TileShape {
 
     /// True if the line segment has a common point with the interior of
     /// this shape.
-    pub fn is_intersected_interior_by(&self, segment: &crate::geometry::planar::LineSegment) -> bool {
+    pub fn is_intersected_interior_by(
+        &self,
+        segment: &crate::geometry::planar::LineSegment,
+    ) -> bool {
         let start_point = segment.start_point();
         let end_point = segment.end_point();
         let float_start_point = start_point.to_float();
@@ -733,8 +737,7 @@ impl TileShape {
             let first_intersection =
                 polyline.arr[first_line_no].intersection(&self.border_line(first_edge_no));
             if first_corner != first_intersection {
-                let mut curr_lines: Vec<Line> =
-                    polyline.arr[..=first_line_no].to_vec();
+                let mut curr_lines: Vec<Line> = polyline.arr[..=first_line_no].to_vec();
                 // close the piece with the intersected edge line
                 curr_lines.push(self.border_line(first_edge_no));
                 let piece = Polyline::from_lines(curr_lines);
@@ -749,8 +752,8 @@ impl TileShape {
             let (curr_line_no, curr_edge_no) = intersections[curr_no];
             let (next_line_no, next_edge_no) = intersections[curr_no + 1];
             // skip parts running completely inside the border
-            let insert_piece = (curr_line_no + 1..next_line_no)
-                .any(|i| self.is_outside(&polyline.corner(i)));
+            let insert_piece =
+                (curr_line_no + 1..next_line_no).any(|i| self.is_outside(&polyline.corner(i)));
             if insert_piece {
                 let mut curr_lines = Vec::with_capacity(next_line_no - curr_line_no + 3);
                 curr_lines.push(self.border_line(curr_edge_no));
@@ -808,9 +811,7 @@ impl TileShape {
         match (self, other) {
             (TileShape::Box(a), TileShape::Box(b)) => a.intersects(*b),
             (TileShape::Box(a), TileShape::Octagon(b))
-            | (TileShape::Octagon(b), TileShape::Box(a)) => {
-                a.to_int_octagon().intersects(*b)
-            }
+            | (TileShape::Octagon(b), TileShape::Box(a)) => a.to_int_octagon().intersects(*b),
             (TileShape::Octagon(a), TileShape::Octagon(b)) => a.intersects(*b),
             (a, b) => a.to_simplex().intersects(&b.to_simplex()),
         }
@@ -896,10 +897,7 @@ mod tests {
     fn cutout_polyline_crossing() {
         // a horizontal polyline crossing a square: two outside pieces
         let square = TileShape::Box(IntBox::from_coords(-100, -100, 100, 100));
-        let polyline = Polyline::from_int_points(&[
-            IntPoint::new(-300, 0),
-            IntPoint::new(300, 0),
-        ]);
+        let polyline = Polyline::from_int_points(&[IntPoint::new(-300, 0), IntPoint::new(300, 0)]);
         let pieces = square.cutout_polyline(&polyline);
         assert_eq!(pieces.len(), 2);
         for piece in &pieces {
@@ -916,16 +914,11 @@ mod tests {
     fn cutout_polyline_outside_and_inside() {
         let square = TileShape::Box(IntBox::from_coords(-100, -100, 100, 100));
         // completely outside: returned unchanged
-        let outside = Polyline::from_int_points(&[
-            IntPoint::new(200, 200),
-            IntPoint::new(400, 200),
-        ]);
+        let outside =
+            Polyline::from_int_points(&[IntPoint::new(200, 200), IntPoint::new(400, 200)]);
         assert_eq!(square.cutout_polyline(&outside).len(), 1);
         // completely inside: nothing remains
-        let inside = Polyline::from_int_points(&[
-            IntPoint::new(-50, 0),
-            IntPoint::new(50, 0),
-        ]);
+        let inside = Polyline::from_int_points(&[IntPoint::new(-50, 0), IntPoint::new(50, 0)]);
         assert!(square.cutout_polyline(&inside).is_empty());
     }
 
@@ -1039,9 +1032,7 @@ mod tests {
         ];
         let hole_kinds = [
             TileShape::Box(IntBox::from_coords(8, 8, 12, 12)),
-            TileShape::Octagon(
-                IntOctagon::new(6, 6, 14, 14, -4, 24, 16, 24).normalize(),
-            ),
+            TileShape::Octagon(IntOctagon::new(6, 6, 14, 14, -4, 24, 16, 24).normalize()),
             TileShape::from_convex_polygon(&[
                 IntPoint::new(8, 8),
                 IntPoint::new(12, 8),

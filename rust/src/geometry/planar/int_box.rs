@@ -449,21 +449,25 @@ impl IntBox {
         if c.ll.x - p_d.ll.x > c.ll.y - p_d.ll.y {
             // switch left dividing line to lower
             result[0] = IntBox::from_coords(c.ll.x, result[0].ll.y, result[0].ur.x, result[0].ur.y);
-            result[1] = IntBox::from_coords(result[1].ll.x, p_d.ll.y, result[1].ur.x, result[1].ur.y);
+            result[1] =
+                IntBox::from_coords(result[1].ll.x, p_d.ll.y, result[1].ur.x, result[1].ur.y);
         }
         if p_d.ur.y - c.ur.y > c.ll.x - p_d.ll.x {
             // switch upper dividing line to the left
             result[1] = IntBox::from_coords(result[1].ll.x, result[1].ll.y, result[1].ur.x, c.ur.y);
-            result[3] = IntBox::from_coords(p_d.ll.x, result[3].ll.y, result[3].ur.x, result[3].ur.y);
+            result[3] =
+                IntBox::from_coords(p_d.ll.x, result[3].ll.y, result[3].ur.x, result[3].ur.y);
         }
         if p_d.ur.x - c.ur.x > p_d.ur.y - c.ur.y {
             // switch right dividing line to upper
-            result[2] = IntBox::from_coords(result[2].ll.x, result[2].ll.y, result[2].ur.x, p_d.ur.y);
+            result[2] =
+                IntBox::from_coords(result[2].ll.x, result[2].ll.y, result[2].ur.x, p_d.ur.y);
             result[3] = IntBox::from_coords(result[3].ll.x, result[3].ll.y, c.ur.x, result[3].ur.y);
         }
         if c.ll.y - p_d.ll.y > p_d.ur.x - c.ur.x {
             // switch lower dividing line to the left
-            result[0] = IntBox::from_coords(result[0].ll.x, result[0].ll.y, p_d.ur.x, result[0].ur.y);
+            result[0] =
+                IntBox::from_coords(result[0].ll.x, result[0].ll.y, p_d.ur.x, result[0].ur.y);
             result[2] = IntBox::from_coords(result[2].ll.x, c.ll.y, result[2].ur.x, result[2].ur.y);
         }
         result.to_vec()
@@ -546,7 +550,9 @@ mod tests {
         let c = IntBox::from_coords(10, 0, 20, 10);
         assert!(a.intersects(c));
         assert!(!a.overlaps(c));
-        assert!(a.intersection(IntBox::from_coords(20, 20, 30, 30)).is_empty());
+        assert!(a
+            .intersection(IntBox::from_coords(20, 20, 30, 30))
+            .is_empty());
     }
 
     #[test]
@@ -635,7 +641,9 @@ mod tests {
             IntBox::from_coords(-2, 1, 0, 3)
         );
         let far = IntBox::from_coords(10, 10, 20, 20);
-        assert!((b.weighted_distance(far, 1.0, 1.0) - ((7 * 7 + 8 * 8) as f64).sqrt()).abs() < 1e-12);
+        assert!(
+            (b.weighted_distance(far, 1.0, 1.0) - ((7 * 7 + 8 * 8) as f64).sqrt()).abs() < 1e-12
+        );
         assert_eq!(b.nearest_part(far), IntBox::from_coords(10, 10, 10, 10));
     }
 }

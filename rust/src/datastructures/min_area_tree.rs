@@ -19,10 +19,18 @@ pub struct LeafId(usize);
 
 #[derive(Debug, Clone)]
 enum NodeKind<T> {
-    Inner { first: usize, second: usize },
-    Leaf { object: T, shape_index: usize },
+    Inner {
+        first: usize,
+        second: usize,
+    },
+    Leaf {
+        object: T,
+        shape_index: usize,
+    },
     /// Slot on the free list.
-    Free { next_free: Option<usize> },
+    Free {
+        next_free: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -54,7 +62,15 @@ pub struct TreeStats {
 
 /// Takes and resets the traversal statistics.
 pub fn take_tree_stats() -> TreeStats {
-    TREE_STATS.with(|s| std::mem::replace(&mut *s.borrow_mut(), TreeStats { queries: 0, nodes_visited: 0 }))
+    TREE_STATS.with(|s| {
+        std::mem::replace(
+            &mut *s.borrow_mut(),
+            TreeStats {
+                queries: 0,
+                nodes_visited: 0,
+            },
+        )
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -114,12 +130,7 @@ impl<T> MinAreaTree<T> {
 
     /// Inserts one shape with its precomputed bounding shape; returns the
     /// leaf handle for later removal.
-    pub fn insert(
-        &mut self,
-        object: T,
-        shape_index: usize,
-        bounding_shape: IntOctagon,
-    ) -> LeafId {
+    pub fn insert(&mut self, object: T, shape_index: usize, bounding_shape: IntOctagon) -> LeafId {
         let leaf = self.alloc(Node {
             bound: bounding_shape,
             parent: None,
@@ -183,8 +194,7 @@ impl<T> MinAreaTree<T> {
             // Choose the child with minimal area increase after taking the
             // union with the shape to insert.
             let first_shape = self.nodes[first].bound;
-            let first_area_increase =
-                insert_bound.union(first_shape).area() - first_shape.area();
+            let first_area_increase = insert_bound.union(first_shape).area() - first_shape.area();
             let second_shape = self.nodes[second].bound;
             let second_area_increase =
                 insert_bound.union(second_shape).area() - second_shape.area();

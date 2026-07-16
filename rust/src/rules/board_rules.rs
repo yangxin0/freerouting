@@ -83,7 +83,9 @@ impl BoardRules {
         let Some(net) = self.nets.get_by_no(net_no) else {
             return 0;
         };
-        self.net_classes.get(net.get_class()).get_trace_half_width(layer)
+        self.net_classes
+            .get(net.get_class())
+            .get_trace_half_width(layer)
     }
 
     /// The trace clearance class of `net_no`'s net class (Java:
@@ -152,7 +154,9 @@ impl BoardRules {
             return;
         }
         let default = self.get_default_net_class();
-        self.net_classes.get_mut(default).set_trace_half_width(value);
+        self.net_classes
+            .get_mut(default)
+            .set_trace_half_width(value);
         self.min_trace_half_width = self.min_trace_half_width.min(value);
         self.max_trace_half_width = self.max_trace_half_width.max(value);
     }
@@ -175,16 +179,15 @@ impl BoardRules {
             return found;
         }
         let default = self.get_default_net_class();
-        let new_class = self
-            .net_classes
-            .append(name, &self.layer_structure, false);
+        let new_class = self.net_classes.append(name, &self.layer_structure, false);
         let default_item_classes = self
             .net_classes
             .get(default)
             .default_item_clearance_classes
             .clone();
-        self.net_classes.get_mut(new_class).default_item_clearance_classes =
-            default_item_classes;
+        self.net_classes
+            .get_mut(new_class)
+            .default_item_clearance_classes = default_item_classes;
         self.init_class_from_default(new_class, default);
         new_class
     }
@@ -225,12 +228,7 @@ impl BoardRules {
     /// Creates a default via rule for `net_class` containing all via infos
     /// with the class's default via clearance class; when several via
     /// infos share a layer range, the one with the smallest pad is kept.
-    pub fn create_default_via_rule(
-        &mut self,
-        net_class: usize,
-        name: &str,
-        padstacks: &Padstacks,
-    ) {
+    pub fn create_default_via_rule(&mut self, net_class: usize, name: &str, padstacks: &Padstacks) {
         if self.via_infos.count() == 0 {
             return;
         }
@@ -276,7 +274,9 @@ impl BoardRules {
         }
         self.via_rules.push(default_rule);
         let rule_id = self.via_rules.len() - 1;
-        self.net_classes.get_mut(net_class).set_via_rule(Some(rule_id));
+        self.net_classes
+            .get_mut(net_class)
+            .set_via_rule(Some(rule_id));
     }
 
     /// True if the clearance class `index` is referenced by any net class
@@ -294,8 +294,7 @@ impl BoardRules {
                 return true;
             }
         }
-        (0..self.via_infos.count())
-            .any(|i| self.via_infos.get(i).get_clearance_class() == index)
+        (0..self.via_infos.count()).any(|i| self.via_infos.get(i).get_clearance_class() == index)
     }
 
     /// Changes the clearance class of all rules objects from `from_no` to
@@ -308,7 +307,9 @@ impl BoardRules {
             }
             for &item_class in &ITEM_CLASSES {
                 if net_class.default_item_clearance_classes.get(item_class) == from_no {
-                    net_class.default_item_clearance_classes.set(item_class, to_no);
+                    net_class
+                        .default_item_clearance_classes
+                        .set(item_class, to_no);
                 }
             }
         }
@@ -455,10 +456,7 @@ mod tests {
     fn append_net_class_inherits_default() {
         let (mut rules, _) = setup();
         rules.get_default_net_class();
-        rules
-            .net_classes
-            .get_mut(0)
-            .set_trace_clearance_class(1);
+        rules.net_classes.get_mut(0).set_trace_clearance_class(1);
         let power = rules.append_net_class("power");
         assert_eq!(rules.net_classes.get(power).get_trace_half_width(0), 1500);
         assert_eq!(rules.net_classes.get(power).get_trace_clearance_class(), 1);
@@ -488,10 +486,7 @@ mod tests {
         let rule = &rules.via_rules[rule_id];
         assert_eq!(rule.via_count(), 1);
         assert_eq!(rule.get_via(0), small_info);
-        assert_eq!(
-            rules.net_classes.get(default).get_via_rule(),
-            Some(rule_id)
-        );
+        assert_eq!(rules.net_classes.get(default).get_via_rule(), Some(rule_id));
         assert!((rules.get_default_via_diameter(&padstacks) - 600.0).abs() < 1e-9);
         assert_eq!(rules.get_via_rule("default_rule"), Some(rule_id));
     }

@@ -211,7 +211,9 @@ impl AutorouteEngine {
             .map(|(id, _)| *id)
             .collect();
         for item_id in net_items {
-            let Some(item) = board.get_item(item_id) else { continue };
+            let Some(item) = board.get_item(item_id) else {
+                continue;
+            };
             let regions: Vec<(usize, crate::geometry::planar::IntBox)> = item
                 .tile_shapes(&board.padstacks)
                 .iter()
@@ -245,12 +247,23 @@ impl AutorouteEngine {
     }
 
     fn grid_cells(bbox: crate::geometry::planar::IntBox) -> impl Iterator<Item = (i32, i32)> {
-        let (x0, x1) = (bbox.ll.x.div_euclid(GRID_CELL), bbox.ur.x.div_euclid(GRID_CELL));
-        let (y0, y1) = (bbox.ll.y.div_euclid(GRID_CELL), bbox.ur.y.div_euclid(GRID_CELL));
+        let (x0, x1) = (
+            bbox.ll.x.div_euclid(GRID_CELL),
+            bbox.ur.x.div_euclid(GRID_CELL),
+        );
+        let (y0, y1) = (
+            bbox.ll.y.div_euclid(GRID_CELL),
+            bbox.ur.y.div_euclid(GRID_CELL),
+        );
         (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
     }
 
-    fn grid_insert(&mut self, room_id: RoomId, bbox: crate::geometry::planar::IntBox, layer: usize) {
+    fn grid_insert(
+        &mut self,
+        room_id: RoomId,
+        bbox: crate::geometry::planar::IntBox,
+        layer: usize,
+    ) {
         for (x, y) in Self::grid_cells(bbox) {
             self.grid.entry((x, y, layer)).or_default().push(room_id);
         }
@@ -286,9 +299,7 @@ impl AutorouteEngine {
             if !item.is_connectable() || !item.base.contains_net(self.net_no) {
                 continue;
             }
-            for (index, (shape, layer)) in
-                item.tile_shapes(&board.padstacks).iter().enumerate()
-            {
+            for (index, (shape, layer)) in item.tile_shapes(&board.padstacks).iter().enumerate() {
                 for room in self.rooms_near(shape.bounding_box(), *layer) {
                     if self.graph.room(room).layer == *layer
                         && shape.intersects(&self.graph.room(room).shape)
@@ -366,9 +377,11 @@ impl AutorouteEngine {
             if piece.shape.dimension() < 2 {
                 continue;
             }
-            let room_id =
-                self.graph
-                    .add_room(piece.shape.clone(), piece.layer, RoomKind::CompleteFreeSpace);
+            let room_id = self.graph.add_room(
+                piece.shape.clone(),
+                piece.layer,
+                RoomKind::CompleteFreeSpace,
+            );
             // doors to touching complete rooms (grid + bounding boxes
             // prune the exact touch tests)
             let piece_bbox = piece.shape.bounding_box();
@@ -380,10 +393,7 @@ impl AutorouteEngine {
                 if !existing_room.shape.bounding_box().intersects(piece_bbox) {
                     continue;
                 }
-                let dim = existing_room
-                    .shape
-                    .intersection(&piece.shape)
-                    .dimension();
+                let dim = existing_room.shape.intersection(&piece.shape).dimension();
                 if dim >= 1 {
                     self.graph.add_door_with_dimension(existing, room_id, dim);
                 }
@@ -405,8 +415,7 @@ impl AutorouteEngine {
                     continue;
                 }
                 let is_trace = matches!(item.kind, crate::board::ItemKind::PolylineTrace(_));
-                for (index, (shape, layer)) in
-                    item.tile_shapes(&board.padstacks).iter().enumerate()
+                for (index, (shape, layer)) in item.tile_shapes(&board.padstacks).iter().enumerate()
                 {
                     if *layer != piece.layer {
                         continue;
@@ -427,8 +436,7 @@ impl AutorouteEngine {
                     }
                 }
             }
-            crate::autoroute::maze_search::STATS
-                .with(|s| s.borrow_mut().rooms_completed += 1);
+            crate::autoroute::maze_search::STATS.with(|s| s.borrow_mut().rooms_completed += 1);
             // net-dependent ONLY if a skipped own-net/rippable item's
             // inflation actually overlaps this piece (its shape would
             // differ for another net)
@@ -439,10 +447,7 @@ impl AutorouteEngine {
             if crate::debug::maze() {
                 eprintln!(
                     "NEWROOM {room_id} net {} layer {} nd {} bbox {:?}",
-                    self.net_no,
-                    piece.layer,
-                    net_dependent,
-                    piece_bbox
+                    self.net_no, piece.layer, net_dependent, piece_bbox
                 );
             }
             self.complete_rooms.push(room_id);
@@ -450,7 +455,8 @@ impl AutorouteEngine {
             self.target_doors.push(targets);
             self.rippable_items.push(rippables);
             self.expanded.push(false);
-            self.net_dependent.push(net_dependent || !self.target_doors[room_id].is_empty());
+            self.net_dependent
+                .push(net_dependent || !self.target_doors[room_id].is_empty());
             debug_assert_eq!(self.target_doors.len(), self.graph.room_count());
             if crate::debug::srn() {
                 self.create_gap_rooms(board, room_id);
@@ -523,8 +529,7 @@ impl AutorouteEngine {
         }
         match &item.kind {
             crate::board::ItemKind::PolylineTrace(t) => {
-                t.half_width == trace_half_width
-                    && item.base.clearance_class == clearance_class
+                t.half_width == trace_half_width && item.base.clearance_class == clearance_class
             }
             _ => false,
         }
@@ -556,15 +561,18 @@ impl AutorouteEngine {
         }
         // touching board items, at their completion inflation
         let matrix = &board.rules.clearance_matrix;
-        for item_id in board
-            .overlapping_items_coarse(&TileShape::Box(room_bbox.offset(
+        for item_id in board.overlapping_items_coarse(
+            &TileShape::Box(room_bbox.offset(
                 2.0 * (self.trace_half_width
                     + matrix.max_value(layer).max(0)
                     + crate::rules::clearance_matrix::CLEARANCE_SAFETY_MARGIN)
                     as f64,
-            )), Some(layer))
-        {
-            let Some(item) = board.get_item(item_id) else { continue };
+            )),
+            Some(layer),
+        ) {
+            let Some(item) = board.get_item(item_id) else {
+                continue;
+            };
             if item.base.contains_net(self.net_no) {
                 continue;
             }
@@ -573,8 +581,7 @@ impl AutorouteEngine {
                     continue;
                 }
             }
-            if self.allow_ripup
-                && crate::autoroute::room_completion::is_rippable(item, self.net_no)
+            if self.allow_ripup && crate::autoroute::room_completion::is_rippable(item, self.net_no)
             {
                 continue;
             }
@@ -585,16 +592,16 @@ impl AutorouteEngine {
                 true,
             );
             let margin = (self.trace_half_width + clearance).max(0);
-            let Some(inflated) = board.inflated_shapes(item_id, margin) else { continue };
+            let Some(inflated) = board.inflated_shapes(item_id, margin) else {
+                continue;
+            };
             for (si, (shape, bbox, l)) in inflated.iter().enumerate() {
                 if *l != layer || !bbox.intersects(room_bbox.offset(4.0)) {
                     continue;
                 }
-                if let Some(nb) = srn::make_neighbour(
-                    &room_simplex,
-                    srn::NeighbourObject::Item(item_id),
-                    shape,
-                ) {
+                if let Some(nb) =
+                    srn::make_neighbour(&room_simplex, srn::NeighbourObject::Item(item_id), shape)
+                {
                     // ripup via obstacle rooms: routable foreign items
                     // touching the piece become enterable rooms (Java:
                     // "expand the item for ripup and pushing purposes")
@@ -628,7 +635,10 @@ impl AutorouteEngine {
             .collect();
         for (other, dim) in room_doors {
             if self.graph.room(other).alive
-                && !matches!(self.graph.room(other).kind, RoomKind::IncompleteFreeSpace { .. })
+                && !matches!(
+                    self.graph.room(other).kind,
+                    RoomKind::IncompleteFreeSpace { .. }
+                )
                 && !self.graph.door_exists(room_id, other)
             {
                 self.graph.add_door_with_dimension(room_id, other, dim);
@@ -794,9 +804,7 @@ impl AutorouteEngine {
         let existing: Vec<RoomId> = self
             .rooms_near(point_box, layer)
             .into_iter()
-            .filter(|&r| {
-                self.graph.room(r).layer == layer && self.graph.room(r).shape.contains(&p)
-            })
+            .filter(|&r| self.graph.room(r).layer == layer && self.graph.room(r).shape.contains(&p))
             .collect();
         if !existing.is_empty() {
             return existing;
@@ -856,10 +864,7 @@ mod tests {
     use std::collections::VecDeque;
 
     fn test_board() -> BasicBoard {
-        let stack = LayerStructure::new(vec![
-            Layer::new("F.Cu", true),
-            Layer::new("B.Cu", true),
-        ]);
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true), Layer::new("B.Cu", true)]);
         let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
         let mut rules = BoardRules::new(stack.clone(), matrix);
         rules.get_default_net_class();

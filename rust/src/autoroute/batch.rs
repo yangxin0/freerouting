@@ -6,7 +6,9 @@
 //! components of a net's connectable items; the closest pair of items
 //! between two components becomes the next connection to route.
 
-use crate::autoroute::maze_search::{maze_route_with_engine, maze_route_with_ripup, MazeRouteRequest};
+use crate::autoroute::maze_search::{
+    maze_route_with_engine, maze_route_with_ripup, MazeRouteRequest,
+};
 use crate::board::basic_board::{BasicBoard, ItemId};
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -181,9 +183,7 @@ pub fn route_net_with_store(
         let mut best: Option<(ItemId, ItemId)> = None;
         for i in 0..candidate_sets.len() {
             for j in i + 1..candidate_sets.len() {
-                if let Some(pair) =
-                    closest_pair(board, &candidate_sets[i], &candidate_sets[j])
-                {
+                if let Some(pair) = closest_pair(board, &candidate_sets[i], &candidate_sets[j]) {
                     if best.is_none() || dist_of(&pair) < dist_of(best.as_ref().unwrap()) {
                         best = Some(pair);
                     }
@@ -224,7 +224,11 @@ pub fn route_net_with_store(
             net_no,
             start_item: start,
             dest_item: dest,
-            start_items: if use_sets { start_component } else { Vec::new() },
+            start_items: if use_sets {
+                start_component
+            } else {
+                Vec::new()
+            },
             dest_items: if use_sets { dest_component } else { Vec::new() },
             is_fanout: false,
             trace_half_width: request.trace_half_width,
@@ -248,12 +252,14 @@ pub fn route_net_with_store(
                         request.trace_half_width, request.clearance_class
                     );
                 }
-                *store = Some(crate::autoroute::engine::AutorouteEngine::new_with_clearance(
-                    net_no,
-                    false,
-                    request.clearance_class,
-                    request.trace_half_width,
-                ));
+                *store = Some(
+                    crate::autoroute::engine::AutorouteEngine::new_with_clearance(
+                        net_no,
+                        false,
+                        request.clearance_class,
+                        request.trace_half_width,
+                    ),
+                );
             }
             let engine = store.as_mut().unwrap();
             engine.sync_board_changes(board);
@@ -318,8 +324,7 @@ pub fn route_net_with_ripup(
     };
     let retry = route_net(board, net_no, &rip_request);
     let mut extra_routed = retry.routed_connections;
-    let mut success =
-        retry.failed_connections == 0 && board.net_is_completely_connected(net_no);
+    let mut success = retry.failed_connections == 0 && board.net_is_completely_connected(net_no);
     let mut broken_victims = 0usize;
     if success {
         // Reroute the victims immediately without further ripup. At most
@@ -330,8 +335,7 @@ pub fn route_net_with_ripup(
         // benchmarked at iterations 55-58 and consistently regressed
         // completion by time starvation: 161/173 vs 166/173.)
         for &ripped in &retry.ripped_nets {
-            if request.deadline.is_some_and(|t| t.limit_exceeded())
-                || sub_deadline.limit_exceeded()
+            if request.deadline.is_some_and(|t| t.limit_exceeded()) || sub_deadline.limit_exceeded()
             {
                 // half-done victim recovery must not commit
                 broken_victims = usize::MAX;
@@ -397,7 +401,11 @@ pub fn batch_route_passes(
 
 /// The request adjusted to `net_no`'s net class rules: its trace half
 /// width and via padstack when the imported rules define them.
-pub(crate) fn request_for_net(board: &BasicBoard, net_no: i32, base: &BatchRequest) -> BatchRequest {
+pub(crate) fn request_for_net(
+    board: &BasicBoard,
+    net_no: i32,
+    base: &BatchRequest,
+) -> BatchRequest {
     let class_half_width = board.rules.get_trace_half_width(net_no, 0);
     // Route each net with its own trace clearance class (Java: AutorouteControl
     // takes trace_clearance_class_no from the net class). The CLI/API base
@@ -546,7 +554,11 @@ fn repair_violations(
                 nets,
                 complete_before,
                 complete_after,
-                if complete_after >= complete_before { "KEPT" } else { "ROLLED BACK" }
+                if complete_after >= complete_before {
+                    "KEPT"
+                } else {
+                    "ROLLED BACK"
+                }
             );
         }
         if complete_after >= complete_before {
@@ -859,10 +871,7 @@ mod tests {
     use crate::rules::{BoardRules, ClearanceMatrix};
 
     fn test_board(net_count: usize) -> BasicBoard {
-        let stack = LayerStructure::new(vec![
-            Layer::new("F.Cu", true),
-            Layer::new("B.Cu", true),
-        ]);
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true), Layer::new("B.Cu", true)]);
         let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
         let mut rules = BoardRules::new(stack.clone(), matrix);
         rules.get_default_net_class();

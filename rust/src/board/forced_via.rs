@@ -20,7 +20,9 @@ fn forced_shapes(
     };
     let mut result = Vec::new();
     for layer in ps.from_layer()..=ps.to_layer() {
-        let Some(shape) = ps.get_shape(layer) else { continue };
+        let Some(shape) = ps.get_shape(layer) else {
+            continue;
+        };
         let pad = shape.translate_by(IntVector::new(location.x, location.y));
         let pad_bb = pad.bounding_box();
         result.push((pad, layer));
@@ -117,10 +119,7 @@ mod tests {
     use crate::rules::{BoardRules, ClearanceMatrix};
 
     fn test_board() -> BasicBoard {
-        let stack = LayerStructure::new(vec![
-            Layer::new("F.Cu", true),
-            Layer::new("B.Cu", true),
-        ]);
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true), Layer::new("B.Cu", true)]);
         let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
         let mut rules = BoardRules::new(stack.clone(), matrix);
         rules.get_default_net_class();
@@ -138,10 +137,7 @@ mod tests {
         let mut board = test_board();
         // a foreign trace running straight over the target location
         let blocker = board.insert_trace(
-            Polyline::from_int_points(&[
-                IntPoint::new(-20000, 0),
-                IntPoint::new(20000, 0),
-            ]),
+            Polyline::from_int_points(&[IntPoint::new(-20000, 0), IntPoint::new(20000, 0)]),
             0,
             100,
             vec![2],
@@ -175,17 +171,21 @@ mod tests {
     fn check_leaves_board_unchanged() {
         let mut board = test_board();
         board.insert_trace(
-            Polyline::from_int_points(&[
-                IntPoint::new(-20000, 0),
-                IntPoint::new(20000, 0),
-            ]),
+            Polyline::from_int_points(&[IntPoint::new(-20000, 0), IntPoint::new(20000, 0)]),
             0,
             100,
             vec![2],
             1,
         );
         let items_before: Vec<_> = board.items().map(|(id, _)| *id).collect();
-        assert!(check_forced_via(&mut board, 1, IntPoint::new(0, 0), &[1], 1, 100));
+        assert!(check_forced_via(
+            &mut board,
+            1,
+            IntPoint::new(0, 0),
+            &[1],
+            1,
+            100
+        ));
         let items_after: Vec<_> = board.items().map(|(id, _)| *id).collect();
         assert_eq!(items_before, items_after, "check must not change the board");
     }

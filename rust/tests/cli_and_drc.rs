@@ -26,14 +26,7 @@ fn cli_routes_a_board_and_writes_a_session() {
     let _ = std::fs::remove_file(&ses);
 
     let status = Command::new(env!("CARGO_BIN_EXE_freerouting"))
-        .args([
-            "-de",
-            &dsn,
-            "-do",
-            ses.to_str().unwrap(),
-            "-tl",
-            "30",
-        ])
+        .args(["-de", &dsn, "-do", ses.to_str().unwrap(), "-tl", "30"])
         .status()
         .expect("failed to run freerouting binary");
 
@@ -43,7 +36,10 @@ fn cli_routes_a_board_and_writes_a_session() {
         "CLI exited with {status:?}; expected success (all nets routed)"
     );
     let ses_text = std::fs::read_to_string(&ses).expect("session file not written");
-    assert!(ses_text.contains("(session"), "output is not a session file");
+    assert!(
+        ses_text.contains("(session"),
+        "output is not a session file"
+    );
     assert!(
         ses_text.contains("network_out"),
         "session has no routed network"
@@ -56,7 +52,9 @@ fn cli_routes_a_board_and_writes_a_session() {
 /// each. Union-find keyed by exact (x, y): a trace unions its two endpoints;
 /// pins/vias are points joined in when a trace endpoint lands on them. A pin
 /// whose centre no wire reaches ends up in its own component — a dangling track.
-fn every_real_pin_strictly_wired(board: &freerouting::board::basic_board::BasicBoard) -> Result<usize, String> {
+fn every_real_pin_strictly_wired(
+    board: &freerouting::board::basic_board::BasicBoard,
+) -> Result<usize, String> {
     use freerouting::board::ItemKind;
     use std::collections::HashMap;
 
@@ -121,7 +119,9 @@ fn every_real_pin_strictly_wired(board: &freerouting::board::basic_board::BasicB
                     }
                 }
                 ItemKind::Via(v) => {
-                    parent.entry((v.center.x, v.center.y)).or_insert((v.center.x, v.center.y));
+                    parent
+                        .entry((v.center.x, v.center.y))
+                        .or_insert((v.center.x, v.center.y));
                 }
                 _ => {}
             }
@@ -186,8 +186,8 @@ fn routed_nets_reach_pin_connection_points() {
         combine_all_traces(&mut board);
         pull_tight_all(&mut board, 3);
 
-        let checked = every_real_pin_strictly_wired(&board)
-            .unwrap_or_else(|e| panic!("{fixture}: {e}"));
+        let checked =
+            every_real_pin_strictly_wired(&board).unwrap_or_else(|e| panic!("{fixture}: {e}"));
         assert!(checked > 0, "{fixture}: no >=2-pin complete nets to verify");
     }
 }
@@ -208,8 +208,8 @@ fn ses_import_reconnects_a_routed_net() {
     use freerouting::io::{export_ses, import_dsn, import_ses};
 
     let root = root();
-    let content = std::fs::read_to_string(format!("{root}/{SMALL_FIXTURE}"))
-        .expect("fixture missing");
+    let content =
+        std::fs::read_to_string(format!("{root}/{SMALL_FIXTURE}")).expect("fixture missing");
 
     // Route a board via the real batch path, export its SES, then import that
     // SES onto a *fresh* import of the same design and confirm the wiring
@@ -270,8 +270,8 @@ fn full_board_drc_over_a_routed_board() {
     use freerouting::io::import_dsn;
 
     let root = root();
-    let content = std::fs::read_to_string(format!("{root}/{SMALL_FIXTURE}"))
-        .expect("fixture missing");
+    let content =
+        std::fs::read_to_string(format!("{root}/{SMALL_FIXTURE}")).expect("fixture missing");
     let mut board = import_dsn(&content).expect("import failed");
     let request = BatchRequest {
         trace_half_width: board.rules.get_min_trace_half_width().max(500),

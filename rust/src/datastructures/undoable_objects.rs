@@ -202,9 +202,7 @@ impl<K: Ord + Clone, V: Clone + PartialEq> UndoableObjects<K, V> {
         for key in keys {
             let curr_node = self.objects[&key];
             let redo = self.nodes[curr_node].redo_object;
-            if let Some(redo_node) =
-                redo.filter(|&r| self.nodes[r].level == self.stack_level)
-            {
+            if let Some(redo_node) = redo.filter(|&r| self.nodes[r].level == self.stack_level) {
                 // object was changed on the current level: replace it by
                 // the newer version
                 self.objects.insert(key, redo_node);
