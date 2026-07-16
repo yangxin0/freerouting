@@ -102,6 +102,9 @@ struct ImageKeepout {
     layer: Option<usize>,
     /// a `(via_keepout ...)`: blocks vias only
     via_only: bool,
+    /// resolved clearance class (from a nested or trailing-sibling
+    /// `(clearance_class ...)`; the default class when absent)
+    clearance_class: usize,
 }
 
 /// A parsed `(image ...)` footprint: its pins and its keepouts.
@@ -229,17 +232,24 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     let layer_no = |name: &str| -> Option<usize> { layer_structure.get_no(name) };
     let layer_count = layer_structure.layer_count();
 
-    // default rules (`(clear ...)` is a Specctra alias for `(clearance ...)`)
-    let default_clearance = structure
-        .child("rule")
-        .and_then(|r| r.child("clearance").or_else(|| r.child("clear")))
+    // default rules (`(clear ...)` is a Specctra alias for `(clearance ...)`).
+    // A structure may carry SEVERAL (rule ...) nodes; all are read (Java
+    // reads every rule scope), preferring an untyped clearance as default.
+    let rule_nodes: Vec<&SExpr> = structure.children("rule").collect();
+    let clearance_nodes: Vec<&SExpr> = rule_nodes
+        .iter()
+        .flat_map(|r| r.children("clearance").chain(r.children("clear")))
+        .collect();
+    let default_clearance = clearance_nodes
+        .iter()
+        .find(|c| c.child("type").is_none())
+        .or_else(|| clearance_nodes.first())
         .and_then(|c| c.arg_f64())
         .map(&scale)
         .unwrap_or(200);
-    let default_width = structure
-        .child("rule")
-        .and_then(|r| r.child("width"))
-        .and_then(|w| w.arg_f64())
+    let default_width = rule_nodes
+        .iter()
+        .find_map(|r| r.child("width").and_then(|w| w.arg_f64()))
         .map(&scale)
         .unwrap_or(250);
     // clearance classes: base "null" (0), "default" (1), "smd" (2). Typed
@@ -278,7 +288,7 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     // is ONE pair split across tokens (Java's quoted-pair form, the second
     // token optionally led by the '_' separator). Hyphen spellings (`smd-smd`)
     // are normalized to underscore.
-    if let Some(rule) = structure.child("rule") {
+    for rule in &rule_nodes {
         // if any wire pair appears, pre-create the four default item classes
         // (Java create_default_clearance_classes)
         let has_wire_pair = rule
@@ -368,6 +378,20 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 };
                 if let Some(l) = layer_no(&layer_name) {
                     shapes[l] = Some(shape);
+                } else if layer_name.eq_ignore_ascii_case("signal") {
+                    // wildcard: the shape exists on every signal layer
+                    // (Java LayerStructure SIGNAL_LAYER handling)
+                    for (l, present) in shapes.iter_mut().enumerate() {
+                        if layer_structure.arr[l].is_signal {
+                            *present = Some(shape.clone());
+                        }
+                    }
+                } else if layer_name.eq_ignore_ascii_case("all")
+                    || layer_name.eq_ignore_ascii_case("pcb")
+                {
+                    for present in shapes.iter_mut() {
+                        *present = Some(shape.clone());
+                    }
                 }
             }
             // Java read_padstack_scope: attach defaults ON when the
@@ -405,28 +429,54 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
             // keepouts declared inside the footprint (Java Package.read_scope);
             // place_keepout is placement-only and ignored by routing, like the
             // structure-level place_keepout the importer already skips.
+            // Iterated in document order: Eagle exports put the keepout's
+            // (clearance_class ...) as the immediately FOLLOWING sibling
+            // (Issue143), while standard Specctra nests it inside.
             let mut keepouts = Vec::new();
-            for kind in ["keepout", "via_keepout"] {
-                for ko in image_node.children(kind) {
-                    let Some(shape_node) = ko
-                        .child("polygon")
-                        .or_else(|| ko.child("rect"))
-                        .or_else(|| ko.child("circle"))
-                        .or_else(|| ko.child("path"))
-                    else {
-                        continue;
-                    };
-                    let layer = shape_node.arg().and_then(&layer_no);
-                    let corners = keepout_corners(shape_node, &scale);
-                    if corners.len() < 3 {
-                        continue;
-                    }
-                    keepouts.push(ImageKeepout {
-                        area: crate::geometry::planar::PolygonShape::new(corners),
-                        layer,
-                        via_only: kind == "via_keepout",
-                    });
+            let image_items = image_node.as_list().unwrap_or(&[]);
+            for (idx, ko) in image_items.iter().enumerate() {
+                let Some(ko_kind) = ko.name() else {
+                    continue;
+                };
+                let via_only = ko_kind.eq_ignore_ascii_case("via_keepout");
+                if !via_only && !ko_kind.eq_ignore_ascii_case("keepout") {
+                    continue;
                 }
+                let Some(shape_node) = ko
+                    .child("polygon")
+                    .or_else(|| ko.child("rect"))
+                    .or_else(|| ko.child("circle"))
+                    .or_else(|| ko.child("circ"))
+                    .or_else(|| ko.child("path"))
+                else {
+                    continue;
+                };
+                let layer = shape_node.arg().and_then(&layer_no);
+                let corners = keepout_corners(shape_node, &scale);
+                if corners.len() < 3 {
+                    continue;
+                }
+                let cc_name = ko
+                    .child("clearance_class")
+                    .and_then(|c| c.arg())
+                    .or_else(|| {
+                        image_items
+                            .get(idx + 1)
+                            .filter(|n| {
+                                n.name()
+                                    .is_some_and(|x| x.eq_ignore_ascii_case("clearance_class"))
+                            })
+                            .and_then(|n| n.arg())
+                    });
+                let clearance_class = cc_name
+                    .map(|n| resolve_clearance_class(&mut rules, n))
+                    .unwrap_or_else(BoardRules::default_clearance_class);
+                keepouts.push(ImageKeepout {
+                    area: crate::geometry::planar::PolygonShape::new(corners),
+                    layer,
+                    via_only,
+                    clearance_class,
+                });
             }
             images.insert(name.to_string(), Image { pins, keepouts });
         }
@@ -740,6 +790,7 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 .child("polygon")
                 .or_else(|| node.child("rect"))
                 .or_else(|| node.child("circle"))
+                .or_else(|| node.child("circ"))
                 .or_else(|| node.child("path"))
             else {
                 continue;
@@ -786,15 +837,23 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     }
 
     // boundary: keepout strips along the outline edges on all layers so
-    // routes stay inside the board (Java: BoardOutline tree shapes)
-    if let Some(boundary) = structure.child("boundary") {
-        if let Some(path) = boundary.child("path") {
+    // routes stay inside the board (Java: BoardOutline tree shapes).
+    // EVERY (boundary ...) node is read — a design may declare separate
+    // pcb- and signal-boundaries — and a boundary may name its clearance
+    // class ((clearance_class ...)); polygons read like paths.
+    for boundary in structure.children("boundary") {
+        let boundary_cl = boundary
+            .child("clearance_class")
+            .and_then(|c| c.arg())
+            .map(|n| resolve_clearance_class(&mut board.rules, n))
+            .unwrap_or_else(BoardRules::default_clearance_class);
+        if let Some(path) = boundary.child("path").or_else(|| boundary.child("polygon")) {
             let coords: Vec<f64> = path.args().skip(2).filter_map(|a| a.parse().ok()).collect();
             let corners: Vec<IntPoint> = coords
                 .chunks_exact(2)
                 .map(|c| IntPoint::new(scale(c[0]), scale(c[1])))
                 .collect();
-            insert_boundary_keepouts(&mut board, &corners, default_clearance / 2);
+            insert_boundary_keepouts(&mut board, &corners, default_clearance / 2, boundary_cl);
         } else if let Some(rect) = boundary.child("rect") {
             // (boundary (rect <layer> x1 y1 x2 y2)): a rectangular outline.
             // Previously only `path` boundaries produced keepouts, so
@@ -810,7 +869,7 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                     IntPoint::new(scale(xmax), scale(ymax)),
                     IntPoint::new(scale(xmin), scale(ymax)),
                 ];
-                insert_boundary_keepouts(&mut board, &corners, default_clearance / 2);
+                insert_boundary_keepouts(&mut board, &corners, default_clearance / 2, boundary_cl);
             }
         }
     }
@@ -1005,7 +1064,7 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                     };
                     for layer in layers {
                         let mut item = crate::board::Item::new_obstacle_area(
-                            crate::board::ItemBase::new(0, Vec::new(), 1),
+                            crate::board::ItemBase::new(0, Vec::new(), ko.clearance_class),
                             area.clone(),
                             layer,
                             "",
@@ -1168,7 +1227,12 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
 /// Inserts thin keepout strips along the closed outline given by
 /// `corners` on every layer, so routes cannot cross the board boundary
 /// (Java: the tree shapes of `BoardOutline`).
-fn insert_boundary_keepouts(board: &mut BasicBoard, corners: &[IntPoint], half_width: i32) {
+fn insert_boundary_keepouts(
+    board: &mut BasicBoard,
+    corners: &[IntPoint],
+    half_width: i32,
+    clearance_class: usize,
+) {
     use crate::geometry::planar::{PolygonShape, PolylineArea};
     if corners.len() < 2 {
         return;
@@ -1200,7 +1264,14 @@ fn insert_boundary_keepouts(board: &mut BasicBoard, corners: &[IntPoint], half_w
         }
         let area = PolylineArea::new(strip, vec![]);
         for layer in 0..layer_count {
-            board.insert_area(area.clone(), layer, "boundary", vec![], 1, false);
+            board.insert_area(
+                area.clone(),
+                layer,
+                "boundary",
+                vec![],
+                clearance_class,
+                false,
+            );
         }
     }
 }
@@ -1234,7 +1305,9 @@ fn keepout_corners(
             Point::Int(IntPoint::new(x1, y1)),
             Point::Int(IntPoint::new(x0, y1)),
         ]
-    } else if kind.eq_ignore_ascii_case("circle") && !nums.is_empty() {
+    } else if (kind.eq_ignore_ascii_case("circle") || kind.eq_ignore_ascii_case("circ"))
+        && !nums.is_empty()
+    {
         let cx = nums.get(1).copied().unwrap_or(0.0);
         let cy = nums.get(2).copied().unwrap_or(0.0);
         let circle = Circle::new(
@@ -1797,6 +1870,41 @@ mod tests {
         assert!(protected_traces.iter().all(|(_, i)| i.base.net_count() > 0));
         // fixed traces are not routable (protected from ripup)
         assert!(protected_traces.iter().all(|(_, i)| !i.is_routable()));
+    }
+
+    #[test]
+    fn imports_circ_keepouts_with_trailing_clearance_class() {
+        use crate::board::ItemKind;
+        // Issue143's USB-MINIB images declare their connector keepouts as
+        // Eagle-dialect (keepout (circ signal ...)) with the
+        // (clearance_class boundary) as the FOLLOWING sibling
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let path = format!("{root}/fixtures/Issue143-rpi_splitter.dsn");
+        let content = std::fs::read_to_string(&path).expect("fixture missing from checkout");
+        let board = import_dsn(&content).expect("import failed");
+        let boundary_class = board
+            .rules
+            .clearance_matrix
+            .get_no("boundary")
+            .expect("boundary clearance class");
+        // 2 keepouts per USB-MINIB placement x 2 placements, on every layer
+        let keepouts: Vec<_> = board
+            .items()
+            .filter(|(_, it)| {
+                matches!(&it.kind, ItemKind::ObstacleArea(a) if !a.is_conduction && a.name != "boundary")
+            })
+            .collect();
+        assert!(
+            keepouts.len() >= 4,
+            "connector circ keepouts not instantiated (got {})",
+            keepouts.len()
+        );
+        assert!(
+            keepouts
+                .iter()
+                .all(|(_, it)| it.base.clearance_class == boundary_class),
+            "keepouts must carry their named clearance class"
+        );
     }
 
     #[test]
