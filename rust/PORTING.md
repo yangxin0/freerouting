@@ -167,7 +167,7 @@ Open, with rationale:
   default (vs Java disabled) are deliberate deviations, not alignment.
 - **Multithreaded board clones** — parity with Java (`deepCopy` per task).
 
-Full test count: 225 passing + 1 `#[ignore]`d (`j2_routes_fully_like_java`, the
+Full test count: 227 passing + 1 `#[ignore]`d (`j2_routes_fully_like_java`, the
 codified maze-completion gap — finding #6). `cargo fmt --check` and
 `cargo clippy -D warnings` both pass. No fleet completion regression across J2,
 pic_programmer, wavefolder, display, 8088sbc, ecc83.
@@ -188,30 +188,49 @@ fixed" was an over-claim. Fixed in this round:
   metric counts incomplete CONNECTIONS (ratsnest airlines), not incomplete
   nets, matching Java's RouterCounters.
 
+A follow-up audit found the first remediation was PARTIAL; "all findings
+fixed" was an over-claim. A third round then closed four of the five
+remaining items:
+
+- **Component/image keepouts imported (#1).** Keepouts declared inside an
+  `(image ...)` are now instantiated as obstacle areas at each placement,
+  transformed like the pins. DRC excludes keepout-vs-pin (Java
+  `ObstacleArea.is_obstacle` is false for a Pin), so a shield keepout drawn
+  over its own pad is not a false violation.
+- **Net-class propagation (#2, Part A).** A named class that carries a
+  clearance rule always gets its own clearance-matrix class and `set_all`
+  across item types — even when its value equals the board default — so its
+  SMD pads use the class clearance; the default net class keeps smd pads on
+  the tight smd class for plain nets. Pins/planes resolve from
+  `default_item_clearance_classes`. Small grammar wins: `smd-smd` hyphen
+  spelling and `smd_to_turn_gap` are now handled.
+- **DRC same-net / conduction parity (#5).** Same-net drill pairs are checked
+  as obstacles (Java `Via`/`Pin.is_obstacle`), exempting the connection case
+  (an overlapping via-on-pad); conduction areas flagged `isObstacle` in KiCad
+  JSON now enforce clearance to foreign copper.
+- **Optimizer single-thread + partial progress (#4).** Acceptance is now a
+  whole-board gate inside `optimize_nets_pass` (used by both the single- and
+  multi-threaded paths): fewer incomplete airlines, then vias, then length,
+  accepting partial progress (Java `ItemRouteResult`). The `broke_a_net`
+  guard is retained.
+
 KNOWN OPEN GAPS (surfaced, not yet fixed) — do NOT claim these are done:
 
 1. **J2 routing-quality gap (finding #6).** Current Java Freerouting routes
    J2 to 0 unconnected in ~0.7 s with no violations; the Rust maze reaches
-   only 23/24. The prior remediation MASKED this by relaxing the J2 tests
-   with a false "unroutable through a foreign pin" rationale. The correct
-   target is codified as the ignored test `j2_routes_fully_like_java`; the
-   two J2 pipeline tests now document the gap instead of asserting it is
-   correct. This is a real maze-completion gap.
-2. **Component/image keepouts not imported (finding #1).** The DSN importer
-   reads only `pin` nodes from `(image ...)`; placed keepouts inside images
-   are dropped, so DRC cannot see trace-to-keepout violations Java reports.
-3. **Net-class propagation gaps (finding #2).** A class whose clearance
-   equals the board default is aliased to class 1, so its SMD pins keep the
-   tighter smd class instead of the class value Java's set_all applies; and
-   the named-rule grammar (clearance_class, via_rule, layer_rule,
-   class_class, item-specific pin/wire/via classes) is still unhandled.
-4. **DRC same-net / conduction-area parity (finding #5).** All same-net
-   pairs are skipped; Java keeps some same-net via/pin overlaps as obstacles
-   depending on attach_allowed/drillable. Conduction areas (incl. the
-   obstacle-flagged case) are still skipped.
-5. **Optimizer single-thread path (finding #4).** `--threads 1` bypasses the
-   global-acceptance wrapper, and the local gate still requires full target
-   completion (rejecting useful partial progress).
+   only 23/24. Diagnosis: not budget (dies at ~10 expansions; 5M no help) and
+   not a hard blockage (each net routes fine alone) — an algorithmic
+   space-efficiency deficit in push-and-shove / room-door generation for
+   dense fine-pitch pin fields (Java packs 2 more escapes into the J2↔U1
+   corridor). Codified as the ignored `j2_routes_fully_like_java` test; the
+   two J2 pipeline tests document the gap rather than assert it is correct.
+   This is a real, deep maze-completion gap, not a quick fix.
+2. **Named-rule clearance grammar (finding #2, Part B).** The general
+   named-clearance-class system — `(clearance_class NAME)`/`(via_rule NAME)`
+   net-class references, per-pin `(clearance_class …)` overrides in
+   placement, class-scoped `layer_rule`, and arbitrary `NAME1_NAME2` /
+   `class_class` clearance pairs — is a large feature (a named class + via-rule
+   registry) and remains unported. Part A above is the natural foundation.
 
 ## OPEN ITEMS (reconciled 2026-07-15, iter 190)
 

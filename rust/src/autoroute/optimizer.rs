@@ -174,6 +174,11 @@ pub fn optimize_nets_pass(
     // board) refreshes it. This keeps the board-wide scan roughly once per
     // acceptance rather than once per net.
     let mut complete_before: Option<Vec<bool>> = None;
+    // Whole-board acceptance baseline (Java `ItemRouteResult`): incomplete
+    // CONNECTIONS (ratsnest airlines), then vias, then trace length. Cached
+    // across net-steps with the same lifecycle as `complete_before` — the
+    // `net_no` field is not part of the comparison key, so it is safe to reuse.
+    let mut global_before: Option<NetRouteResult> = None;
     for net_no in net_nos {
         if time_limit.is_some_and(|t| t.limit_exceeded()) {
             break;
@@ -183,6 +188,9 @@ pub fn optimize_nets_pass(
         }
         if complete_before.is_none() {
             complete_before = Some(complete_net_set(board));
+        }
+        if global_before.is_none() {
+            global_before = Some(global_route_result(board, net_no));
         }
         let was_complete = board.net_is_completely_connected(net_no);
         let (vias_before, len_before) = net_route_cost(board, net_no);
@@ -218,34 +226,47 @@ pub fn optimize_nets_pass(
             let penalty = request.via_cost.max(20_000.0) * 2.0;
             let _ = route_net_with_ripup(board, net_no, &net_request, penalty);
         }
-        let complete_now = board.net_is_completely_connected(net_no);
-        let (vias_after, len_after) = net_route_cost(board, net_no);
-        let local_keep = complete_now
-            && net_violations(board, net_no) <= violations_before
-            && (!was_complete
-                || vias_after < vias_before
-                || (vias_after == vias_before && len_after + min_gain < len_before));
-        // Board-wide gate (Java `ItemRouteResult.improved`): never accept a
-        // reroute that breaks a previously-complete net, even if the target net
-        // itself improved. Checking the completeness SET (not just a count)
-        // catches the one-for-one swap where the target completes while a victim
-        // breaks. Only scanned when the local condition already holds, so
-        // rejects stay cheap; the scan early-exits on the first regression.
+        // Whole-board acceptance (Java `ItemRouteResult.improved`): fewer
+        // incomplete airlines, else fewer vias, else shorter traces. Partial
+        // progress — the target's airline count drops without the net fully
+        // completing — lowers the global airline count and IS accepted, unlike
+        // the old gate that required `complete_now`. A `min_gain` margin on the
+        // length-only tiebreak damps oscillation (Rust anti-churn guard). This
+        // gate is global, so the threads==1 path gets the same criterion as the
+        // multithreaded wrapper without a separate code path.
+        let global_after = global_route_result(board, net_no);
+        let gb = global_before.as_ref().unwrap();
+        use std::cmp::Ordering;
+        let global_improved = match global_after.incomplete_after.cmp(&gb.incomplete_after) {
+            Ordering::Less => true,
+            Ordering::Greater => false,
+            Ordering::Equal => match global_after.vias_after.cmp(&gb.vias_after) {
+                Ordering::Less => true,
+                Ordering::Greater => false,
+                Ordering::Equal => global_after.len_after + min_gain < gb.len_after,
+            },
+        };
+        let candidate = global_improved && net_violations(board, net_no) <= violations_before;
+        // Retained guard (stricter than Java's raw count): never accept a
+        // reroute that breaks a previously-complete net, even if the global
+        // airline count still nets out lower — catches the symmetric one-for-one
+        // swap where the target completes while a victim breaks.
         let before = complete_before.as_ref().unwrap();
-        let broke_a_net = local_keep
+        let broke_a_net = candidate
             && (1..=board.rules.nets.max_net_no()).any(|m| {
                 m != net_no && before[m as usize] && !board.net_is_completely_connected(m)
             });
-        let keep = local_keep && !broke_a_net;
+        let keep = candidate && !broke_a_net;
         if keep {
             board.pop_snapshot();
-            // board changed; refresh the completeness baseline
+            // board changed; refresh both baselines
             complete_before = Some(complete_net_set(board));
+            global_before = Some(global_route_result(board, net_no));
             improved += 1;
             consecutive_failures = 0;
         } else {
             board.undo();
-            // board restored to its pre-step state; cached set still valid
+            // board restored to its pre-step state; cached baselines still valid
             consecutive_failures += 1;
         }
     }

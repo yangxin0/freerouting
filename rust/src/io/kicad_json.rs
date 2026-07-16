@@ -348,12 +348,10 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
                 false,
             );
             let net = net_no_by_name(&board.rules, &pad.str_or("netName", ""));
-            // a pad on a high-clearance net uses that net's clearance class, not
-            // a hardcoded default (finding #3); through-hole pads fall back to
-            // the default class, smd pads to the smd class.
-            let pad_cl = board
-                .rules
-                .item_clearance_class_or(net.unwrap_or(0), if drillable { 1 } else { 2 });
+            // a pad uses its net's clearance class (finding #3). KiCad JSON has
+            // no separate smd clearance class (matrix class 2 is the first net
+            // class, not an smd class), so resolve straight from the net class.
+            let pad_cl = board.rules.get_trace_clearance_class(net.unwrap_or(0));
             let mut base = ItemBase::new(
                 component_no,
                 net.map(|n| vec![n]).unwrap_or_default(),
@@ -382,7 +380,7 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
         }
         let name = zone.str_or("netName", "");
         let net = net_no_by_name(&board.rules, &name);
-        let zone_cl = board.rules.item_clearance_class_or(net.unwrap_or(0), 1);
+        let zone_cl = board.rules.get_trace_clearance_class(net.unwrap_or(0));
         let area = PolylineArea::new(PolygonShape::new(corners), Vec::new());
         let id = board.insert_area(
             area,
@@ -393,6 +391,11 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
             // with a net it is a connectable pour; without, a keepout
             net.is_some(),
         );
+        // a conduction pour flagged obstacle in the JSON also enforces
+        // clearance against foreign-net copper (Java ConductionArea.is_obstacle)
+        if net.is_some() && zone.get("isObstacle") == Some(&Json::Bool(true)) {
+            board.set_area_is_obstacle(id, true);
+        }
         board.set_fixed_state(id, FixedState::UserFixed);
     }
 

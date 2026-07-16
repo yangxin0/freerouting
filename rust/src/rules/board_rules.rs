@@ -100,20 +100,21 @@ impl BoardRules {
             .get_trace_clearance_class()
     }
 
-    /// The clearance class an item (pin, via, plane) of `net_no` should use:
-    /// the net's trace clearance class when that class carries an explicit,
-    /// non-default clearance rule, otherwise `base` (e.g. the smd class for
-    /// smd pads). Mirrors Java's `NetClass.default_item_clearance_classes`
-    /// being `set_all(class_no)` for classed nets while leaving plain nets at
-    /// their per-item defaults, so a high-clearance net is never approached at
-    /// default/smd spacing through its non-trace items.
-    pub fn item_clearance_class_or(&self, net_no: i32, base: usize) -> usize {
-        let net_cl = self.get_trace_clearance_class(net_no);
-        if net_cl == Self::default_clearance_class() {
-            base
-        } else {
-            net_cl
-        }
+    /// The clearance class an item of the given `ItemClass` (Pin, Via, Smd,
+    /// Area, Trace) belonging to `net_no` should use, read from the net class's
+    /// `default_item_clearance_classes` (Java `NetClass.get_item_clearance_...`
+    /// via `Network.insert_component`/`insert_...`). Unknown nets fall back to
+    /// the default net class (index 0).
+    pub fn item_clearance_class_for(&self, net_no: i32, item_class: ItemClass) -> usize {
+        let class_idx = self
+            .nets
+            .get_by_no(net_no)
+            .map(|n| n.get_class())
+            .unwrap_or(0);
+        self.net_classes
+            .get(class_idx)
+            .default_item_clearance_classes
+            .get(item_class)
     }
 
     /// Ensures net class `class_idx` requires clearance `value`: gives it a

@@ -120,6 +120,12 @@ pub struct ObstacleAreaItem {
     /// A via keepout (DSN `(via_keepout ...)`, Java `ViaObstacleArea`):
     /// blocks via placement but not traces.
     pub via_only: bool,
+    /// For a conduction area (`is_conduction`): whether it also acts as a
+    /// clearance obstacle to foreign-net copper (Java `ConductionArea`'s
+    /// `is_obstacle` flag). Only KiCad JSON carries this; DSN planes are
+    /// never obstacles, matching Java. Meaningless (and ignored) for keepouts,
+    /// which are always obstacles via the general path.
+    pub is_obstacle: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -348,6 +354,7 @@ impl Item {
                 name: name.into(),
                 is_conduction,
                 via_only: false,
+                is_obstacle: false,
             }),
             cached_tile_shapes: std::sync::OnceLock::new(),
             cached_bounding_box: std::sync::OnceLock::new(),

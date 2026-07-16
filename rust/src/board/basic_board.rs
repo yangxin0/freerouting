@@ -948,6 +948,16 @@ impl BasicBoard {
         }
     }
 
+    /// Marks a conduction area as also being a clearance obstacle to
+    /// foreign-net copper (Java `ConductionArea.is_obstacle`).
+    pub fn set_area_is_obstacle(&mut self, id: ItemId, is_obstacle: bool) {
+        if let Some(item) = self.item_list.get_mut(&id) {
+            if let ItemKind::ObstacleArea(a) = &mut item.kind {
+                a.is_obstacle = is_obstacle;
+            }
+        }
+    }
+
     /// Splits a trace of `net_no` on `layer` whose center line passes
     /// through `point` (not at an endpoint) into two traces meeting there,
     /// so that contacts at the junction register

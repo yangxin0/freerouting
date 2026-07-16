@@ -39,6 +39,24 @@ struct ImagePin {
     dy: f64,
 }
 
+/// A keepout declared INSIDE an `(image ...)` footprint, in image-relative
+/// (board-unit) coordinates. Instantiated as an obstacle area at every
+/// placement of the image, transformed like the pins (Java `Package.Keepout`).
+struct ImageKeepout {
+    /// relative shape, already scaled to board units
+    area: crate::geometry::planar::PolygonShape,
+    /// a named layer, or `None` for signal/all (every layer)
+    layer: Option<usize>,
+    /// a `(via_keepout ...)`: blocks vias only
+    via_only: bool,
+}
+
+/// A parsed `(image ...)` footprint: its pins and its keepouts.
+struct Image {
+    pins: Vec<ImagePin>,
+    keepouts: Vec<ImageKeepout>,
+}
+
 /// Imports a DSN file into a board: layers, default rules, padstacks,
 /// component pins (as drill items carrying their nets) and nets.
 pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
@@ -130,6 +148,9 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     let mut clearance_matrix =
         ClearanceMatrix::new(layer_structure.clone(), &["null", "default", "smd"]);
     clearance_matrix.set_default_value(default_clearance);
+    // `(clearance V (type smd_to_turn_gap))` sets the pin-edge-to-turn distance;
+    // captured here and applied after the rules are built.
+    let mut pin_edge_to_turn_dist: Option<f64> = None;
     if let Some(rule) = structure.child("rule") {
         // both `(clearance ...)` and its alias `(clear ...)`
         let typed = rule.children("clearance").chain(rule.children("clear"));
@@ -140,7 +161,13 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
             let Some(kind) = clearance_node.child("type").and_then(|t| t.arg()) else {
                 continue; // the untyped default, already applied
             };
-            let pair = match kind.to_ascii_lowercase().as_str() {
+            // KiCad emits hyphen spellings (`smd-smd`); normalize to underscore.
+            let kind = kind.to_ascii_lowercase().replace('-', "_");
+            if kind == "smd_to_turn_gap" {
+                pin_edge_to_turn_dist = Some(value as f64);
+                continue;
+            }
+            let pair = match kind.as_str() {
                 "smd_smd" => Some((2, 2)),
                 "default_smd" | "smd_default" => Some((1, 2)),
                 _ => None,
@@ -152,13 +179,26 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
         }
     }
     let mut rules = BoardRules::new(layer_structure.clone(), clearance_matrix);
-    rules.get_default_net_class();
+    let default_nc = rules.get_default_net_class();
+    // The default net class keeps SMD pads on the tight smd class (2), so plain
+    // (unclassed) nets' smd pads stay at the smd clearance. Classed nets that
+    // carry a clearance rule override this via set_all below (Java: the default
+    // net class's Smd item class is the smd clearance class; a classed net's is
+    // its own). append_net_class inherits these, so this must run first.
+    rules
+        .net_classes
+        .get_mut(default_nc)
+        .default_item_clearance_classes
+        .set(crate::rules::ItemClass::Smd, 2);
+    if let Some(dist) = pin_edge_to_turn_dist {
+        rules.set_pin_edge_to_turn_dist(dist);
+    }
     rules.set_default_trace_half_widths((default_width / 2).max(1));
 
     // library: padstacks and images
     let mut padstacks = Padstacks::new(layer_count);
     let mut padstack_nos: HashMap<String, usize> = HashMap::new();
-    let mut images: HashMap<String, Vec<ImagePin>> = HashMap::new();
+    let mut images: HashMap<String, Image> = HashMap::new();
     for library in pcb.children("library") {
         for padstack_node in library.children("padstack") {
             let name = padstack_node
@@ -205,7 +245,33 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                     dy,
                 });
             }
-            images.insert(name.to_string(), pins);
+            // keepouts declared inside the footprint (Java Package.read_scope);
+            // place_keepout is placement-only and ignored by routing, like the
+            // structure-level place_keepout the importer already skips.
+            let mut keepouts = Vec::new();
+            for kind in ["keepout", "via_keepout"] {
+                for ko in image_node.children(kind) {
+                    let Some(shape_node) = ko
+                        .child("polygon")
+                        .or_else(|| ko.child("rect"))
+                        .or_else(|| ko.child("circle"))
+                        .or_else(|| ko.child("path"))
+                    else {
+                        continue;
+                    };
+                    let layer = shape_node.arg().and_then(&layer_no);
+                    let corners = keepout_corners(shape_node, &scale);
+                    if corners.len() < 3 {
+                        continue;
+                    }
+                    keepouts.push(ImageKeepout {
+                        area: crate::geometry::planar::PolygonShape::new(corners),
+                        layer,
+                        via_only: kind == "via_keepout",
+                    });
+                }
+            }
+            images.insert(name.to_string(), Image { pins, keepouts });
         }
     }
 
@@ -237,8 +303,13 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
             .or_else(|| rule.child("clear"))
             .and_then(|c| c.arg_f64())
     };
+    // Value-keyed dedup among classes that carry a clearance rule: two classes
+    // with the same clearance value share one matrix class (identical to Java's
+    // per-name classes since the values are equal). NOT seeded with the default
+    // value — a named class whose clearance equals the board default still gets
+    // its own matrix class so set_all can point its pins at the class value
+    // (2002) rather than the tighter smd class (500), matching Java.
     let mut class_for_clearance: HashMap<i32, usize> = HashMap::new();
-    class_for_clearance.insert(default_clearance, BoardRules::default_clearance_class());
     for network in pcb.children("network") {
         for class_node in network.children("class") {
             let mut class_args = class_node.args();
@@ -246,6 +317,7 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 continue;
             };
             let member_nets: Vec<&str> = class_args.collect();
+            let is_default_descriptor = member_nets.is_empty();
             let half_width = class_node
                 .child("rule")
                 .and_then(|r| r.child("width"))
@@ -259,7 +331,13 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 .map(&scale);
             let clearance_class_idx = match class_clearance {
                 Some(c) => {
-                    if let Some(&idx) = class_for_clearance.get(&c) {
+                    if is_default_descriptor && c == default_clearance {
+                        // the (class ... (rule (clearance <default>))) descriptor
+                        // for the default net class: keep the shared default
+                        // class and leave the default net class's item classes
+                        // (so plain-net smd pads stay tight); no set_all below.
+                        BoardRules::default_clearance_class()
+                    } else if let Some(&idx) = class_for_clearance.get(&c) {
                         idx
                     } else {
                         // create a dynamic matrix class holding this spacing to
@@ -303,12 +381,13 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 .and_then(|c| c.child("use_via"))
                 .and_then(|u| u.arg())
                 .and_then(|name| padstack_nos.get(name).copied());
-            // the class listing no nets describes the default rules
-            let class_idx = if member_nets.is_empty() {
+            // the class listing no nets describes the default rules; a named
+            // class is appended inheriting the default net class's item classes
+            // (so an smd pad on a rule-less class stays on the smd class).
+            let class_idx = if is_default_descriptor {
                 rules.get_default_net_class()
             } else {
-                let ls = rules.layer_structure().clone();
-                rules.net_classes.append(class_name, &ls, false)
+                rules.append_net_class(class_name)
             };
             {
                 let class = rules.net_classes.get_mut(class_idx);
@@ -317,10 +396,12 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 }
                 class.set_trace_clearance_class(clearance_class_idx);
                 // Java (Network.add_clearance_rule): default_item_clearance_classes
-                // .set_all(class_no) — pins, vias and areas of a classed net use
-                // its clearance class too, not just traces. Leave plain nets at
-                // their per-item defaults (e.g. the smd class for smd pads).
-                if clearance_class_idx != BoardRules::default_clearance_class() {
+                // .set_all(class_no) — pins (incl. smd), vias and areas of a
+                // named class that carries a clearance rule use its clearance
+                // class too, not just traces, EVEN when the value equals the
+                // board default. Never applied to the default net class (the
+                // folded default descriptor), which must keep smd pads tight.
+                if !is_default_descriptor && class_clearance.is_some() {
                     class
                         .default_item_clearance_classes
                         .set_all(clearance_class_idx);
@@ -399,11 +480,13 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
             crate::geometry::planar::PolygonShape::new(corners),
             Vec::new(),
         );
-        // the plane uses its net's clearance class, not the hardcoded default,
-        // so a high-clearance net's copper pour keeps its spacing (finding #4)
-        let plane_cl = board
-            .rules
-            .item_clearance_class_or(net_nos.first().copied().unwrap_or(0), 1);
+        // the plane uses its net class's Area item clearance class (Java
+        // Network insert plane -> get(Area)), so a high-clearance net's copper
+        // pour keeps its spacing (#2/#4)
+        let plane_cl = board.rules.item_clearance_class_for(
+            net_nos.first().copied().unwrap_or(0),
+            crate::rules::ItemClass::Area,
+        );
         board.insert_area(area, layer, net_name, net_nos, plane_cl, true);
     }
 
@@ -501,9 +584,10 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     for placement in pcb.children("placement") {
         for component in placement.children("component") {
             let image_name = component.arg().unwrap_or_default();
-            let Some(image_pins) = images.get(image_name) else {
+            let Some(image) = images.get(image_name) else {
                 continue;
             };
+            let image_pins = &image.pins;
             for place in component.children("place") {
                 let args: Vec<&str> = place.args().collect();
                 if args.len() < 4 {
@@ -598,21 +682,26 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                     let center = IntPoint::new(scale(x + dx), scale(y + dy));
                     let pin_ref = format!("{refdes}-{}", pin.pin_name);
                     let net_nos = pin_nets.get(&pin_ref).map(|n| vec![*n]).unwrap_or_default();
-                    let (attach_allowed, base_class) = board
+                    let (attach_allowed, smd) = board
                         .padstacks
                         .get_by_no(padstack_no)
-                        .map(|p| {
-                            // single-layer padstacks are SMD pads and use
-                            // the (usually tighter) smd clearance class
-                            let smd = p.from_layer() == p.to_layer();
-                            (p.attach_allowed, if smd { 2 } else { 1 })
-                        })
-                        .unwrap_or((false, 1));
-                    // a pin on a high-clearance net uses that net's clearance
-                    // class, not the hardcoded smd/default (finding #4)
-                    let clearance_class = board
-                        .rules
-                        .item_clearance_class_or(net_nos.first().copied().unwrap_or(0), base_class);
+                        // single-layer padstacks are SMD pads
+                        .map(|p| (p.attach_allowed, p.from_layer() == p.to_layer()))
+                        .unwrap_or((false, false));
+                    // resolve the pin's clearance class from its net class's
+                    // per-item-type defaults (Java Network.insert_component:
+                    // smd pad -> Smd item class, through-pin -> Pin), so a
+                    // classed net's smd pad uses the class clearance while a
+                    // plain net's smd pad stays on the tight smd class (#2)
+                    let item_class = if smd {
+                        crate::rules::ItemClass::Smd
+                    } else {
+                        crate::rules::ItemClass::Pin
+                    };
+                    let clearance_class = board.rules.item_clearance_class_for(
+                        net_nos.first().copied().unwrap_or(0),
+                        item_class,
+                    );
                     let id = board.insert_via(
                         padstack_no,
                         center,
@@ -623,6 +712,48 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                     // pins belong to their component: protected from ripup
                     // and not written to session files
                     board.set_component_no(id, 1);
+                }
+                // component keepouts (finding #1): instantiate each image
+                // keepout at this placement, transformed exactly like the pins
+                // (Java Package.Keepout via ObstacleArea.get_area).
+                for ko in &image.keepouts {
+                    use crate::geometry::planar::{FloatPoint, IntVector, PolylineArea};
+                    let origin = IntPoint::new(0, 0);
+                    let mut area = PolylineArea::new(ko.area.clone(), Vec::new());
+                    // default flip style mirrors BEFORE the rotation
+                    if !on_front && !rotate_first {
+                        area = area.mirror_vertical(origin);
+                    }
+                    if quarter != 0 {
+                        area = area.turn_90_degree(quarter, origin);
+                    } else if rotation != 0.0 {
+                        area = area.rotate_approx(rotation, FloatPoint::new(0.0, 0.0));
+                    }
+                    if !on_front && rotate_first {
+                        area = area.mirror_vertical(origin);
+                    }
+                    area = area.translate_by(IntVector::new(scale(x), scale(y)));
+                    // back-side keepout on a named layer flips to the mirror layer
+                    let layers: Vec<usize> = match ko.layer {
+                        Some(l) => vec![if on_front { l } else { layer_count - 1 - l }],
+                        None => (0..layer_count).collect(),
+                    };
+                    for layer in layers {
+                        let mut item = crate::board::Item::new_obstacle_area(
+                            crate::board::ItemBase::new(0, Vec::new(), 1),
+                            area.clone(),
+                            layer,
+                            "",
+                            false,
+                        );
+                        if ko.via_only {
+                            if let crate::board::ItemKind::ObstacleArea(a) = &mut item.kind {
+                                a.via_only = true;
+                            }
+                        }
+                        let id = board.insert_item(item);
+                        board.set_fixed_state(id, crate::board::FixedState::SystemFixed);
+                    }
                 }
             }
         }
@@ -940,8 +1071,19 @@ mod tests {
             8000,
             "hv clearance class value"
         );
-        // the sig net (== board default) reuses the default class 1
-        assert_eq!(sig_cc, BoardRules::default_clearance_class());
+        // the sig net class carries a clearance rule (value == board default);
+        // per Java it STILL gets its own clearance class (so its pins/smd use
+        // the class, not the tighter smd class), whose value equals the default.
+        assert_ne!(sig_cc, BoardRules::default_clearance_class());
+        assert_ne!(sig_cc, hv_cc);
+        assert_eq!(
+            board
+                .rules
+                .clearance_matrix
+                .get_value(sig_cc, sig_cc, 0, false),
+            2000,
+            "sig clearance class carries the default value"
+        );
         // the pre-routed HV1 wire inherits the hv clearance class, not the default
         let wire_cc = board
             .items()
@@ -1006,6 +1148,102 @@ mod tests {
         assert!(
             boundary_strips > 0,
             "rect boundary must produce confining keepouts"
+        );
+    }
+
+    #[test]
+    fn imports_component_image_keepouts() {
+        // a keepout declared INSIDE an (image ...) is instantiated as an
+        // obstacle area at each placement of that image (finding #1).
+        let dsn = r#"(pcb "ik.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb 0 0 200000 200000))
+    (rule (width 200) (clearance 200))
+  )
+  (placement
+    (component "FP" (place C1 50000 50000 front 0))
+  )
+  (library
+    (image "FP"
+      (pin "Pad" 1 0 0)
+      (keepout "" (polygon F.Cu 0 -3000 -3000 3000 -3000 3000 3000 -3000 3000))
+    )
+    (padstack "Pad" (shape (rect F.Cu -500 -500 500 500)) (attach off))
+  )
+  (network (net "N1" (pins C1-1)))
+)"#;
+        let board = import_dsn(dsn).expect("import");
+        use crate::board::ItemKind;
+        let keepouts = board
+            .items()
+            .filter(|(_, it)| {
+                matches!(&it.kind, ItemKind::ObstacleArea(a) if !a.is_conduction && a.name != "boundary")
+            })
+            .count();
+        assert_eq!(
+            keepouts, 1,
+            "the image keepout must be instantiated at the placement"
+        );
+    }
+
+    #[test]
+    fn classed_net_smd_pad_uses_class_clearance() {
+        // A named class whose clearance equals the board default still gives its
+        // SMD pads the class clearance (Java default_item_clearance_classes.
+        // set_all), while a PLAIN net's SMD pad stays on the tight smd class.
+        let dsn = r#"(pcb "s.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (boundary (rect pcb 0 0 200000 200000))
+    (rule (width 200) (clearance 200) (clearance 50 (type smd_smd)))
+  )
+  (placement
+    (component "SMD" (place C1 50000 50000 front 0))
+    (component "SMD" (place C2 80000 50000 front 0))
+  )
+  (library
+    (image "SMD" (pin "Pad" 1 0 0))
+    (padstack "Pad" (shape (rect F.Cu -500 -500 500 500)) (attach off))
+  )
+  (network
+    (net "CLASSED" (pins C1-1))
+    (net "PLAIN" (pins C2-1))
+    (class hv "CLASSED" (rule (width 200) (clearance 200)))
+  )
+)"#;
+        let board = import_dsn(dsn).expect("import");
+        use crate::board::ItemKind;
+        let pad_cc = |net_name: &str| -> usize {
+            let net = board.rules.nets.get_by_name(net_name)[0].net_number;
+            board
+                .items()
+                .find_map(|(_, it)| match &it.kind {
+                    ItemKind::Via(_) if it.base.component_no != 0 && it.base.contains_net(net) => {
+                        Some(it.base.clearance_class)
+                    }
+                    _ => None,
+                })
+                .expect("pad")
+        };
+        let classed_cc = pad_cc("CLASSED");
+        let plain_cc = pad_cc("PLAIN");
+        let m = &board.rules.clearance_matrix;
+        // plain net's smd pad -> smd class, value 500
+        assert_eq!(
+            m.get_value(plain_cc, plain_cc, 0, false),
+            500,
+            "plain net's smd pad keeps the smd clearance"
+        );
+        // classed net's smd pad -> the class clearance (2000), NOT smd (500)
+        assert_ne!(classed_cc, plain_cc);
+        assert_eq!(
+            m.get_value(classed_cc, classed_cc, 0, false),
+            2000,
+            "classed net's smd pad uses the class clearance"
         );
     }
 

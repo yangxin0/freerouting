@@ -11,6 +11,25 @@ use crate::board::ItemKind;
 /// clearance, never with the board's resolution.
 const DISTANCE_EPS: f64 = 1e-6;
 
+/// A drill item (via or pin — both are `ItemKind::Via` here, as in Java's
+/// `DrillItem` hierarchy).
+fn is_drill(kind: &ItemKind) -> bool {
+    matches!(kind, ItemKind::Via(_))
+}
+
+/// A component pin (Java `Pin`): a drill item owned by a component. Routing
+/// vias have `component_no == 0`; the DSN/KiCad importers tag pins with a
+/// nonzero component. This is the only pin-vs-via proxy in the collapsed model.
+fn is_pin(item: &crate::board::Item) -> bool {
+    is_drill(&item.kind) && item.base.component_no > 0
+}
+
+/// A single-layer (SMD) drill item: Java `DrillItem.drill_allowed()` is
+/// `first_layer() == last_layer()`.
+fn drill_allowed(item: &crate::board::Item, padstacks: &crate::core::Padstacks) -> bool {
+    item.first_layer(padstacks) == item.last_layer(padstacks)
+}
+
 /// One clearance violation between two items
 /// (Java: `ClearanceViolation`/`DrcViolation`).
 #[derive(Debug, Clone)]
@@ -88,18 +107,55 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                 let Some(other) = board.get_item(other_id) else {
                     continue;
                 };
+                // Set for a same-net drill pair that survives to the geometry
+                // check: those are only a violation when the two drills are
+                // SEPARATED (drill breakout), never when they overlap — an
+                // overlap is a connection (a via landing on its own pad).
+                let mut same_net_drill = false;
                 if other.base.shares_net(&item.base) {
-                    continue;
+                    // Same-net: Java `Trace.is_obstacle` is always false for a
+                    // same-net item, so a pair involving a trace or an area is
+                    // never a violation. Only drill-item (via/pin) pairs remain.
+                    if !(is_drill(&item.kind) && is_drill(&other.kind)) {
+                        continue;
+                    }
+                    // Via<->Via and Pin<->Pin are obstacles to each other. The
+                    // Java exception (Via/Pin.is_obstacle): an attach_allowed via
+                    // overlapping a same-net SMD pin (fanout). Rust's router does
+                    // not tag connection vias attach_allowed, so we additionally
+                    // treat any OVERLAP as a connection below (same_net_drill).
+                    let a_pin = is_pin(item);
+                    let b_pin = is_pin(other);
+                    let attach = |it: &crate::board::Item| matches!(&it.kind, ItemKind::Via(v) if v.attach_allowed);
+                    let exempt =
+                        (!a_pin && attach(item) && b_pin && drill_allowed(other, &board.padstacks))
+                            || (!b_pin
+                                && attach(other)
+                                && a_pin
+                                && drill_allowed(item, &board.padstacks));
+                    if exempt {
+                        continue;
+                    }
+                    same_net_drill = true;
                 }
                 let other_obstacle = matches!(&other.kind, ItemKind::ObstacleArea(_));
                 // Two constraint areas do not clear against each other.
                 if item_obstacle && other_obstacle {
                     continue;
                 }
-                // Conduction areas (power planes) are handled by the router's
-                // search tree, not this clearance pass.
+                // Java `ObstacleArea.is_obstacle` is true only for a foreign
+                // Trace or (routing) Via — NOT a component Pin. Since pins are
+                // `Via` in this collapsed model, exclude keepout-vs-pin
+                // explicitly, else a keepout drawn over its component's own pad
+                // (e.g. J2's shield keepouts) reads as a false violation.
+                if (item_obstacle && is_pin(other)) || (other_obstacle && is_pin(item)) {
+                    continue;
+                }
+                // A conduction area (power plane) participates only when it is
+                // also flagged an obstacle (Java `ConductionArea.is_obstacle`);
+                // otherwise the router's search tree owns it, not this pass.
                 if let ItemKind::ObstacleArea(a) = &item.kind {
-                    if a.is_conduction {
+                    if a.is_conduction && !a.is_obstacle {
                         continue;
                     }
                     // via keepouts constrain via placement only
@@ -108,7 +164,7 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                     }
                 }
                 if let ItemKind::ObstacleArea(a) = &other.kind {
-                    if a.is_conduction {
+                    if a.is_conduction && !a.is_obstacle {
                         continue;
                     }
                     if a.via_only && !matches!(item.kind, ItemKind::Via(_)) {
@@ -134,6 +190,12 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                         continue;
                     }
                     let d = shape.euclidean_distance_to(os);
+                    // A same-net drill pair that OVERLAPS (d ~ 0) is a connection
+                    // (via on its pad), not a spacing violation; only a genuinely
+                    // separated same-net drill pair is a breakout.
+                    if same_net_drill && d < 1.0 {
+                        continue;
+                    }
                     // Tolerance guards ONLY against floating-point noise in the
                     // Euclidean distance (matrix values and coordinates are
                     // integers). A relative epsilon is unit-independent; the
