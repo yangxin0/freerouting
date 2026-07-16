@@ -170,7 +170,7 @@ Open, with rationale:
   default (vs Java disabled) are deliberate deviations, not alignment.
 - **Multithreaded board clones** — parity with Java (`deepCopy` per task).
 
-Full test count: 229 passing, 0 ignored (`j2_routes_fully_like_java` passes:
+Full test count: 231 passing, 0 ignored (`j2_routes_fully_like_java` passes:
 J2 routes 24/24). `cargo fmt --check` and `cargo clippy -D warnings` both pass.
 No fleet completion regression across J2, pic_programmer, wavefolder, display,
 8088sbc, ecc83.
@@ -216,12 +216,18 @@ remaining items:
   net-class `(clearance_class NAME)` references, per-pin `(pin N
   (clearance_class NAME))` overrides in placement, and keepout
   `(clearance_class NAME)`. `_same_net` multi-underscore pairs are skipped
-  (as in Java). Verified against the Issue187 fixture (imports clean) plus a
-  synthetic unit test. NOT included (separate, non-clearance features):
-  `(via_rule NAME)` net-class references + standalone via-rule declarations
-  (via SELECTION), and structure `layer_rule` (autoroute preferred-direction
-  and per-layer trace costs). Image-keepout `(clearance_class NAME)` is also
-  still defaulted (structure keepouts are handled).
+  (now stored + applied by the DRC, exceeding Java — see below). Verified
+  against the Issue187 fixture (imports clean) plus synthetic unit tests.
+  Image-keepout `(clearance_class NAME)` is still defaulted (structure keepouts
+  are handled).
+- **Named via-rule registry (was Part B, deferred).** `(via NAME PADSTACK [CL]
+  [attach])` and `(via_rule NAME VIA...)` declarations build named ViaInfos and
+  ViaRules; a net-class `(via_rule NAME)` reference binds the class to the named
+  rule (winning over the `(circuit (use_via ...))` fallback).
+- **Same-net clearance (`*_same_net`).** `(clear V (type A_B_same_net))` is
+  stored by item-class pair and used by the DRC as the required spacing for a
+  same-net drill pair. This EXCEEDS Java, which parses `*_same_net` into a dead
+  clearance class that no item uses, so the rule has no effect there.
 - **DRC same-net / conduction parity (#5).** Same-net drill pairs are checked
   as obstacles (Java `Via`/`Pin.is_obstacle`), exempting the connection case
   (an overlapping via-on-pad); conduction areas flagged `isObstacle` in KiCad
@@ -252,14 +258,13 @@ KNOWN OPEN GAPS (not yet fixed) — do NOT claim these are done:
    fully, but the multi-pass ripup loop is much slower than Java's push-and-
    shove — seconds vs sub-second on a small board. A real optimization target
    (door generation / shove efficiency in dense pin fields), not a bug.
-2. **Named via-rule registry and autoroute `layer_rule` (from finding #2,
-   Part B).** The clearance grammar is now ported (see RESOLVED above), but two
-   adjacent, non-clearance pieces remain: `(via_rule NAME)` net-class
-   references + standalone `(via_rule NAME (via …))` declarations (via
-   selection — Rust still builds via rules only from `(circuit (use_via …))`),
-   and structure/net-class `layer_rule` (autoroute preferred direction and
-   per-layer trace costs, plus per-layer clearance). These are their own
-   features, not clearance-class work.
+2. **Autoroute `layer_rule` (from finding #2, Part B) — router-core, not a
+   grammar port.** `(layer_rule L (active on/off) (preferred_direction …)
+   (…trace_costs …))` needs a per-layer directional cost model and active-layer
+   gating in the maze search. The Rust router has NEITHER (its cost is
+   distance + via-cost + ripup only, and `active_routing_layer` has no
+   consumers). This is router-behavior work that overlaps item 1 (route quality
+   / cost model), not a bounded importer feature; deferred into that track.
 
 ## OPEN ITEMS (reconciled 2026-07-15, iter 190)
 
