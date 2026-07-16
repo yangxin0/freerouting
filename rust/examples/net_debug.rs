@@ -129,8 +129,8 @@ fn main() {
                             let before = pieces.len();
                             let mut next = Vec::new();
                             for piece in pieces {
-                                if piece.shape.intersection(&oshape).dimension() == 2 {
-                                    next.extend(restrain_shape(&piece, &oshape));
+                                if piece.shape.intersection(oshape).dimension() == 2 {
+                                    next.extend(restrain_shape(&piece, oshape));
                                 } else {
                                     next.push(piece);
                                 }

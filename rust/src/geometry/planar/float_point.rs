@@ -80,6 +80,7 @@ impl FloatPoint {
         self.x * other.y - self.y * other.x
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn add(self, other: FloatPoint) -> Self {
         FloatPoint::new(self.x + other.x, self.y + other.y)
     }

@@ -173,7 +173,7 @@ pub fn make_neighbour(
     }
     let intersection = room_tile.intersection_with_simplify(neighbour_shape);
     let dim = intersection.dimension();
-    if dim >= 2 || dim < 0 {
+    if !(0..=1).contains(&dim) {
         return None; // overlaps are handled by completion; disjoint is noise
     }
     let nb_simplex = neighbour_shape.to_simplex();

@@ -73,6 +73,7 @@ struct EntryPoint {
     net_nos: Vec<i32>,
     half_width: i32,
     clearance_class: usize,
+    #[allow(dead_code)]
     trace_line_no: usize,
     /// The trace's polyline line at `trace_line_no`, cached because the
     /// substitute is built after the victim was cut off the board.
@@ -329,14 +330,13 @@ impl ShapeTraceEntries {
                     }
                     match &contact.kind {
                         ItemKind::PolylineTrace(ct) => {
-                            if contact.base.is_shove_fixed()
+                            if (contact.base.is_shove_fixed()
                                 || ct.half_width != trace.half_width
-                                || contact.base.clearance_class != item.base.clearance_class
+                                || contact.base.clearance_class != item.base.clearance_class)
+                                && offset_shape.contains_inside(&end_corner)
                             {
-                                if offset_shape.contains_inside(&end_corner) {
-                                    self.found_obstacle = Some(contact_id);
-                                    return false;
-                                }
+                                self.found_obstacle = Some(contact_id);
+                                return false;
                             }
                         }
                         ItemKind::Via(_) => {

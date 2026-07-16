@@ -38,7 +38,7 @@ pub fn try_shove_via_points(
         .max(0) as f64;
     // enlarge by half the via extent + clearance (+2 tolerance, like
     // Java's empirical diagonal-shove constant)
-    let shove_distance = 0.5 * via_shape.bounding_box().max_width() as f64 + clearance + 2.0;
+    let shove_distance = 0.5 * via_shape.bounding_box().max_width() + clearance + 2.0;
     let center = via_shape.centre_of_gravity().round();
     let offset_box = obstacle_shape.bounding_box().offset(shove_distance);
     let try_count = if extended_check { 4 } else { 1 };
@@ -196,7 +196,7 @@ pub fn shove_vias(
             })
         })
         .collect();
-    let shape_radius = 0.5 * obstacle_shape.bounding_box().min_width() as f64;
+    let shape_radius = 0.5 * obstacle_shape.bounding_box().min_width();
     for via_id in vias {
         let candidates = try_shove_via_points(board, obstacle_shape, layer, via_id, cl_class, true);
         let Some(via) = board.get_item(via_id) else {
@@ -207,7 +207,7 @@ pub fn shove_vias(
             (via_bb.ll.x as f64 + via_bb.ur.x as f64) / 2.0,
             (via_bb.ll.y as f64 + via_bb.ur.y as f64) / 2.0,
         );
-        let max_dist = 0.5 * via_bb.max_width() as f64 + shape_radius;
+        let max_dist = 0.5 * via_bb.max_width() + shape_radius;
         for (i, cand) in candidates.iter().enumerate() {
             let d = via_center.distance(crate::geometry::planar::FloatPoint::new(
                 cand.x as f64,

@@ -85,7 +85,7 @@ fn main() {
         let Some(item) = board.get_item(id) else {
             continue;
         };
-        let shapes: Vec<_> = item.tile_shapes(&board.padstacks).iter().cloned().collect();
+        let shapes: Vec<_> = item.tile_shapes(&board.padstacks).to_vec();
         for (shape, layer) in shapes {
             for other_id in board.overlapping_items(&shape.offset(10_000.0), Some(layer)) {
                 if other_id == id {

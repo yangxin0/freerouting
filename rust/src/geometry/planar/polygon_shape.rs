@@ -69,6 +69,7 @@ impl PolygonShape {
         // rotate so the corner with lowest y (then lowest x) comes first
         let mut start_corner_no = first_corner_no;
         let mut start_corner = curr_corners[start_corner_no].to_float();
+        #[allow(clippy::needless_range_loop)]
         for i in start_corner_no + 1..=last_corner_no {
             let curr = curr_corners[i].to_float();
             if curr.y < start_corner.y || (curr.y == start_corner.y && curr.x < start_corner.x) {

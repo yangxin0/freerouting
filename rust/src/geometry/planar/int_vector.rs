@@ -63,6 +63,7 @@ impl IntVector {
         IntVector::new(self.x, -self.y)
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn add(self, other: IntVector) -> Self {
         IntVector::new(self.x + other.x, self.y + other.y)
     }

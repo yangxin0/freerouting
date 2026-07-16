@@ -324,9 +324,8 @@ pub fn optimize_route_multithreaded_with_strategy(
     // the strategy sequence a HYBRID run cycles through per pass
     let hybrid_list: Vec<BoardUpdateStrategy> = {
         let (optimal, greedy) = (hybrid_ratio.0.max(1), hybrid_ratio.1.max(1));
-        std::iter::repeat(BoardUpdateStrategy::GlobalOptimal)
-            .take(optimal)
-            .chain(std::iter::repeat(BoardUpdateStrategy::Greedy).take(greedy))
+        std::iter::repeat_n(BoardUpdateStrategy::GlobalOptimal, optimal)
+            .chain(std::iter::repeat_n(BoardUpdateStrategy::Greedy, greedy))
             .collect()
     };
     let mut prior_results: std::collections::HashMap<i32, NetRouteResult> =
@@ -427,11 +426,7 @@ pub fn optimize_route_multithreaded_with_strategy(
                     };
                     let mut s = shared.lock().unwrap();
                     s.results.push(result);
-                    if improved
-                        && s.best
-                            .as_ref()
-                            .map_or(true, |(b, _)| result.improved_over(b))
-                    {
+                    if improved && s.best.as_ref().is_none_or(|(b, _)| result.improved_over(b)) {
                         if pass_strategy == BoardUpdateStrategy::Greedy {
                             s.master = clone.clone();
                             s.adopted += 1;

@@ -29,6 +29,7 @@ impl PartialEq for Simplex {
 
 impl Simplex {
     /// Standard implementation of an empty simplex.
+    #[allow(clippy::declare_interior_mutable_const)]
     pub const EMPTY: Simplex = Simplex {
         lines: Vec::new(),
         cached_bbox: std::sync::OnceLock::new(),
@@ -733,7 +734,7 @@ impl Simplex {
         // traffic (~14% of a coldfire profile).
         thread_local! {
             static SCRATCH: std::cell::RefCell<(Vec<Line>, Vec<Option<Side>>)> =
-                std::cell::RefCell::new((Vec::new(), Vec::new()));
+                const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
         }
         SCRATCH.with(|scratch| {
             let mut scratch = scratch.borrow_mut();
@@ -778,14 +779,14 @@ impl Simplex {
                             // on the left of curr_line, curr_line does not
                             // contribute to the shape of the simplex.
                             remove_line = intersection_sides[uind] != Some(Side::OnTheLeft);
-                        } else if intersection_sides[uind] == Some(Side::OnTheLeft) {
-                            if prev_line.direction_determinant_sign(&curr_line) > 0 {
-                                // The half plane of curr_line does not intersect
-                                // the simplex of prev_line and next_line: empty.
-                                new_length = 0;
-                                try_again = false;
-                                break;
-                            }
+                        } else if intersection_sides[uind] == Some(Side::OnTheLeft)
+                            && prev_line.direction_determinant_sign(&curr_line) > 0
+                        {
+                            // The half plane of curr_line does not intersect
+                            // the simplex of prev_line and next_line: empty.
+                            new_length = 0;
+                            try_again = false;
+                            break;
                         }
                     } else {
                         // prev_line and next_line are parallel
@@ -932,7 +933,8 @@ mod tests {
         assert!(s.is_outside(&Point::Int(IntPoint::new(11, 5))));
         assert!(s.contains_float(FloatPoint::new(5.0, 5.0), 0.0));
         assert!(!s.contains_float(FloatPoint::new(-0.5, 5.0), 0.0));
-        assert!(Simplex::EMPTY.is_outside(&Point::Int(IntPoint::new(0, 0))));
+        let empty = Simplex::EMPTY;
+        assert!(empty.is_outside(&Point::Int(IntPoint::new(0, 0))));
     }
 
     #[test]

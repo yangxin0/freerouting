@@ -87,6 +87,7 @@ impl IntOctagon {
 
     /// Argument order follows the Java constructor:
     /// (lx, ly, rx, uy, ulx, lrx, llx, urx).
+    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         lx: i32,
         ly: i32,

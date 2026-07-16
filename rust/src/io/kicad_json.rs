@@ -70,7 +70,7 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
     let mut layers = Vec::new();
     for l in doc.arr("layers") {
         layers.push(Layer::new(
-            &l.str_or("name", "?"),
+            l.str_or("name", "?"),
             !l.str_or("type", "signal").eq_ignore_ascii_case("plane"),
         ));
     }
@@ -158,11 +158,11 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
             .map(|_| Some(TileShape::Box(IntBox::from_coords(-r, -r, r, r))))
             .collect()
     };
-    let mut add_via_rule = |rules: &mut BoardRules,
-                            padstacks: &mut Padstacks,
-                            name: &str,
-                            diameter: i32,
-                            class: usize| {
+    let add_via_rule = |rules: &mut BoardRules,
+                        padstacks: &mut Padstacks,
+                        name: &str,
+                        diameter: i32,
+                        class: usize| {
         let ps = padstacks.add(name.to_string(), via_shapes(diameter), true, false);
         let cl = rules
             .net_classes

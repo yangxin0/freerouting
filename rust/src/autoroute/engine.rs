@@ -159,7 +159,7 @@ impl AutorouteEngine {
         let before = self.seen_log;
         let mut removed_rooms = 0usize;
         let matrix = &board.rules.clearance_matrix;
-        for (layer, bbox) in log[self.seen_log..].to_vec() {
+        for &(layer, bbox) in &log[self.seen_log..] {
             // rooms were restrained by the item inflated by up to
             // hw + max clearance (+ safety), with miter reach ≤ 2×
             let slack = 2.0

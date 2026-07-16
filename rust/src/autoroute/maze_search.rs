@@ -1337,7 +1337,7 @@ fn restrict_corners(
     let mut rooms: Vec<Option<RoomId>> = Vec::new();
     for k in 0..result.corners.len() {
         let (b, lb) = result.corners[k];
-        if let Some(&(a, la)) = corners.last().map(|c| c).filter(|_| k > 0) {
+        if let Some(&(a, la)) = corners.last().filter(|_| k > 0) {
             if la == lb && !segment_is_compliant(a, b, restriction) {
                 // choose horizontal_first so the extra corner stays in
                 // the segment's room (try true, then false, like Java)

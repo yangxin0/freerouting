@@ -271,7 +271,7 @@ mod tests {
         let mut board = test_board();
         let polyline =
             Polyline::from_int_points(&[IntPoint::new(-10000, 0), IntPoint::new(10000, 0)]);
-        let victim = board.insert_trace(polyline, 0, 100, vec![2], 1);
+        let _victim = board.insert_trace(polyline, 0, 100, vec![2], 1);
         let shape = TileShape::Box(IntBox::from_coords(-1000, -1000, 1000, 1000));
         assert!(shove_aside(&mut board, &shape, 0, &[1], 1, &[]));
         // the victim was cut; the substitute keeps net 2 connected around
@@ -368,7 +368,7 @@ mod tests {
         let mut board = test_board();
         let polyline =
             Polyline::from_int_points(&[IntPoint::new(-10000, 0), IntPoint::new(10000, 0)]);
-        let victim = board.insert_trace(polyline, 0, 100, vec![2], 1);
+        let _victim = board.insert_trace(polyline, 0, 100, vec![2], 1);
         // a wall of foreign net 3 above and below the shove shape leaves
         // no room for the substitute
         for y in [-2200, 2200] {

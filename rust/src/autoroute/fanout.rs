@@ -25,9 +25,7 @@ fn needs_fanout(board: &BasicBoard, pin_id: ItemId) -> Option<i32> {
         .iter()
         .map(|(_, l)| *l)
         .collect();
-    let Some(&pin_layer) = layers.first() else {
-        return None;
-    };
+    let pin_layer = *layers.first()?;
     if layers.iter().any(|&l| l != pin_layer) {
         return None; // through-hole pin reaches every layer already
     }
@@ -145,7 +143,10 @@ pub fn fanout_board(
             if time_limit.is_some_and(|t| t.limit_exceeded()) {
                 return total + fanned;
             }
-            // Java (27e700bc): fanout.maxItems caps the processed pins
+            // Java (27e700bc): fanout.maxItems caps the processed pins. The
+            // default is unlimited (usize::MAX), so this guard is a no-op unless
+            // a finite cap is configured.
+            #[allow(clippy::absurd_extreme_comparisons)]
             if total + fanned >= FANOUT_MAX_ITEMS {
                 return total + fanned;
             }
