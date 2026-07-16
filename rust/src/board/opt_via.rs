@@ -18,7 +18,8 @@ fn two_trace_contacts(board: &BasicBoard, via_id: ItemId) -> Option<(ItemId, Ite
     }
     for &c in &contacts {
         let item = board.get_item(c)?;
-        if item.base.is_user_fixed() || !matches!(item.kind, ItemKind::PolylineTrace(_)) {
+        // Java OptViaAlgo: contacts must not be shove-fixed either
+        if item.base.is_shove_fixed() || !matches!(item.kind, ItemKind::PolylineTrace(_)) {
             return None;
         }
     }
@@ -64,7 +65,7 @@ pub fn opt_via_location(board: &mut BasicBoard, via_id: ItemId, max_recursion: u
     let ItemKind::Via(via) = &item.kind else {
         return false;
     };
-    if item.base.is_user_fixed() || item.base.component_no != 0 {
+    if item.base.is_shove_fixed() || item.base.component_no != 0 {
         return false;
     }
     let contacts = board.get_normal_contacts(via_id);
@@ -118,18 +119,19 @@ pub fn opt_via_location(board: &mut BasicBoard, via_id: ItemId, max_recursion: u
         }
         board.generate_snapshot();
         // detach the via-end stubs so the move has room
-        let mut ok = shorten_trace_at(board, t1, end1, cand);
-        let t2_now = if ok {
-            // t1's replacement may have renumbered t2? ids are stable
-            // (shorten replaces only its own trace)
+        let mut new_items: Vec<ItemId> = Vec::new();
+        let s1 = shorten_trace_at(board, t1, end1, cand);
+        let s2 = if s1.is_some() {
             shorten_trace_at(board, t2, end2, cand)
         } else {
-            false
+            None
         };
-        ok = ok && t2_now;
+        new_items.extend(s1);
+        new_items.extend(s2);
+        let mut ok = s1.is_some() && s2.is_some();
         if ok {
             board.remove_item(via_id);
-            ok = insert_forced_via(
+            match insert_forced_via(
                 board,
                 padstack,
                 cand,
@@ -137,56 +139,22 @@ pub fn opt_via_location(board: &mut BasicBoard, via_id: ItemId, max_recursion: u
                 cl_class,
                 hw1.max(hw2),
                 attach_allowed,
-            )
-            .is_some();
+            ) {
+                Some(vid) => new_items.push(vid),
+                None => ok = false,
+            }
         }
-        // both nets must remain connected AND the reconnected stubs must
-        // keep clearance (the stub inserts are not shove-validated)
+        // both nets must remain connected AND everything this attempt
+        // created must satisfy the authoritative DRC pairwise rule (incl.
+        // same-net drill rules) — the stub inserts are not shove-validated
         let all_connected = ok
             && net_nos
                 .iter()
                 .all(|&n| board.net_is_completely_connected(n));
-        let stubs_clear = all_connected && [t1, t2].iter().all(|_| true) && {
-            let mut clear = true;
-            'outer: for (id, item) in board.items() {
-                if item.base.component_no != 0
-                    || !item.base.net_nos.iter().any(|n| net_nos.contains(n))
-                {
-                    continue;
-                }
-                for (s, l) in item.tile_shapes(&board.padstacks) {
-                    for oid in board.overlapping_items(&s.offset(10_000.0), Some(*l)) {
-                        if oid == *id {
-                            continue;
-                        }
-                        let Some(other) = board.get_item(oid) else {
-                            continue;
-                        };
-                        if other.base.shares_net(&item.base) {
-                            continue;
-                        }
-                        if let ItemKind::ObstacleArea(a) = &other.kind {
-                            if a.is_conduction && !a.is_obstacle {
-                                continue;
-                            }
-                        }
-                        let cl = board.rules.clearance_matrix.get_value(
-                            item.base.clearance_class,
-                            other.base.clearance_class,
-                            *l,
-                            false,
-                        ) as f64;
-                        if other.tile_shapes(&board.padstacks).iter().any(|(os, ol)| {
-                            ol == l && crate::drc::violates(s.euclidean_distance_to(os), cl)
-                        }) {
-                            clear = false;
-                            break 'outer;
-                        }
-                    }
-                }
-            }
-            clear
-        };
+        let stubs_clear = all_connected
+            && new_items
+                .iter()
+                .all(|&nid| crate::drc::item_is_clear(board, nid));
         if stubs_clear {
             board.pop_snapshot();
             return true;
@@ -207,13 +175,13 @@ fn opt_single_contact_via(board: &mut BasicBoard, via_id: ItemId, trace_id: Item
     let ItemKind::Via(via) = &item.kind else {
         return false;
     };
-    if item.base.is_user_fixed() || item.base.component_no != 0 {
+    if item.base.is_shove_fixed() || item.base.component_no != 0 {
         return false;
     }
     let Some(t) = board.get_item(trace_id).cloned() else {
         return false;
     };
-    if t.base.is_user_fixed() || !matches!(t.kind, ItemKind::PolylineTrace(_)) {
+    if t.base.is_shove_fixed() || !matches!(t.kind, ItemKind::PolylineTrace(_)) {
         return false;
     }
     let via_center = via.center;
@@ -238,17 +206,20 @@ fn opt_single_contact_via(board: &mut BasicBoard, via_id: ItemId, trace_id: Item
         _ => return false,
     };
     board.generate_snapshot();
+    let mut new_items: Vec<ItemId> = Vec::new();
     // when the via reaches the trace's far corner the stub degenerates:
     // remove it entirely — the via then contacts the far item directly
     // (Java deletes the emptied stub too)
-    let ok = if shorten_trace_at(board, trace_id, end, cand) {
-        true
-    } else {
-        board.remove_item(trace_id)
+    let ok = match shorten_trace_at(board, trace_id, end, cand) {
+        Some(stub) => {
+            new_items.push(stub);
+            true
+        }
+        None => board.remove_item(trace_id),
     };
     let ok = ok && {
         board.remove_item(via_id);
-        insert_forced_via(
+        match insert_forced_via(
             board,
             padstack,
             cand,
@@ -256,14 +227,26 @@ fn opt_single_contact_via(board: &mut BasicBoard, via_id: ItemId, trace_id: Item
             cl_class,
             hw,
             attach_allowed,
-        )
-        .is_some()
+        ) {
+            Some(vid) => {
+                new_items.push(vid);
+                true
+            }
+            None => false,
+        }
     };
+    // connectivity alone is not enough: the moved via and the shortened
+    // stub must also keep the authoritative DRC clearances (the
+    // two-contact path always had this gate; this one committed without it)
     let connected = ok
         && net_nos
             .iter()
             .all(|&n| board.net_is_completely_connected(n));
-    if connected {
+    let clear = connected
+        && new_items
+            .iter()
+            .all(|&nid| crate::drc::item_is_clear(board, nid));
+    if clear {
         board.pop_snapshot();
         true
     } else {
@@ -273,18 +256,17 @@ fn opt_single_contact_via(board: &mut BasicBoard, via_id: ItemId, trace_id: Item
 }
 
 /// Replaces the via-end corner of a trace with `new_end` (the stub
-/// follows the moved via). Returns false when the geometry degenerates.
+/// follows the moved via). Returns the replacement trace's id, or `None`
+/// when the geometry degenerates (the original trace is left untouched).
 fn shorten_trace_at(
     board: &mut BasicBoard,
     trace_id: ItemId,
     at_first_end: bool,
     new_end: IntPoint,
-) -> bool {
-    let Some(item) = board.get_item(trace_id).cloned() else {
-        return false;
-    };
+) -> Option<ItemId> {
+    let item = board.get_item(trace_id).cloned()?;
     let ItemKind::PolylineTrace(t) = &item.kind else {
-        return false;
+        return None;
     };
     let mut corners: Vec<IntPoint> = t
         .polyline
@@ -293,7 +275,7 @@ fn shorten_trace_at(
         .map(|c| c.round())
         .collect();
     if corners.len() < 2 {
-        return false;
+        return None;
     }
     if at_first_end {
         corners[0] = new_end;
@@ -303,19 +285,24 @@ fn shorten_trace_at(
     }
     corners.dedup();
     if corners.len() < 2 {
-        return false;
+        return None;
     }
     let polyline = Polyline::from_int_points(&corners);
     if polyline.is_empty() {
-        return false;
+        return None;
     }
     let (layer, half_width) = (t.layer, t.half_width);
     let net_nos = item.base.net_nos.clone();
     let cl = item.base.clearance_class;
+    // the shortened stub keeps the source trace's fixed state (Java
+    // Trace.split/combine semantics); recreating it Unfixed silently
+    // stripped protection
+    let fixed_state = item.base.fixed_state;
     board.remove_item(trace_id);
     crate::board::basic_board::set_birth_tag(3);
-    board.insert_trace(polyline, layer, half_width, net_nos, cl);
-    true
+    let new_id = board.insert_trace(polyline, layer, half_width, net_nos, cl);
+    board.set_fixed_state(new_id, fixed_state);
+    Some(new_id)
 }
 
 #[cfg(test)]
@@ -345,10 +332,17 @@ mod tests {
         let mut board = test_board();
         let pad = board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
         board.set_component_no(pad, 1);
-        // stub from the pad to a dangling fanout via
+        // dogleg stub from the pad to a dangling fanout via: the adjacent
+        // corner (6000, 3000) is a LEGAL target (moving all the way onto the
+        // through-pad would violate the same-net drill rule, see below; a
+        // collinear middle corner would be merged away by the polyline)
         let via = board.insert_via(1, IntPoint::new(12000, 0), vec![1], 1, false);
         board.insert_trace(
-            Polyline::from_int_points(&[IntPoint::new(0, 0), IntPoint::new(12000, 0)]),
+            Polyline::from_int_points(&[
+                IntPoint::new(0, 0),
+                IntPoint::new(6000, 3000),
+                IntPoint::new(12000, 0),
+            ]),
             0,
             100,
             vec![1],
@@ -358,6 +352,34 @@ mod tests {
         let moved = opt_via_location(&mut board, via, 3);
         assert!(moved, "the fanout via should pull toward the pad");
         assert!(board.net_is_completely_connected(1));
+    }
+
+    #[test]
+    fn single_contact_via_never_lands_on_a_same_net_through_pad() {
+        // Java Via.is_obstacle: a via overlapping a same-net THROUGH pin is
+        // a violation (only an attach-allowed via on a drillable SMD pad is
+        // exempt). The single-contact path used to commit on connectivity
+        // alone, moving the via straight onto the pad.
+        let mut board = test_board();
+        let pad = board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        board.set_component_no(pad, 1);
+        let via = board.insert_via(1, IntPoint::new(12000, 0), vec![1], 1, false);
+        board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(0, 0), IntPoint::new(12000, 0)]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        let moved = opt_via_location(&mut board, via, 3);
+        assert!(
+            !moved,
+            "the only candidate is the pad center — an illegal drill site"
+        );
+        assert!(
+            crate::drc::check_board(&board).violations.is_empty(),
+            "the refused move must leave the board DRC-clean"
+        );
     }
 
     #[test]

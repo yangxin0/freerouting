@@ -5,7 +5,10 @@
 //! setting names the quote character (KiCad emits `"`); a quote character
 //! immediately following `(string_quote ` is itself a token. Quoted
 //! strings may contain spaces when `space_in_quoted_tokens` is on; this
-//! reader always allows them.
+//! reader always allows them. Like the Java scanner (STRING1/STRING2
+//! states), BOTH `"` and `'` start a quoted string at token start,
+//! independent of the declared `string_quote`; inside an atom either
+//! quote char is an ordinary character (SpecChar3).
 
 use std::fmt;
 
@@ -133,16 +136,16 @@ fn parse_expr(bytes: &[u8], pos: &mut usize) -> Result<SExpr, ParseError> {
             b'(' => {
                 items.push(parse_expr(bytes, pos)?);
             }
-            b'"' => {
-                // Special case: `(string_quote ")` names the quote char
-                // itself; a lone quote followed by whitespace/`)` is an
-                // atom.
+            q @ (b'"' | b'\'') => {
+                // Special case: `(string_quote ")` (or `'`) names the quote
+                // char itself; a lone quote followed by whitespace/`)` is
+                // an atom.
                 let next = bytes.get(*pos + 1);
                 if next.is_none_or(|c| c.is_ascii_whitespace() || *c == b')') {
-                    items.push(SExpr::Atom("\"".to_string()));
+                    items.push(SExpr::Atom((q as char).to_string()));
                     *pos += 1;
                 } else {
-                    items.push(parse_quoted(bytes, pos)?);
+                    items.push(parse_quoted(bytes, pos, q)?);
                 }
             }
             _ => {
@@ -152,12 +155,12 @@ fn parse_expr(bytes: &[u8], pos: &mut usize) -> Result<SExpr, ParseError> {
     }
 }
 
-fn parse_quoted(bytes: &[u8], pos: &mut usize) -> Result<SExpr, ParseError> {
-    debug_assert_eq!(bytes[*pos], b'"');
+fn parse_quoted(bytes: &[u8], pos: &mut usize, quote: u8) -> Result<SExpr, ParseError> {
+    debug_assert_eq!(bytes[*pos], quote);
     let start = *pos;
     *pos += 1;
     let content_start = *pos;
-    while *pos < bytes.len() && bytes[*pos] != b'"' {
+    while *pos < bytes.len() && bytes[*pos] != quote {
         *pos += 1;
     }
     if *pos >= bytes.len() {

@@ -6,7 +6,7 @@ use crate::board::basic_board::BasicBoard;
 use crate::board::ItemKind;
 
 fn esc(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    crate::io::json::escape(s)
 }
 
 /// Serializes the board as KiCad board JSON. Coordinates are written in
@@ -61,11 +61,26 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
                 .iter()
                 .map(|nm| format!("\"{}\"", esc(nm)))
                 .collect();
+            // via dimensions from the class's actual via rule (Java
+            // KiCadJsonWriter): the first via's padstack shape width is the
+            // diameter, the drill is half of it (the model carries no drill);
+            // 0.8/0.4 mm is Java's fallback for classes without a via rule
+            let via_diameter = class
+                .get_via_rule()
+                .and_then(|rule_id| board.rules.via_rules.get(rule_id))
+                .filter(|rule| rule.via_count() > 0)
+                .map(|rule| board.rules.via_infos.get(rule.get_via(0)).get_padstack())
+                .and_then(|ps_no| board.padstacks.get_by_no(ps_no))
+                .and_then(|ps| ps.get_shape(ps.from_layer()))
+                .map(|s| mm(s.bounding_box().width() as f64))
+                .unwrap_or(0.8);
             format!(
-                "{{\"name\": \"{}\", \"clearance\": {:.6}, \"traceWidth\": {:.6}, \"viaDiameter\": 0.6, \"viaDrill\": 0.3, \"netNames\": [{}]}}",
+                "{{\"name\": \"{}\", \"clearance\": {:.6}, \"traceWidth\": {:.6}, \"viaDiameter\": {:.6}, \"viaDrill\": {:.6}, \"netNames\": [{}]}}",
                 esc(class.get_name()),
                 mm(cl),
                 mm(2.0 * hw),
+                via_diameter,
+                via_diameter * 0.5,
                 names.join(", ")
             )
         })
@@ -91,14 +106,27 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
         rule_json.join(", ")
     ));
     // nets, each tagged with its real class name and whether it carries a
-    // copper pour (containsPlane, consumed by the reader)
-    let plane_nets: std::collections::HashSet<i32> = board
+    // copper pour (containsPlane, consumed by the reader). The net's own
+    // contains_plane flag is authoritative (Java KiCadJsonWriter reads
+    // `net.contains_plane()`); serialized conduction areas are a fallback so
+    // a hand-built board without the flag still round-trips.
+    let mut plane_nets: std::collections::HashSet<i32> = board
         .items()
         .filter_map(|(_, it)| match &it.kind {
             ItemKind::ObstacleArea(a) if a.is_conduction => it.base.net_nos.first().copied(),
             _ => None,
         })
         .collect();
+    for n in 1..=net_count {
+        if board
+            .rules
+            .nets
+            .get_by_no(n)
+            .is_some_and(|net| net.contains_plane())
+        {
+            plane_nets.insert(n);
+        }
+    }
     out.push_str("  \"nets\": [\n");
     for n in 1..=net_count {
         let (name, class_name) = board

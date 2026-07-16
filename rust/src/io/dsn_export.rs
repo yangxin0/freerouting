@@ -14,6 +14,15 @@ pub fn export_dsn(board: &BasicBoard) -> Option<String> {
     let descale = |v: f64| -> f64 { v / board.resolution.max(1) as f64 };
     let mut wiring = String::new();
     wiring.push_str("  (wiring\n");
+    // the wiring type carries the fixed state (Java Wiring.write_fixed_state:
+    // shove_fixed / fix / protect; unfixed copper is plain route), so
+    // protected wiring survives an export→import round trip
+    let type_token = |state: crate::board::FixedState| match state {
+        crate::board::FixedState::ShoveFixed => "shove_fixed",
+        crate::board::FixedState::SystemFixed => "fix",
+        crate::board::FixedState::UserFixed => "protect",
+        crate::board::FixedState::Unfixed => "route",
+    };
     for (_, item) in board.items() {
         if item.base.net_count() == 0 {
             continue;
@@ -41,7 +50,8 @@ pub fn export_dsn(board: &BasicBoard) -> Option<String> {
                     ));
                 }
                 wiring.push_str(&format!(
-                    "\n      )\n      (net \"{net_name}\")\n      (type route)\n    )\n"
+                    "\n      )\n      (net \"{net_name}\")\n      (type {})\n    )\n",
+                    type_token(item.base.fixed_state)
                 ));
             }
             ItemKind::Via(v) => {
@@ -52,10 +62,11 @@ pub fn export_dsn(board: &BasicBoard) -> Option<String> {
                     continue;
                 };
                 wiring.push_str(&format!(
-                    "    (via \"{}\" {} {}\n      (net \"{net_name}\")\n      (type route)\n    )\n",
+                    "    (via \"{}\" {} {}\n      (net \"{net_name}\")\n      (type {})\n    )\n",
                     padstack.name,
                     descale(v.center.x as f64),
-                    descale(v.center.y as f64)
+                    descale(v.center.y as f64),
+                    type_token(item.base.fixed_state)
                 ));
             }
             ItemKind::ObstacleArea(_) => {}
@@ -114,6 +125,32 @@ mod tests {
                 .count()
         };
         assert_eq!(traces(&board), traces(&board2), "wiring must survive");
+    }
+
+    #[test]
+    fn issue413_wiring_round_trip_neither_doubles_nor_violates() {
+        // the review repro: Issue413 carries a (wiring ...) section; the
+        // export→import round trip must keep the same copper count and
+        // introduce no clearance violations (a case-mismatch in the strip
+        // once doubled the copper: 8 violations)
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let path = format!("{root}/fixtures/Issue413-test.dsn");
+        let content = std::fs::read_to_string(&path).expect("fixture missing from checkout");
+        let board = import_dsn(&content).expect("import");
+        let traces = |b: &crate::board::basic_board::BasicBoard| {
+            b.items()
+                .filter(|(_, it)| matches!(it.kind, ItemKind::PolylineTrace(_)))
+                .count()
+        };
+        let out = export_dsn(&board).expect("export");
+        let board2 = import_dsn(&out).expect("re-import");
+        assert_eq!(traces(&board), traces(&board2), "copper must not double");
+        let v0 = crate::drc::check_board(&board).violations.len();
+        let v1 = crate::drc::check_board(&board2).violations.len();
+        assert!(
+            v1 <= v0,
+            "round trip must not create violations ({v0} -> {v1})"
+        );
     }
 
     #[test]

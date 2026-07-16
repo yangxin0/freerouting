@@ -624,6 +624,15 @@ fn seed_room(
             if next_layer == layer {
                 continue;
             }
+            // net-class active-layer gate (Java AutorouteControl.layer_active
+            // from `(circuit (use_layer ...))`): the via may still span the
+            // disabled layer, but the search never routes onto it
+            if !board
+                .rules
+                .is_active_routing_layer(request.net_no, next_layer)
+            {
+                continue;
+            }
             if !drilled.insert((drill_point.x, drill_point.y, next_layer)) {
                 continue;
             }
@@ -716,7 +725,15 @@ fn via_free(board: &BasicBoard, request: &MazeRouteRequest, point: IntPoint) -> 
         // seals tight pockets)
         let via_shape =
             shape.translate_by(crate::geometry::planar::IntVector::new(point.x, point.y));
-        let max_cl = board.rules.clearance_matrix.max_value(layer).max(0) as f64;
+        // the query must also reach `*_same_net` rule distances, which live
+        // outside the matrix and can exceed its maximum — otherwise a larger
+        // same-net drill rule is never discovered here
+        let max_cl = board
+            .rules
+            .clearance_matrix
+            .max_value(layer)
+            .max(board.rules.max_same_net_clearance())
+            .max(0) as f64;
         let query = via_shape.offset(max_cl);
         for id in board.overlapping_items(&query, Some(layer)) {
             let Some(item) = board.get_item(id) else {
@@ -1441,7 +1458,11 @@ fn via_site_is_clear(board: &BasicBoard, request: &MazeRouteRequest, p: IntPoint
             continue;
         };
         let shape = shape.translate_by(crate::geometry::planar::IntVector::new(p.x, p.y));
-        let max_cl = matrix.max_value(layer).max(0) as f64;
+        // reach `*_same_net` rule distances too (they can exceed the matrix max)
+        let max_cl = matrix
+            .max_value(layer)
+            .max(board.rules.max_same_net_clearance())
+            .max(0) as f64;
         for other_id in board.overlapping_items(&shape.offset(max_cl), Some(layer)) {
             let Some(other) = board.get_item(other_id) else {
                 continue;
@@ -1921,6 +1942,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn net_class_inactive_layer_blocks_drill_expansion() {
+        // `(circuit (use_layer ...))`: a disabled routing layer must never
+        // be drilled onto (Java AutorouteControl.layer_active). Start pad
+        // exists only on F.Cu, dest pad only on B.Cu, so the connection
+        // REQUIRES a drill onto B.Cu.
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true), Layer::new("B.Cu", true)]);
+        let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
+        let mut rules = BoardRules::new(stack.clone(), matrix);
+        let class_idx = rules.get_default_net_class();
+        let net_no = rules.nets.add("N1", 1, false);
+        assert_eq!(net_no, 1, "request() routes net 1");
+        if let Some(net) = rules.nets.get_by_no_mut(net_no) {
+            net.set_class(class_idx);
+        }
+        let pad = TileShape::Box(IntBox::from_coords(-400, -400, 400, 400));
+        let mut padstacks = Padstacks::new(2);
+        padstacks.add_shape_on_layers(pad.clone(), 0, 1); // 1: through via
+        padstacks.add_shape_on_layers(pad.clone(), 0, 0); // 2: F.Cu-only pad
+        padstacks.add_shape_on_layers(pad, 1, 1); // 3: B.Cu-only pad
+        let mut board = BasicBoard::new(stack, rules, padstacks);
+        let a = board.insert_via(2, IntPoint::new(0, 0), vec![net_no], 1, false);
+        let b = board.insert_via(3, IntPoint::new(9000, 0), vec![net_no], 1, false);
+        // sanity: with every layer active the connection routes via a drill
+        let mut open_board = board.clone();
+        assert!(
+            maze_route(&mut open_board, &request(a, b)).is_some(),
+            "the unrestricted board must route"
+        );
+        // with B.Cu disabled for the class, the drill expansion may not
+        // land there and the (B.Cu-only) destination is unreachable
+        board
+            .rules
+            .net_classes
+            .get_mut(class_idx)
+            .set_active_routing_layer(1, false);
+        assert!(
+            maze_route(&mut board, &request(a, b)).is_none(),
+            "routing onto a disabled net-class layer must be refused"
+        );
     }
 
     #[test]

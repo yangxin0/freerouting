@@ -95,6 +95,16 @@ pub fn insert_forced_via(
         cl_class,
         attach_allowed,
     );
+    // final gate: the inserted via must satisfy the authoritative DRC
+    // pairwise rule — the corridor check above excludes ALL same-net items,
+    // so same-net drill rules (via↔via/pin spacing) were never enforced here
+    if !crate::drc::item_is_clear(board, id) {
+        if crate::debug::shove() {
+            eprintln!("FORCED VIA violates drill clearance at {location:?}");
+        }
+        board.undo();
+        return None;
+    }
     board.pop_snapshot();
     Some(id)
 }
@@ -179,6 +189,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn forced_via_honors_same_net_drill_rule_beyond_matrix_max() {
+        // the review repro: a via_via_same_net of 3000 with a matrix max of
+        // 200 used to be accepted here (the blocked check skipped ALL
+        // same-net items) and then reported by the authoritative DRC
+        let mut board = test_board();
+        board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        // 600-unit edge gap to the existing same-net via: fine at the
+        // matrix clearance (200)...
+        assert!(
+            insert_forced_via(&mut board, 1, IntPoint::new(1400, 0), &[1], 1, 100, false).is_some(),
+            "no same-net rule: the ordinary clearance allows the site"
+        );
+        let mut board = test_board();
+        board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        board.rules.set_same_net_clearance(
+            crate::rules::ItemClass::Via,
+            crate::rules::ItemClass::Via,
+            3000,
+        );
+        let items_before = board.item_count();
+        assert!(
+            insert_forced_via(&mut board, 1, IntPoint::new(1400, 0), &[1], 1, 100, false).is_none(),
+            "a same-net drill rule beyond the matrix max must reject the site"
+        );
+        assert_eq!(
+            board.item_count(),
+            items_before,
+            "the rejected insert must leave the board unchanged"
+        );
+        assert!(crate::drc::check_board(&board).violations.is_empty());
     }
 
     #[test]

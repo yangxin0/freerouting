@@ -39,6 +39,140 @@ pub(crate) fn drill_allowed(item: &crate::board::Item, padstacks: &crate::core::
     item.first_layer(padstacks) == item.last_layer(padstacks)
 }
 
+/// The clearance the pair (`item`, `other`) must keep on `layer`, or `None`
+/// when the two items do not constrain each other — Java's `Item.is_obstacle`
+/// collapsed into one predicate shared by the DRC, the optimizer's local gate
+/// and the via/move insert gates:
+/// - same-net traces and areas never constrain; same-net drill pairs do,
+///   at the `*_same_net` rule value when one exists, unless the attach
+///   exemption applies (attach-allowed via on a drillable same-net SMD pin);
+/// - two constraint areas do not clear against each other, keepouts skip
+///   component pins, non-obstacle conduction areas do not participate, and
+///   via keepouts constrain only vias;
+/// - the matrix lookup is `(other, item)` like Java
+///   `Item.clearance_violations` (`item` is Java's `this`).
+pub(crate) fn required_clearance(
+    board: &BasicBoard,
+    item: &crate::board::Item,
+    other: &crate::board::Item,
+    layer: usize,
+) -> Option<f64> {
+    let mut same_net_required: Option<f64> = None;
+    if other.base.shares_net(&item.base) {
+        // Same-net: Java `Trace.is_obstacle` is always false for a same-net
+        // item, so a pair involving a trace or an area is never a violation.
+        // Only drill-item (via/pin) pairs remain.
+        if !(is_drill(&item.kind) && is_drill(&other.kind)) {
+            return None;
+        }
+        // Via<->Via and Pin<->Pin are obstacles to each other; the only Java
+        // exception (Via/Pin.is_obstacle) is an attach_allowed via on a
+        // same-net drillable SMD pin (fanout).
+        let a_pin = is_pin(item);
+        let b_pin = is_pin(other);
+        let attach =
+            |it: &crate::board::Item| matches!(&it.kind, ItemKind::Via(v) if v.attach_allowed);
+        let exempt = (!a_pin && attach(item) && b_pin && drill_allowed(other, &board.padstacks))
+            || (!b_pin && attach(other) && a_pin && drill_allowed(item, &board.padstacks));
+        if exempt {
+            return None;
+        }
+        // classify each drill item (routing via / through-pin / smd pad)
+        // and look up the same-net clearance for the pair
+        let ic = |it: &crate::board::Item| -> crate::rules::ItemClass {
+            if !is_pin(it) {
+                crate::rules::ItemClass::Via
+            } else if drill_allowed(it, &board.padstacks) {
+                crate::rules::ItemClass::Smd
+            } else {
+                crate::rules::ItemClass::Pin
+            }
+        };
+        same_net_required = board
+            .rules
+            .get_same_net_clearance(ic(item), ic(other))
+            .map(|v| v as f64);
+    }
+    let item_obstacle = matches!(&item.kind, ItemKind::ObstacleArea(_));
+    let other_obstacle = matches!(&other.kind, ItemKind::ObstacleArea(_));
+    // Two constraint areas do not clear against each other.
+    if item_obstacle && other_obstacle {
+        return None;
+    }
+    // Java `ObstacleArea.is_obstacle` is true only for a foreign Trace or
+    // (routing) Via — NOT a component Pin.
+    if (item_obstacle && is_pin(other)) || (other_obstacle && is_pin(item)) {
+        return None;
+    }
+    // A conduction area (power plane) participates only when it is also
+    // flagged an obstacle (Java `ConductionArea.is_obstacle`); via keepouts
+    // constrain via placement only.
+    if let ItemKind::ObstacleArea(a) = &item.kind {
+        if a.is_conduction && !a.is_obstacle {
+            return None;
+        }
+        if a.via_only && !matches!(other.kind, ItemKind::Via(_)) {
+            return None;
+        }
+    }
+    if let ItemKind::ObstacleArea(a) = &other.kind {
+        if a.is_conduction && !a.is_obstacle {
+            return None;
+        }
+        if a.via_only && !matches!(item.kind, ItemKind::Via(_)) {
+            return None;
+        }
+    }
+    // A `*_same_net` rule value takes precedence for a same-net drill pair;
+    // otherwise the ordinary (foreign-net) matrix value applies.
+    Some(same_net_required.unwrap_or_else(|| {
+        board.rules.clearance_matrix.get_value(
+            other.base.clearance_class,
+            item.base.clearance_class,
+            layer,
+            false,
+        ) as f64
+    }))
+}
+
+/// True when `id`'s copper keeps the required pairwise clearance to every
+/// other board item — the authoritative DRC rule (`required_clearance`),
+/// including same-net drill rules. The insert/move gates run this on each
+/// item they created so they can never commit copper the final DRC rejects.
+pub(crate) fn item_is_clear(board: &BasicBoard, id: ItemId) -> bool {
+    let Some(item) = board.get_item(id) else {
+        return true;
+    };
+    for (s, l) in item.tile_shapes(&board.padstacks) {
+        let radius = board
+            .rules
+            .clearance_matrix
+            .max_value(*l)
+            .max(board.rules.max_same_net_clearance())
+            .max(0) as f64;
+        for oid in board.overlapping_items(&s.offset(radius), Some(*l)) {
+            if oid == id {
+                continue;
+            }
+            let Some(other) = board.get_item(oid) else {
+                continue;
+            };
+            let Some(cl) = required_clearance(board, item, other, *l) else {
+                continue;
+            };
+            let check = s.offset(cl);
+            if other.tile_shapes(&board.padstacks).iter().any(|(os, ol)| {
+                ol == l
+                    && os.intersection(&check).dimension() >= 2
+                    && violates(s.euclidean_distance_to(os), cl)
+            }) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// One clearance violation between two items
 /// (Java: `ClearanceViolation`/`DrcViolation`).
 #[derive(Debug, Clone)]
@@ -99,7 +233,6 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
         let Some(item) = board.get_item(id) else {
             continue;
         };
-        let item_obstacle = matches!(&item.kind, ItemKind::ObstacleArea(_));
         let shapes: Vec<_> = item.tile_shapes(&board.padstacks).to_vec();
         for (shape, layer) in shapes {
             // Candidate search radius must cover the largest clearance any
@@ -122,100 +255,12 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                 let Some(other) = board.get_item(other_id) else {
                     continue;
                 };
-                // If a `*_same_net` rule applies to this same-net drill pair, its
-                // value overrides the normal (foreign-net) clearance below.
-                let mut same_net_required: Option<f64> = None;
-                if other.base.shares_net(&item.base) {
-                    // Same-net: Java `Trace.is_obstacle` is always false for a
-                    // same-net item, so a pair involving a trace or an area is
-                    // never a violation. Only drill-item (via/pin) pairs remain.
-                    if !(is_drill(&item.kind) && is_drill(&other.kind)) {
-                        continue;
-                    }
-                    // Via<->Via and Pin<->Pin are obstacles to each other; the
-                    // only Java exception (Via/Pin.is_obstacle) is an
-                    // attach_allowed via on a same-net drillable SMD pin
-                    // (fanout). Router-placed vias carry the flag from their
-                    // via rule, so no broader overlap exemption applies:
-                    // pin-pin, via-via and via-through-pin contact is a
-                    // violation exactly like in Java.
-                    let a_pin = is_pin(item);
-                    let b_pin = is_pin(other);
-                    let attach = |it: &crate::board::Item| matches!(&it.kind, ItemKind::Via(v) if v.attach_allowed);
-                    let exempt =
-                        (!a_pin && attach(item) && b_pin && drill_allowed(other, &board.padstacks))
-                            || (!b_pin
-                                && attach(other)
-                                && a_pin
-                                && drill_allowed(item, &board.padstacks));
-                    if exempt {
-                        continue;
-                    }
-                    // classify each drill item (routing via / through-pin / smd
-                    // pad) and look up the same-net clearance for the pair
-                    let ic = |it: &crate::board::Item| -> crate::rules::ItemClass {
-                        if !is_pin(it) {
-                            crate::rules::ItemClass::Via
-                        } else if drill_allowed(it, &board.padstacks) {
-                            crate::rules::ItemClass::Smd
-                        } else {
-                            crate::rules::ItemClass::Pin
-                        }
-                    };
-                    same_net_required = board
-                        .rules
-                        .get_same_net_clearance(ic(item), ic(other))
-                        .map(|v| v as f64);
-                }
-                let other_obstacle = matches!(&other.kind, ItemKind::ObstacleArea(_));
-                // Two constraint areas do not clear against each other.
-                if item_obstacle && other_obstacle {
+                // one predicate decides whether (and at what value) the pair
+                // constrains: same-net drill rules, keepout/conduction/pin
+                // exclusions and the (other, item) matrix order live there
+                let Some(required) = required_clearance(board, item, other, layer) else {
                     continue;
-                }
-                // Java `ObstacleArea.is_obstacle` is true only for a foreign
-                // Trace or (routing) Via — NOT a component Pin. Since pins are
-                // `Via` in this collapsed model, exclude keepout-vs-pin
-                // explicitly, else a keepout drawn over its component's own pad
-                // (e.g. J2's shield keepouts) reads as a false violation.
-                if (item_obstacle && is_pin(other)) || (other_obstacle && is_pin(item)) {
-                    continue;
-                }
-                // A conduction area (power plane) participates only when it is
-                // also flagged an obstacle (Java `ConductionArea.is_obstacle`);
-                // otherwise the router's search tree owns it, not this pass.
-                if let ItemKind::ObstacleArea(a) = &item.kind {
-                    if a.is_conduction && !a.is_obstacle {
-                        continue;
-                    }
-                    // via keepouts constrain via placement only
-                    if a.via_only && !matches!(other.kind, ItemKind::Via(_)) {
-                        continue;
-                    }
-                }
-                if let ItemKind::ObstacleArea(a) = &other.kind {
-                    if a.is_conduction && !a.is_obstacle {
-                        continue;
-                    }
-                    if a.via_only && !matches!(item.kind, ItemKind::Via(_)) {
-                        continue;
-                    }
-                }
-                // Argument order matches Java `Item.clearance_violations`
-                // (get_value(curr_item.clearance_class, this.clearance_class)):
-                // the outer `item` is Java's `this`, `other` is `curr_item`, so
-                // the lookup is (other, item). The DSN matrix is symmetric, but
-                // the KiCad-JSON importer builds an asymmetric matrix, where the
-                // former (item, other) order read the transposed (wrong) cell.
-                // A `*_same_net` rule value takes precedence for a same-net drill
-                // pair; otherwise use the ordinary (foreign-net) matrix value.
-                let required = same_net_required.unwrap_or_else(|| {
-                    board.rules.clearance_matrix.get_value(
-                        other.base.clearance_class,
-                        item.base.clearance_class,
-                        layer,
-                        false,
-                    ) as f64
-                });
+                };
                 let check = shape.offset(required);
                 let mut worst: Option<f64> = None;
                 for (os, ol) in other.tile_shapes(&board.padstacks).iter() {
@@ -268,7 +313,7 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
 }
 
 fn json_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    crate::io::json::escape(s)
 }
 
 impl DrcReport {

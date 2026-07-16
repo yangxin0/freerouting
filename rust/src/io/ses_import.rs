@@ -10,6 +10,10 @@ use crate::io::dsn::parse_dsn;
 pub struct SesImportSummary {
     pub wires: usize,
     pub vias: usize,
+    /// `net_out` scopes whose net name does not exist on the board; their
+    /// copper is NOT imported (netless copper would be a pure obstacle and
+    /// violate against every real net, like Java's SesReader skip).
+    pub unknown_nets: Vec<String>,
 }
 
 /// Reads the routes of a session file into the board (Java:
@@ -46,7 +50,11 @@ pub fn import_ses(board: &mut BasicBoard, content: &str) -> Result<SesImportSumm
     let network = routes
         .child("network_out")
         .ok_or_else(|| "no network_out section".to_string())?;
-    let mut summary = SesImportSummary { wires: 0, vias: 0 };
+    let mut summary = SesImportSummary {
+        wires: 0,
+        vias: 0,
+        unknown_nets: Vec::new(),
+    };
     // padstack names -> numbers
     let mut padstack_nos = std::collections::HashMap::new();
     for no in 1..=board.padstacks.count() {
@@ -66,6 +74,13 @@ pub fn import_ses(board: &mut BasicBoard, content: &str) -> Result<SesImportSumm
             .first()
             .map(|n| vec![n.net_number])
             .unwrap_or_default();
+        if net_nos.is_empty() {
+            // an unknown session net must not become netless copper (a pure
+            // obstacle violating against every real net): skip its routes
+            // and report the name
+            summary.unknown_nets.push(net_name.to_string());
+            continue;
+        }
         // propagate the net's own trace clearance class instead of hardcoding
         // the default, so a reloaded session keeps the design's spacing
         let clearance_class = net_nos
@@ -116,12 +131,17 @@ pub fn import_ses(board: &mut BasicBoard, content: &str) -> Result<SesImportSumm
             let (Ok(x), Ok(y)) = (args[1].parse::<f64>(), args[2].parse::<f64>()) else {
                 continue;
             };
+            // Java SesReader.processViaScope inserts session vias with
+            // attach_allowed = TRUE: the session records legal routing, so
+            // a via sitting on its own net's SMD pad keeps the fanout
+            // exemption. Hardcoding false made a routed-then-reloaded
+            // session fail the same-net drill DRC the original board passed.
             let id = board.insert_via(
                 padstack_no,
                 IntPoint::new(scale(x), scale(y)),
                 net_nos.clone(),
                 clearance_class,
-                false,
+                true,
             );
             board.set_fixed_state(id, crate::board::FixedState::UserFixed);
             // register contacts when the via lands mid-trace (a contact

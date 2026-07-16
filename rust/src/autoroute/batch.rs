@@ -411,7 +411,10 @@ pub(crate) fn request_for_net(
     net_no: i32,
     base: &BatchRequest,
 ) -> BatchRequest {
-    let class_half_width = board.rules.get_trace_half_width(net_no, 0);
+    // the maze routes every layer at one width: take the class's maximum
+    // over its ACTIVE signal layers, so a layer-dependent width rule is
+    // never undercut (sampling only layer 0 could pick the narrow layer)
+    let class_half_width = board.rules.get_trace_half_width_max_active(net_no);
     // Route each net with its own trace clearance class (Java: AutorouteControl
     // takes trace_clearance_class_no from the net class). The CLI/API base
     // request hardcoded class 1, so nets with a tighter or looser clearance
@@ -526,12 +529,15 @@ fn repair_violations(
         if nets.is_empty() {
             break;
         }
-        // transactional: the repair may not trade completion away —
-        // kept only when every rerouted net completes again
-        let complete_before = all_nets
+        // transactional: the repair may not trade completion away — kept
+        // only when every net that was complete BEFORE is still complete
+        // after. The former scalar count admitted a one-for-one swap
+        // (break a previously-complete victim while completing another).
+        let complete_before: Vec<i32> = all_nets
             .iter()
-            .filter(|&&n| board.net_is_completely_connected(n))
-            .count();
+            .copied()
+            .filter(|&n| board.net_is_completely_connected(n))
+            .collect();
         board.generate_snapshot();
         let to_remove: Vec<ItemId> = board
             .items()
@@ -561,24 +567,23 @@ fn repair_violations(
             route_net_with_ripup(board, net_no, &net_request, ripup_penalty);
         }
         crate::board::basic_board::set_birth_tag(0);
-        let complete_after = all_nets
+        let no_net_broken = complete_before
             .iter()
-            .filter(|&&n| board.net_is_completely_connected(n))
-            .count();
+            .all(|&n| board.net_is_completely_connected(n));
         // a repair round is kept only when it made real progress: no
-        // completion traded away AND strictly fewer violations — a round
-        // that merely preserves the complete-net count while leaving the
-        // violations in place (or moving them) is rolled back
+        // previously-complete net broken AND strictly fewer violations — a
+        // round that merely preserves the complete-net count while leaving
+        // the violations in place (or moving them) is rolled back
         let (_, violations_after) = violating_nets(board);
-        let keep = complete_after >= complete_before && violations_after < violations_before;
+        let keep = no_net_broken && violations_after < violations_before;
         if crate::debug::stats() {
             eprintln!(
-                "REPAIR round {_round}: {} violating nets {:?}, complete {} -> {}, \
+                "REPAIR round {_round}: {} violating nets {:?}, complete {} (broken: {}), \
                  violations {} -> {} ({})",
                 nets.len(),
                 nets,
-                complete_before,
-                complete_after,
+                complete_before.len(),
+                !no_net_broken,
                 violations_before,
                 violations_after,
                 if keep { "KEPT" } else { "ROLLED BACK" }

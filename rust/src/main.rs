@@ -159,22 +159,47 @@ fn main() -> ExitCode {
         board.item_count()
     );
 
+    // an explicitly requested input that cannot be applied is a failure,
+    // not a log line: exiting successfully after ignoring --rules or
+    // --import-ses would silently route with the wrong constraints/wiring
     if let Some(rules_path) = flag_value("--rules") {
         match std::fs::read_to_string(rules_path) {
             Ok(text) => match freerouting::io::read_rules(&mut board, &text) {
                 Ok(n) => println!("rules applied: {n} settings"),
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
             },
-            Err(e) => eprintln!("error: cannot read {rules_path}: {e}"),
+            Err(e) => {
+                eprintln!("error: cannot read {rules_path}: {e}");
+                return ExitCode::FAILURE;
+            }
         }
     }
     if let Some(ses_path) = flag_value("--import-ses") {
         match std::fs::read_to_string(ses_path) {
             Ok(text) => match freerouting::io::import_ses(&mut board, &text) {
-                Ok(s) => println!("session applied: {} wires, {} vias", s.wires, s.vias),
-                Err(e) => eprintln!("error: {e}"),
+                Ok(s) => {
+                    println!("session applied: {} wires, {} vias", s.wires, s.vias);
+                    if !s.unknown_nets.is_empty() {
+                        eprintln!(
+                            "error: session names {} net(s) unknown to the design: {:?}",
+                            s.unknown_nets.len(),
+                            s.unknown_nets
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
             },
-            Err(e) => eprintln!("error: cannot read {ses_path}: {e}"),
+            Err(e) => {
+                eprintln!("error: cannot read {ses_path}: {e}");
+                return ExitCode::FAILURE;
+            }
         }
     }
 

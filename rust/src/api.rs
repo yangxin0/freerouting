@@ -224,11 +224,16 @@ fn route(
                 let mut map = jobs_bg.lock().unwrap();
                 if let Some(job) = map.get_mut(&id) {
                     match result {
-                        Ok((ses, score)) => {
+                        Ok((ses, score, issues)) => {
                             job.output_ses = Some(ses);
                             job.score = Some(score);
                             job.state = if cancel.load(Ordering::SeqCst) {
                                 JobState::Cancelled
+                            } else if let Some(gate) = issues {
+                                // incomplete or violating output is not a
+                                // success; the session stays downloadable
+                                job.error = Some(gate);
+                                JobState::Failed
                             } else {
                                 JobState::Completed
                             };
@@ -357,20 +362,7 @@ fn mcp_dispatch(request: &str, jobs: &Jobs, route_seconds: u64) -> String {
 }
 
 fn json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    format!("\"{}\"", crate::io::json::escape(s))
 }
 
 fn mcp_result(id: &crate::io::json::Json, result: &str) -> String {
@@ -393,7 +385,15 @@ fn mcp_error(id: crate::io::json::Json, code: i32, message: &str) -> String {
     )
 }
 
-fn run_job(dsn: &str, route_seconds: u64, _cancel: &AtomicBool) -> Result<(String, f64), String> {
+/// Routes one job. Returns the session output, the score, and — when the
+/// routed board is incomplete or violates clearances — a gate message the
+/// caller reports as the job error (the output stays downloadable, like
+/// the CLI writing its output while exiting 2/3).
+fn run_job(
+    dsn: &str,
+    route_seconds: u64,
+    cancel: &AtomicBool,
+) -> Result<(String, f64, Option<String>), String> {
     let mut board = import_dsn(dsn).map_err(|e| format!("{e}"))?;
     let all_layers = board.layer_structure.layer_count().saturating_sub(1);
     let via_padstack = (1..=board.padstacks.count())
@@ -422,12 +422,36 @@ fn run_job(dsn: &str, route_seconds: u64, _cancel: &AtomicBool) -> Result<(Strin
         ripup_penalty: 0.0,
         deadline: None,
     };
+    // Route in bounded slices so a cancel request takes effect between
+    // slices instead of being ignored until the whole budget is spent
+    // (TimeLimit is Copy-plumbed through the router, so the flag cannot
+    // ride inside it).
     let limit = TimeLimit::new(route_seconds.saturating_mul(1000));
-    batch_route_passes_with_time_limit(&mut board, &request, 99, Some(&limit));
-    crate::autoroute::combine_all_traces(&mut board);
-    crate::autoroute::pull_tight_all(&mut board, 3);
+    let all_connected = |board: &crate::board::basic_board::BasicBoard| {
+        (1..=board.rules.nets.max_net_no()).all(|n| board.net_is_completely_connected(n))
+    };
+    while !cancel.load(Ordering::SeqCst) && !limit.limit_exceeded() && !all_connected(&board) {
+        let slice = TimeLimit::new(limit.remaining_ms().clamp(1, 2_000));
+        batch_route_passes_with_time_limit(&mut board, &request, 99, Some(&slice));
+    }
+    if !cancel.load(Ordering::SeqCst) {
+        crate::autoroute::combine_all_traces(&mut board);
+        crate::autoroute::pull_tight_all(&mut board, 3);
+    }
     let stats = crate::scoring::BoardStatistics::collect(&board);
     let score = stats.normalized_score(&crate::scoring::ScoringSettings::default());
     let ses = export_ses(&board, "api_job", board.resolution);
-    Ok((ses, score))
+    // final gate (the CLI's exit-2/exit-3 equivalent): a routing result
+    // that is incomplete or violates clearances must not read as success
+    let report = crate::drc::check_board(&board);
+    let issues = if report.unconnected.is_empty() && report.violations.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "routing gate: {} unconnected net(s), {} clearance violation(s)",
+            report.unconnected.len(),
+            report.violations.len()
+        ))
+    };
+    Ok((ses, score, issues))
 }

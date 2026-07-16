@@ -45,18 +45,24 @@ fn oval_shape(dx: f64, dy: f64) -> TileShape {
 pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
     let doc = parse_json(content)?;
     let unit = doc.str_or("unit", "MM");
-    let resolution = match doc.get("resolution").and_then(|v| v.as_f64()) {
-        Some(r) if r > 1.0 => r as i32,
-        _ => 10_000, // Java: 0.1 µm default for mm
+    // Java KiCadJsonReader: `resolution` is board units per DOCUMENT unit
+    // (mil/um/mm), clamped to >= 1; the 10000 default applies ONLY to an
+    // unspecified-resolution mm document. Converting through an mm basis
+    // instead coarsened valid low-resolution MIL/UM inputs (a 10-units/mil
+    // document became 10-units/mm — a 40x coarser grid).
+    let resolution = {
+        let r = doc
+            .get("resolution")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0)
+            .max(1.0) as i32;
+        if r == 1 && unit.eq_ignore_ascii_case("MM") {
+            10_000 // Java: 0.1 µm default for mm
+        } else {
+            r
+        }
     };
-    let to_units = |v: f64| -> f64 {
-        let mm = match unit.as_str() {
-            "MIL" => v * 0.0254,
-            "UM" => v / 1000.0,
-            _ => v,
-        };
-        mm * resolution as f64
-    };
+    let to_units = |v: f64| -> f64 { v * resolution as f64 };
     let to_int = |v: f64| to_units(v).round() as i32;
     // KiCad's Y axis points down; the board's points up (Java negates too)
     let point = |p: Option<&Json>| -> IntPoint {
@@ -280,11 +286,10 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
 
     let mut board = BasicBoard::new(stack, rules, padstacks);
     board.resolution = resolution;
-    // `to_units` normalized every coordinate onto an mm basis (mm * resolution),
-    // so the board's unit is millimetres regardless of the document's declared
-    // unit. Persist it, or board_units_per_mm() would later assume micrometres
-    // and mis-scale all mm reporting.
-    board.unit = "mm".to_string();
+    // the board scale is `resolution` units per DOCUMENT unit: persist the
+    // document's unit token (board_units_per_mm() understands mil/um/mm),
+    // or all mm reporting would mis-scale for MIL/UM documents
+    board.unit = unit.to_ascii_lowercase();
 
     // components and pads: each pad becomes a system-fixed pin
     let mut component_no = 0i32;
@@ -444,6 +449,26 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
         // needs a trace endpoint at the pad)
         board.split_traces_at_via(id);
     }
+
+    // board outline: keepout strips along the closed corner list on every
+    // layer, exactly like the DSN boundary — without them an outline-only
+    // reload was unconfined and routes could leave the board
+    if let Some(outline) = doc.get("outline") {
+        let corners: Vec<IntPoint> = outline
+            .arr("corners")
+            .iter()
+            .map(|p| point(Some(p)))
+            .collect();
+        if corners.len() >= 3 {
+            let default_clearance = board.rules.clearance_matrix.get_value(1, 1, 0, false);
+            crate::io::dsn_import::insert_boundary_keepouts(
+                &mut board,
+                &corners,
+                (default_clearance / 2).max(1),
+                crate::rules::BoardRules::default_clearance_class(),
+            );
+        }
+    }
     Ok(board)
 }
 
@@ -451,6 +476,69 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
 mod tests {
     use super::*;
     use crate::board::ItemKind;
+
+    #[test]
+    fn mil_documents_scale_by_units_per_document_unit() {
+        // Java semantics: resolution = board units per DOCUMENT unit. A
+        // 10-units/mil document once became 10-units/mm (40x coarser).
+        let doc = r#"{
+          "unit": "MIL",
+          "resolution": 10,
+          "layers": [{"index": 0, "name": "F.Cu", "type": "signal"}],
+          "netClasses": [],
+          "nets": [{"id": 1, "name": "N1", "className": "Default"}],
+          "components": [],
+          "traces": [{"netName": "N1", "layerIndex": 0, "width": 10,
+                      "points": [{"x": 0, "y": 0}, {"x": 100, "y": 0}]}],
+          "vias": []
+        }"#;
+        let board = import_kicad_json(doc).expect("import");
+        assert_eq!(board.resolution, 10, "10 units per mil");
+        assert_eq!(board.unit, "mil");
+        let trace_bb = board
+            .items()
+            .find(|(_, it)| matches!(it.kind, ItemKind::PolylineTrace(_)))
+            .map(|(_, it)| it.bounding_box(&board.padstacks))
+            .expect("trace imported");
+        // 100 mil * 10 units/mil = 1000 units (the mm detour gave 25)
+        assert!(
+            trace_bb.ur.x >= 1000,
+            "100 mil must scale to 1000 board units, got bbox {trace_bb:?}"
+        );
+        // mm reporting: 10 units/mil = 10/25.4*1000 units per mm
+        assert!((board.board_units_per_mm() - 10.0 / 25.4 * 1000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn outline_reload_confines_the_board() {
+        // the writer emits an outline; the reader must turn it into
+        // boundary keepout strips (an outline-only reload was unconfined)
+        let doc = r#"{
+          "unit": "MM",
+          "layers": [
+            {"index": 0, "name": "F.Cu", "type": "signal"},
+            {"index": 1, "name": "B.Cu", "type": "signal"}
+          ],
+          "netClasses": [],
+          "nets": [{"id": 1, "name": "N1", "className": "Default"}],
+          "components": [],
+          "outline": {"corners": [{"x": 0, "y": 0}, {"x": 50, "y": 0},
+                                  {"x": 50, "y": -40}, {"x": 0, "y": -40}],
+                      "clearance": 0.2},
+          "traces": [],
+          "vias": []
+        }"#;
+        let board = import_kicad_json(doc).expect("import");
+        let boundary_strips = board
+            .items()
+            .filter(|(_, it)| matches!(&it.kind, ItemKind::ObstacleArea(a) if !a.is_conduction))
+            .count();
+        // 4 edges on each of the 2 layers
+        assert_eq!(
+            boundary_strips, 8,
+            "the outline must become keepout strips on every layer"
+        );
+    }
 
     const MINI: &str = r#"{
       "unit": "MM",

@@ -926,12 +926,31 @@ impl BasicBoard {
         net_items.iter().all(|id| connected.contains(id))
     }
 
+    /// Invalidation shared by the metadata setters below: fixed state,
+    /// component and obstacle flags decide what the router may rip, move
+    /// or shove, so cached expansion rooms over the item's regions are
+    /// stale after a change (the geometry is unchanged, the
+    /// classification is not).
+    fn log_metadata_change(&mut self, id: ItemId) {
+        if let Some(item) = self.get_item(id).cloned() {
+            self.log_item_regions(&item);
+        }
+    }
+
     /// Marks an item as belonging to a component (pins are not ripped up
-    /// and not written to session files).
+    /// and not written to session files). Undoable.
     pub fn set_component_no(&mut self, id: ItemId, component_no: i32) {
+        if self
+            .get_item(id)
+            .is_none_or(|i| i.base.component_no == component_no)
+        {
+            return;
+        }
+        self.item_list.save_for_undo(&id);
         if let Some(item) = self.item_list.get_mut(&id) {
             item.base.component_no = component_no;
         }
+        self.log_metadata_change(id);
     }
 
     /// Sets the diagnostic birth tag of an alive item.
@@ -941,21 +960,38 @@ impl BasicBoard {
         }
     }
 
-    /// Sets the fixed state of an item.
+    /// Sets the fixed state of an item. Undoable: the previous state is
+    /// restored on undo instead of leaking through the snapshot.
     pub fn set_fixed_state(&mut self, id: ItemId, state: crate::board::FixedState) {
+        if self
+            .get_item(id)
+            .is_none_or(|i| i.base.fixed_state == state)
+        {
+            return;
+        }
+        self.item_list.save_for_undo(&id);
         if let Some(item) = self.item_list.get_mut(&id) {
             item.base.fixed_state = state;
         }
+        self.log_metadata_change(id);
     }
 
     /// Marks a conduction area as also being a clearance obstacle to
-    /// foreign-net copper (Java `ConductionArea.is_obstacle`).
+    /// foreign-net copper (Java `ConductionArea.is_obstacle`). Undoable.
     pub fn set_area_is_obstacle(&mut self, id: ItemId, is_obstacle: bool) {
+        let changes = self.get_item(id).is_some_and(
+            |i| matches!(&i.kind, ItemKind::ObstacleArea(a) if a.is_obstacle != is_obstacle),
+        );
+        if !changes {
+            return;
+        }
+        self.item_list.save_for_undo(&id);
         if let Some(item) = self.item_list.get_mut(&id) {
             if let ItemKind::ObstacleArea(a) = &mut item.kind {
                 a.is_obstacle = is_obstacle;
             }
         }
+        self.log_metadata_change(id);
     }
 
     /// Splits a trace of `net_no` on `layer` whose center line passes
@@ -1082,6 +1118,11 @@ impl BasicBoard {
                     || other.base.net_nos != base.net_nos
                     || other.base.is_user_fixed()
                     || base.is_user_fixed()
+                    // never absorb a trace with a DIFFERENT protection level:
+                    // combining a ShoveFixed trace into an Unfixed one (or
+                    // vice versa) would silently change what the shove and
+                    // ripup algorithms may touch
+                    || other.base.fixed_state != base.fixed_state
                 {
                     continue;
                 }
@@ -1233,6 +1274,48 @@ mod tests {
                 .all(|(_, i)| i.base.fixed_state == crate::board::FixedState::UserFixed),
             "split pieces must keep the protected state"
         );
+    }
+
+    #[test]
+    fn metadata_changes_are_undoable() {
+        // fixed/component/obstacle flags decide what the router may touch;
+        // mutating them past a snapshot must be restored by undo, not leak
+        let mut board = test_board();
+        let trace = board.insert_trace(trace_polyline(&[(0, 0), (10000, 0)]), 0, 100, vec![1], 1);
+        board.generate_snapshot();
+        board.set_fixed_state(trace, crate::board::FixedState::ShoveFixed);
+        board.set_component_no(trace, 7);
+        assert!(board.get_item(trace).unwrap().base.is_shove_fixed());
+        assert_eq!(board.get_item(trace).unwrap().base.component_no, 7);
+        assert!(board.undo());
+        let base = &board.get_item(trace).unwrap().base;
+        assert!(
+            !base.is_shove_fixed(),
+            "undo must restore the fixed state changed after the snapshot"
+        );
+        assert_eq!(
+            base.component_no, 0,
+            "undo must restore the component flag changed after the snapshot"
+        );
+    }
+
+    #[test]
+    fn traces_with_different_protection_do_not_combine() {
+        // absorbing a ShoveFixed trace into an Unfixed one (or vice versa)
+        // would silently change what shove/ripup may touch
+        let mut board = test_board();
+        let a = board.insert_trace(trace_polyline(&[(0, 0), (5000, 0)]), 0, 100, vec![1], 1);
+        let b = board.insert_trace(
+            trace_polyline(&[(5000, 0), (5000, 5000)]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        board.set_fixed_state(b, crate::board::FixedState::ShoveFixed);
+        let combined = board.combine_trace(a);
+        assert_eq!(combined, a, "protection mismatch must prevent combining");
+        assert!(board.get_item(b).is_some(), "the protected trace survives");
     }
 
     #[test]

@@ -18,7 +18,14 @@ fn net_violations(board: &BasicBoard, net_no: i32) -> usize {
             continue;
         }
         for (s, l) in item.tile_shapes(&board.padstacks) {
-            let search_radius = board.rules.clearance_matrix.max_value(*l).max(0) as f64;
+            // the radius must also cover `*_same_net` rules, which live
+            // outside the matrix and can exceed its maximum
+            let search_radius = board
+                .rules
+                .clearance_matrix
+                .max_value(*l)
+                .max(board.rules.max_same_net_clearance())
+                .max(0) as f64;
             for oid in board.overlapping_items(&s.offset(search_radius), Some(*l)) {
                 if oid == *id {
                     continue;
@@ -26,28 +33,15 @@ fn net_violations(board: &BasicBoard, net_no: i32) -> usize {
                 let Some(other) = board.get_item(oid) else {
                     continue;
                 };
-                if other.base.shares_net(&item.base) {
+                // The authoritative DRC's pair predicate: same (other, item)
+                // matrix order, same same-net drill rule, same keepout and
+                // conduction exclusions — the optimizer's own violation gate
+                // must agree with the final DRC, and skipping ALL same-net
+                // pairs here let it accept same-net drill violations the
+                // final check then reported.
+                let Some(cl) = crate::drc::required_clearance(board, item, other, *l) else {
                     continue;
-                }
-                if let ItemKind::ObstacleArea(a) = &other.kind {
-                    if a.is_conduction && !a.is_obstacle {
-                        continue;
-                    }
-                    if a.via_only && !matches!(item.kind, ItemKind::Via(_)) {
-                        continue;
-                    }
-                }
-                // Same argument order and tolerance as the authoritative DRC
-                // (drc.rs): (other, item) to match Java's asymmetric matrix, and
-                // a unit-independent relative epsilon instead of one board unit,
-                // so the optimizer's own violation gate agrees with the final DRC
-                // and cannot accept a candidate the final check would reject.
-                let cl = board.rules.clearance_matrix.get_value(
-                    other.base.clearance_class,
-                    item.base.clearance_class,
-                    *l,
-                    false,
-                ) as f64;
+                };
                 let check = s.offset(cl);
                 if other.tile_shapes(&board.padstacks).iter().any(|(os, ol)| {
                     ol == l

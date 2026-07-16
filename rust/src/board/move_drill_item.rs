@@ -60,8 +60,9 @@ pub fn move_via(
     let ItemKind::Via(via) = &item.kind else {
         return false;
     };
-    if item.base.is_user_fixed() || item.base.component_no != 0 {
-        return false; // pins and fixed vias never move
+    if item.base.is_shove_fixed() || item.base.component_no != 0 {
+        return false; // pins and (shove-)fixed vias never move (Java:
+                      // MoveDrillItemAlgo.check gates on is_shove_fixed)
     }
     // like Java: only vias connected exclusively to traces may move
     for contact in board.get_normal_contacts(via_id) {
@@ -114,6 +115,15 @@ pub fn move_via(
     // create a zero-area overlap.
     bridge_contacts.sort_unstable_by_key(|(p, l, hw, cl)| (p.x, p.y, *l, *hw, *cl));
     bridge_contacts.dedup();
+    // every needed bridge must satisfy the board's angle restriction — a
+    // 45°/90° board must not gain a free-angle stub from a via move
+    let restriction = board.rules.get_trace_angle_restriction();
+    if bridge_contacts
+        .iter()
+        .any(|(p, _, _, _)| *p != new_center && !restriction.segment_is_compliant(*p, new_center))
+    {
+        return false;
+    }
 
     board.generate_snapshot();
     board.remove_item(via_id);
@@ -159,7 +169,7 @@ pub fn move_via(
             return false;
         }
     }
-    board.insert_via(
+    let new_via = board.insert_via(
         padstack,
         new_center,
         net_nos.clone(),
@@ -168,6 +178,7 @@ pub fn move_via(
     );
     // Bridge each previously-contacting trace from its endpoint to the new
     // center, preserving connectivity (Java: DrillItem.move_by insert_trace).
+    let mut new_items = vec![new_via];
     for (endpoint, layer, half_width, trace_cl_class) in bridge_contacts {
         if endpoint == new_center {
             continue;
@@ -176,7 +187,28 @@ pub fn move_via(
         if bridge.is_empty() {
             continue;
         }
-        board.insert_trace(bridge, layer, half_width, net_nos.clone(), trace_cl_class);
+        new_items.push(board.insert_trace(
+            bridge,
+            layer,
+            half_width,
+            net_nos.clone(),
+            trace_cl_class,
+        ));
+    }
+    // a same-net trace running THROUGH the new center must be split there,
+    // or the via's contact never registers (contacts need a trace endpoint
+    // at the pad)
+    board.split_traces_at_via(new_via);
+    // final gate: everything this move created must satisfy the
+    // authoritative DRC pairwise rule (incl. same-net drill rules) — the
+    // shove corridor above ignores same-net items and never checked the
+    // bridge stubs at all
+    if !new_items
+        .iter()
+        .all(|&id| crate::drc::item_is_clear(board, id))
+    {
+        board.undo();
+        return false;
     }
     board.pop_snapshot();
     true
@@ -205,7 +237,7 @@ pub fn shove_vias(
             board.get_item(*id).is_some_and(|it| {
                 matches!(it.kind, ItemKind::Via(_))
                     && it.base.component_no == 0
-                    && !it.base.is_user_fixed()
+                    && !it.base.is_shove_fixed()
                     && !it.base.net_nos.iter().any(|n| own_net_nos.contains(n))
             })
         })
@@ -329,6 +361,27 @@ mod tests {
         assert!(
             reaches_via,
             "moved via must stay connected to its trace via the bridge"
+        );
+    }
+
+    #[test]
+    fn shove_fixed_vias_never_move() {
+        // Java MoveDrillItemAlgo.check gates on is_shove_fixed, not only
+        // user-fixed: a SHOVE_FIXED via must survive the corridor shove
+        let mut board = test_board();
+        let via = board.insert_via(
+            1,
+            crate::geometry::planar::IntPoint::new(0, 0),
+            vec![2],
+            1,
+            false,
+        );
+        board.set_fixed_state(via, crate::board::FixedState::ShoveFixed);
+        let corridor = TileShape::Box(IntBox::from_coords(-5000, -700, 5000, 700));
+        assert!(shove_vias(&mut board, &corridor, 0, &[1], 1, 2));
+        assert!(
+            board.get_item(via).is_some(),
+            "a shove-fixed via must never be moved"
         );
     }
 

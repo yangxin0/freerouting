@@ -25,4 +25,20 @@ impl AngleRestriction {
             _ => None,
         }
     }
+
+    /// True if the segment a→b satisfies this restriction: axis-parallel
+    /// for 90°, axis-parallel or diagonal for 45°.
+    pub fn segment_is_compliant(
+        self,
+        a: crate::geometry::planar::IntPoint,
+        b: crate::geometry::planar::IntPoint,
+    ) -> bool {
+        let dx = (b.x - a.x) as i64;
+        let dy = (b.y - a.y) as i64;
+        match self {
+            AngleRestriction::None => true,
+            AngleRestriction::NinetyDegree => dx == 0 || dy == 0,
+            AngleRestriction::FortyfiveDegree => dx == 0 || dy == 0 || dx.abs() == dy.abs(),
+        }
+    }
 }

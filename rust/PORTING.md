@@ -275,15 +275,20 @@ RESOLVED — router performance (was the last finding-#6 gap):
 
 KNOWN OPEN GAPS (not yet fixed) — do NOT claim these are done:
 
-1. **Autoroute `layer_rule` (from finding #2, Part B) — router-core, not a
-   grammar port.** `(layer_rule L (active on/off) (preferred_direction …)
-   (…trace_costs …))` needs a per-layer directional cost model and active-layer
-   gating in the maze search. The Rust router has NEITHER (its cost is
-   distance + via-cost + ripup only, and `active_routing_layer` has no
-   consumers). Router-behavior work (a route-quality / cost-model feature), not
-   a bounded importer feature. Same category: net-class `use_layer` (active
-   routing layers) and per-layer trace widths are parsed nowhere/partially and
-   have no router consumers.
+1. **Autoroute `layer_rule` directional costs — router-core, not a grammar
+   port.** `(layer_rule L (preferred_direction …) (…trace_costs …))` needs a
+   per-layer directional cost model; the Rust router's cost is still
+   distance + via-cost + ripup only. PARTIALLY CLOSED in the fifth round:
+   net-class `use_layer` is now parsed (`(circuit (use_layer …))`, Java
+   `Network.create_active_trace_layers`) and ENFORCED — the maze drill
+   expansion skips inactive net-class layers
+   (`BoardRules::is_active_routing_layer`), with a routing test proving a
+   B.Cu-only destination is unreachable when B.Cu is disabled. Per-layer
+   trace WIDTHS remain single-width in the maze: the router samples the
+   class's MAXIMUM width over its active signal layers
+   (`get_trace_half_width_max_active`) — never undersized copper, but wider
+   than Java on the narrow layers of a layer-dependent class. True
+   per-layer widths and directional costs remain open.
 2. ~~**Capacity-overflow panic on 5 fixture boards.**~~ FIXED in the
    fourth round (see below): a degenerate polyline (fold-back corner run)
    underflowed `arr.len() - 1` in `offset_shapes`. All five boards
@@ -371,6 +376,10 @@ ASSESSED, DOCUMENTED AS DESIGNED (not code changes):
   `pin_exit_corner` + endpoint-preserving pull-tight (J2: 1 of 102 ends).
   Residual exposure: Java freerouting reloading a Rust SES may see those few
   ends as opens. Revisit only with a center-snapping insert correction.
+  Fifth round: the count is now PINNED by a regression test — routed J2
+  after combine+pull-tight must show ≤ 2 off-center in-pad trace ends
+  (`full_board_drc_over_a_routed_board` in cli_and_drc.rs), so a regression
+  in either mechanism fails CI instead of silently growing tails.
 - **Imported-wiring violations** (Issue093: 130, Issue187: 670) are
   Java-faithful: the clearance matrix rounds odd rules up to even
   (2541 → 2542) exactly like Java's `ClearanceMatrix`, so KiCad wiring at
@@ -388,6 +397,121 @@ unrouted" number is NOT comparable across the boundary because scoring now
 counts airlines, not nets. The five capacity-overflow boards route without
 panics (10 s smoke: smoothieboard 102/245, bm06 21/38, bm11 18/35,
 Issue730-bm11 18/35, RoyalBlue54L 54/95 — budget-bound, not crash-bound).
+
+## Fifth-round remediation (2026-07-16) — verification findings
+
+An independent verification of HEAD cf6c1eed produced 13 findings (11 P1,
+2 P2). Every finding is fixed or explicitly assessed below; each code fix
+carries a regression test. Gates: 254 tests green, fmt/clippy clean;
+fixture sanity re-run (J2 24/24 clean; Issue093 173/173 @130 imported
+violations and Issue187 529/529 @670 — the documented Java-faithful
+counts; Issue413 5/5 clean; Issue721 30/30, optimizer no longer drifts
+139→143 violations).
+
+FIXED:
+
+- **One pairwise DRC predicate everywhere** (`drc::required_clearance` +
+  `drc::item_is_clear`): Java's `Item.is_obstacle` (same-net drill rules
+  with the attach exemption, keepout/conduction/pin exclusions, the
+  `(other, item)` matrix order) extracted from `check_board` and now shared
+  by the optimizer's local gate (which skipped ALL same-net pairs), the
+  forced-via insert (which excluded same-net items from its blocked check),
+  and the via-move paths. `via_free`/`via_site_is_clear` query radii now
+  include `max_same_net_clearance()`, so a `*_same_net` rule beyond the
+  matrix maximum is discovered (the review's 3000-vs-200 repro is a test).
+- **Via relocation legality.** `move_via` gates its endpoint bridges on the
+  board's angle restriction up front, splits pass-through same-net traces
+  at the new center (`split_traces_at_via`), and DRC-gates every item it
+  created before committing (undo otherwise). `opt_via`'s single-contact
+  (plane/fanout) path now has the same `item_is_clear` gate as the
+  two-contact path — a test proves a fanout via is never pulled ONTO its
+  same-net through-pad (the old unit test asserted exactly that illegal
+  move and was corrected).
+- **ShoveFixed protection.** Move/opt paths gate on `is_shove_fixed()`
+  like Java (`MoveDrillItemAlgo.check`, `OptViaAlgo`), `combine_trace`
+  refuses to absorb a trace with a different protection level, and
+  `shorten_trace_at` preserves the source trace's fixed state instead of
+  recreating it Unfixed. Ripup keeps Java's `is_routable()` rule —
+  `!is_user_fixed()` — so ShoveFixed items remain rippable BY DESIGN
+  (Trace/Via.is_routable in Java allows it).
+- **Transactional metadata.** `set_fixed_state`, `set_component_no` and
+  `set_area_is_obstacle` call `save_for_undo` and log the item's regions
+  (classification changes invalidate cached rooms); a test proves undo
+  restores flags changed after a snapshot.
+- **Repair acceptance is set-based**: a round is kept only when every net
+  complete BEFORE the round is still complete after (the scalar count
+  admitted a one-for-one swap) AND violations strictly fall.
+- **SES import DRC equivalence.** Session vias import with
+  `attach_allowed = true` (Java `SesReader.processViaScope` hardcodes it;
+  deriving false re-flagged the fanout exemption — the review's 7
+  hole-clearance repro is now a test asserting reload ≤ routed
+  violations). Unknown `net_out` scopes are skipped and reported
+  (`SesImportSummary::unknown_nets`) instead of importing netless copper;
+  the CLI fails on them.
+- **DSN round-trip.** `strip_wiring` matches case-insensitively (Java
+  scanner `%ignorecase`; uppercase `(WIRING …)` no longer duplicates
+  copper — Issue413 fixture test). The s-expression reader accepts BOTH
+  quote chars at token start like Java's STRING1/STRING2 scanner states
+  (Issue721's `'GND'` class members now join their classes — fixture
+  verified). Wiring-level `(clearance_class …)` is honored; `(type
+  shove_fixed|fix|protect)` map to ShoveFixed/SystemFixed/UserFixed
+  (Java `Wiring.calc_fixed`) and the exporter writes the fixed state
+  back, so protection survives the round trip. Documented deviation:
+  Java maps UNKNOWN types (including KiCad's `route`) to USER_FIXED;
+  this port keeps plain `route` wiring rippable so pre-routed boards
+  stay optimizable.
+- **Net-class constraints.** `(circuit (use_layer …))` and
+  `(shove_fixed on)` parse in the class scope; the maze drill expansion
+  enforces active layers; the router samples the class width as the
+  max over active layers; fanout goes through `request_for_net` (was:
+  base-request width). The `.rules` sidecar persists and re-reads
+  use_layer/shove_fixed/use_via per class.
+- **Plane flag.** DSN `(plane …)` import sets `Net::contains_plane`; the
+  KiCad writer prefers the flag over deriving from serialized areas; the
+  reader already consumed it.
+- **KiCad JSON.** Reader resolution follows Java (`resolution` = board
+  units per DOCUMENT unit, ≥1, mm-only 10000 default) — a 10-units/mil
+  document no longer collapses to a 40x coarser grid (test). The reader
+  consumes the `outline` into boundary keepout strips (shared
+  `insert_boundary_keepouts`; outline-only reloads are confined — test).
+  The writer derives per-class `viaDiameter` from the class's actual via
+  rule padstack (drill = diameter/2, Java's rule) instead of fabricating
+  0.6/0.3.
+- **API/CLI contracts.** `run_job` routes in ≤2 s slices checking the
+  cancel flag (TimeLimit is Copy-plumbed; the flag cannot ride inside
+  it) and gates the result: incomplete or violating output marks the job
+  FAILED with a gate message while the session stays downloadable —  the
+  CLI's exit-2/3 equivalent. CLI `--rules`/`--import-ses` errors exit
+  FAILURE instead of logging and continuing.
+- **JSON escaping**: one shared `io::json::escape` (quotes, backslashes,
+  all control chars per RFC 8259) used by the KiCad writer, the DRC
+  report and the API.
+
+ASSESSED, DOCUMENTED AS DESIGNED:
+
+- **Ripup one-broken-victim allowance** (`route_net_with_ripup`): at most
+  one victim net may stay broken (a 1-for-1 swap) — deliberate and
+  benchmark-backed (bounded cascading recovery regressed completion
+  161/173 vs 166/173 by time starvation, iterations 55-58); later passes
+  and the restart fallback attack the rotated failure set. All ripup
+  routing runs inside that function's snapshot, so a failed insertion
+  after rips always rolls back (`failed_connections > 0` fails the
+  transaction); the swap is the ONLY committed deviation.
+- **Plain-path shove residue**: a failed insert after `shove_aside` leaves
+  shoved-aside (still legal, still connected) foreign traces in their new
+  positions — Java's pure-check-then-insert doesn't perturb, ours is
+  check-by-doing. Board stays legal; only geometry differs.
+- **Off-center termination** remains as assessed in round four, now with
+  a pinned regression bound (see the fourth-round note).
+- **KiCad pad geometry** stays rectangles in the writer: the collapsed
+  item model keeps resolved tile shapes, not the pad-shape taxonomy;
+  the writer's `outline` remains the item bounding box (the exact
+  outline polygon is not reconstructible from boundary keepout strips).
+  Both are interchange-fidelity limits, not routing-correctness ones.
+- **Net-class `shove_fixed` consumer**: Java consumes it only in the
+  interactive stitch route (`RouteState`), which has no Rust counterpart;
+  batch-routed items are UNFIXED in both implementations. The flag is
+  parsed, persisted and round-tripped.
 
 ## OPEN ITEMS (reconciled 2026-07-15, iter 190)
 

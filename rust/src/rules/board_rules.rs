@@ -116,6 +116,34 @@ impl BoardRules {
             .get_trace_half_width(layer)
     }
 
+    /// The LARGEST trace half width of the net's class over its active
+    /// signal layers. The single-width maze search routes every layer at
+    /// one width; taking the maximum keeps a layer-dependent class legal
+    /// on all layers it may use (sampling layer 0 under-sized the trace
+    /// wherever another layer's rule was wider).
+    pub fn get_trace_half_width_max_active(&self, net_no: i32) -> i32 {
+        let Some(net) = self.nets.get_by_no(net_no) else {
+            return 0;
+        };
+        let class = self.net_classes.get(net.get_class());
+        (0..class.layer_count())
+            .filter(|&l| class.is_active_routing_layer(l))
+            .map(|l| class.get_trace_half_width(l))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// True if the net's class allows routing on `layer` (the net-class
+    /// part of Java `AutorouteControl.layer_active`).
+    pub fn is_active_routing_layer(&self, net_no: i32, layer: usize) -> bool {
+        let Some(net) = self.nets.get_by_no(net_no) else {
+            return true;
+        };
+        self.net_classes
+            .get(net.get_class())
+            .is_active_routing_layer(layer)
+    }
+
     /// The trace clearance class of `net_no`'s net class (Java:
     /// `NetClass.get_trace_clearance_class`, used to build `AutorouteControl`).
     /// Falls back to the default clearance class when the net is unknown.

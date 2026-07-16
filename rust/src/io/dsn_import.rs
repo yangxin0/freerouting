@@ -85,6 +85,34 @@ fn resolve_clearance_class(rules: &mut BoardRules, name: &str) -> usize {
     idx
 }
 
+/// The fixed state of a `(wire ...)`/`(via ...)` wiring node from its
+/// `(type ...)` attribute, mapped like Java `Wiring.calc_fixed`:
+/// `shove_fixed` → ShoveFixed, `fix` → SystemFixed, `protect` → UserFixed,
+/// `normal`/`route` (and absent) → Unfixed. Deviation from Java: Java maps
+/// every UNKNOWN type (including KiCad's `route`) to USER_FIXED; this port
+/// keeps plain `route` wiring rippable so pre-routed boards stay optimizable
+/// (SES-imported sessions are USER_FIXED like Java's SesReader).
+fn wiring_fixed_state(node: &SExpr) -> crate::board::FixedState {
+    let t = node.child("type").and_then(|t| t.arg()).unwrap_or("route");
+    if t.eq_ignore_ascii_case("shove_fixed") {
+        crate::board::FixedState::ShoveFixed
+    } else if t.eq_ignore_ascii_case("fix") {
+        crate::board::FixedState::SystemFixed
+    } else if t.eq_ignore_ascii_case("protect") {
+        crate::board::FixedState::UserFixed
+    } else {
+        crate::board::FixedState::Unfixed
+    }
+}
+
+/// An explicit wiring-level `(clearance_class NAME)` resolved against the
+/// board's clearance matrix (Java `Wiring.read_wire_scope`); `None` when
+/// absent or unknown, letting the caller fall back to the net's class.
+fn wiring_clearance_class(board: &BasicBoard, node: &SExpr) -> Option<usize> {
+    let name = node.child("clearance_class").and_then(|c| c.arg())?;
+    board.rules.clearance_matrix.get_no(name)
+}
+
 struct ImagePin {
     padstack_name: String,
     pin_name: String,
@@ -126,28 +154,42 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
 
 /// The document with its `(wiring ...)` sections removed. Spans are found
 /// by paren counting (quoted strings have no escapes, matching the
-/// parser); an unbalanced span leaves the document untouched.
+/// parser); an unbalanced span leaves the document untouched. The keyword
+/// match is case-insensitive like the parser (`%ignorecase` in Java's
+/// scanner): a case-sensitive find left `(WIRING ...)` in the retained
+/// source, and the exporter then emitted the copper twice.
 fn strip_wiring(content: &str) -> String {
     let mut out = String::with_capacity(content.len());
-    let mut rest = content;
-    while let Some(pos) = rest.find("(wiring") {
+    // ASCII lowercasing is byte-length preserving, so positions found in
+    // `lower` index `content` directly
+    let lower = content.to_ascii_lowercase();
+    let mut cursor = 0usize;
+    while let Some(rel) = lower[cursor..].find("(wiring") {
+        let pos = cursor + rel;
         // require a real section name: "(wiring" then a delimiter
-        let after = rest[pos + "(wiring".len()..].bytes().next();
+        let after = content.as_bytes().get(pos + "(wiring".len()).copied();
         let is_section = after.is_none_or(|c| c.is_ascii_whitespace() || c == b')' || c == b'(');
         let mut end = None;
         if is_section {
-            let bytes = rest.as_bytes();
+            let bytes = content.as_bytes();
             let mut depth = 0usize;
             let mut i = pos;
             while i < bytes.len() {
                 match bytes[i] {
-                    b'"' => {
-                        // parser rule: a lone quote before whitespace/`)`
-                        // is an atom, otherwise a quoted string (no escapes)
+                    q @ (b'"' | b'\'') => {
+                        // parser rules: a quote opens a string only at token
+                        // START (mid-atom quotes are ordinary chars, Java
+                        // SpecChar3); a lone quote before whitespace/`)` is
+                        // an atom, otherwise a quoted string (no escapes)
+                        let token_start = i == 0
+                            || matches!(bytes[i - 1], b'(' | b')')
+                            || bytes[i - 1].is_ascii_whitespace();
                         let next = bytes.get(i + 1);
-                        if next.is_some_and(|c| !c.is_ascii_whitespace() && *c != b')') {
-                            match bytes[i + 1..].iter().position(|&c| c == b'"') {
-                                Some(q) => i += q + 1,
+                        if token_start
+                            && next.is_some_and(|c| !c.is_ascii_whitespace() && *c != b')')
+                        {
+                            match bytes[i + 1..].iter().position(|&c| c == q) {
+                                Some(p) => i += p + 1,
                                 None => break, // unterminated string
                             }
                         }
@@ -167,17 +209,17 @@ fn strip_wiring(content: &str) -> String {
         }
         match end {
             Some(end) => {
-                out.push_str(rest[..pos].trim_end_matches([' ', '\t']));
-                rest = &rest[end..];
+                out.push_str(content[cursor..pos].trim_end_matches([' ', '\t']));
+                cursor = end;
             }
             None => {
                 // not a wiring section (or unbalanced): keep it verbatim
-                out.push_str(&rest[..pos + "(wiring".len()]);
-                rest = &rest[pos + "(wiring".len()..];
+                out.push_str(&content[cursor..pos + "(wiring".len()]);
+                cursor = pos + "(wiring".len();
             }
         }
     }
-    out.push_str(rest);
+    out.push_str(&content[cursor..]);
     out
 }
 
@@ -673,6 +715,32 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                         .default_item_clearance_classes
                         .set_all(clearance_class_idx);
                 }
+                // (circuit (use_layer L ...)): ONLY the listed layers stay
+                // active routing layers, and inactive layers get trace
+                // width 0 (Java Network.create_active_trace_layers)
+                let use_layers: Vec<usize> = class_node
+                    .children("circuit")
+                    .flat_map(|c| c.children("use_layer"))
+                    .flat_map(|u| u.args())
+                    .filter_map(|n| layer_structure.get_no(n))
+                    .collect();
+                if !use_layers.is_empty() {
+                    class.set_all_layers_active(false);
+                    for &l in &use_layers {
+                        class.set_active_routing_layer(l, true);
+                    }
+                    for l in 0..layer_structure.layer_count() {
+                        if !class.is_active_routing_layer(l) {
+                            class.set_trace_half_width_on_layer(l, 0);
+                        }
+                    }
+                }
+                // (shove_fixed on|off): recorded on the class (Java parses it
+                // in the class scope; its consumer is the interactive stitch
+                // route, which this port does not have)
+                if let Some(v) = class_node.child("shove_fixed").and_then(|s| s.arg()) {
+                    class.set_shove_fixed(v.eq_ignore_ascii_case("on"));
+                }
             }
             // a `(via_rule NAME)` reference binds the class to a named via rule
             // declared in the network scope (Java insert_net_class); it wins
@@ -766,6 +834,14 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
             .iter()
             .map(|n| n.net_number)
             .collect();
+        // the net now carries a plane (Java DsnFile/Network set_contains_plane):
+        // an explicit flag for interchange (KiCad JSON `containsPlane`) instead
+        // of re-deriving it from whichever areas happen to be serialized
+        for &no in &net_nos {
+            if let Some(net) = board.rules.nets.get_by_no_mut(no) {
+                net.set_contains_plane(true);
+            }
+        }
         let area = crate::geometry::planar::PolylineArea::new(
             crate::geometry::planar::PolygonShape::new(corners),
             Vec::new(),
@@ -1119,12 +1195,7 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 })
                 .map(|n| vec![n])
                 .unwrap_or_default();
-            let protected = wire_node
-                .child("type")
-                .and_then(|t| t.arg())
-                .is_some_and(|t| {
-                    t.eq_ignore_ascii_case("protect") || t.eq_ignore_ascii_case("fix")
-                });
+            let fixed_state = wiring_fixed_state(wire_node);
             let polyline = if is_polyline_path {
                 let lines: Vec<crate::geometry::planar::Line> = nums[1..]
                     .chunks_exact(4)
@@ -1145,15 +1216,17 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
             if polyline.is_empty() {
                 continue;
             }
-            // pre-routed wiring keeps its net's clearance class, not the default
-            let clearance_class = net_nos
-                .first()
-                .map(|&n| board.rules.get_trace_clearance_class(n))
-                .unwrap_or_else(BoardRules::default_clearance_class);
+            // an explicit wiring-level (clearance_class ...) wins (Java
+            // Wiring.read_wire_scope); otherwise the wire keeps its net's
+            // clearance class, not the default
+            let clearance_class = wiring_clearance_class(&board, wire_node).unwrap_or_else(|| {
+                net_nos
+                    .first()
+                    .map(|&n| board.rules.get_trace_clearance_class(n))
+                    .unwrap_or_else(BoardRules::default_clearance_class)
+            });
             let id = board.insert_trace(polyline, layer, half_width, net_nos, clearance_class);
-            if protected {
-                board.set_fixed_state(id, crate::board::FixedState::UserFixed);
-            }
+            board.set_fixed_state(id, fixed_state);
         }
         for via_node in wiring.children("via") {
             let args: Vec<&str> = via_node.args().collect();
@@ -1179,16 +1252,13 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 })
                 .map(|n| vec![n])
                 .unwrap_or_default();
-            let protected = via_node
-                .child("type")
-                .and_then(|t| t.arg())
-                .is_some_and(|t| {
-                    t.eq_ignore_ascii_case("protect") || t.eq_ignore_ascii_case("fix")
-                });
-            let clearance_class = net_nos
-                .first()
-                .map(|&n| board.rules.get_trace_clearance_class(n))
-                .unwrap_or_else(BoardRules::default_clearance_class);
+            let fixed_state = wiring_fixed_state(via_node);
+            let clearance_class = wiring_clearance_class(&board, via_node).unwrap_or_else(|| {
+                net_nos
+                    .first()
+                    .map(|&n| board.rules.get_trace_clearance_class(n))
+                    .unwrap_or_else(BoardRules::default_clearance_class)
+            });
             // Java Wiring.read_via_scope: attach_allowed =
             // via_at_smd_allowed && padstack.attach_allowed
             let attach = board.rules.via_at_smd_allowed
@@ -1203,9 +1273,7 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 clearance_class,
                 attach,
             );
-            if protected {
-                board.set_fixed_state(id, crate::board::FixedState::UserFixed);
-            }
+            board.set_fixed_state(id, fixed_state);
         }
     }
     // Register the contacts of pre-routed vias landing mid-trace: a
@@ -1226,8 +1294,9 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
 
 /// Inserts thin keepout strips along the closed outline given by
 /// `corners` on every layer, so routes cannot cross the board boundary
-/// (Java: the tree shapes of `BoardOutline`).
-fn insert_boundary_keepouts(
+/// (Java: the tree shapes of `BoardOutline`). Shared with the KiCad JSON
+/// reader, whose `outline` object is the same closed corner list.
+pub(crate) fn insert_boundary_keepouts(
     board: &mut BasicBoard,
     corners: &[IntPoint],
     half_width: i32,
@@ -1407,6 +1476,201 @@ fn read_pad_shape(node: &SExpr, scale: &dyn Fn(f64) -> i32) -> Option<(TileShape
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uppercase_wiring_is_stripped_and_not_duplicated_on_export() {
+        // the review repro (Issue413 shape): a case-sensitive strip left
+        // (WIRING ...) in the retained source, and the exporter then
+        // emitted the copper twice — doubled copper, self-violations
+        let dsn = r#"(pcb "up.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (rule (width 200) (clearance 200))
+  )
+  (placement)
+  (library)
+  (network (net "N1"))
+  (WIRING
+    (wire (path F.Cu 400 10000 10000 20000 20000) (net "N1") (type route))
+  )
+)"#;
+        let board = import_dsn(dsn).expect("import");
+        let traces = |b: &BasicBoard| {
+            b.items()
+                .filter(|(_, it)| matches!(it.kind, crate::board::ItemKind::PolylineTrace(_)))
+                .count()
+        };
+        assert_eq!(traces(&board), 1, "the uppercase wiring imports once");
+        assert!(
+            !board
+                .dsn_source
+                .as_ref()
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("(wiring"),
+            "the retained source must not keep the uppercase wiring section"
+        );
+        let out = crate::io::dsn_export::export_dsn(&board).expect("export");
+        let board2 = import_dsn(&out).expect("re-import");
+        assert_eq!(traces(&board2), 1, "re-import must not double the copper");
+    }
+
+    #[test]
+    fn single_quoted_class_members_join_their_class() {
+        // Issue721 shape: (class GND 'GND' ...) — the single-quoted member
+        // must resolve to the net, not remain a 'GND' atom in no class
+        let dsn = r#"(pcb "sq.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (rule (width 200) (clearance 200))
+  )
+  (placement)
+  (library)
+  (network
+    (net 'GND')
+    (class GND 'GND' (rule (width 400) (clearance 800)))
+  )
+)"#;
+        let board = import_dsn(dsn).expect("import");
+        let gnd = board.rules.nets.get_by_name("GND");
+        assert!(!gnd.is_empty(), "single-quoted net name must parse");
+        let class_idx = gnd[0].get_class();
+        assert_eq!(
+            board.rules.net_classes.get(class_idx).get_name(),
+            "GND",
+            "the single-quoted member must join its class"
+        );
+    }
+
+    #[test]
+    fn wiring_fixed_states_round_trip_through_export() {
+        // (type shove_fixed) / (type fix) / (type protect) map to their
+        // fixed states on import (Java Wiring.calc_fixed) and are written
+        // back by the exporter, surviving the round trip
+        let dsn = r#"(pcb "fs.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (rule (width 200) (clearance 200))
+  )
+  (placement)
+  (library)
+  (network (net "N1"))
+  (wiring
+    (wire (path F.Cu 400 10000 10000 20000 10000) (net "N1") (type shove_fixed))
+    (wire (path F.Cu 400 10000 20000 20000 20000) (net "N1") (type protect))
+    (wire (path F.Cu 400 10000 30000 20000 30000) (net "N1") (type fix))
+    (wire (path F.Cu 400 10000 40000 20000 40000) (net "N1") (type route))
+  )
+)"#;
+        let states = |b: &BasicBoard| -> Vec<crate::board::FixedState> {
+            let mut v: Vec<_> = b
+                .items()
+                .filter(|(_, it)| matches!(it.kind, crate::board::ItemKind::PolylineTrace(_)))
+                .map(|(_, it)| it.base.fixed_state)
+                .collect();
+            v.sort();
+            v
+        };
+        let board = import_dsn(dsn).expect("import");
+        use crate::board::FixedState::*;
+        assert_eq!(
+            states(&board),
+            vec![Unfixed, ShoveFixed, UserFixed, SystemFixed]
+        );
+        let out = crate::io::dsn_export::export_dsn(&board).expect("export");
+        let board2 = import_dsn(&out).expect("re-import");
+        assert_eq!(
+            states(&board2),
+            states(&board),
+            "fixed states must survive the DSN round trip"
+        );
+    }
+
+    #[test]
+    fn wiring_level_clearance_class_is_honored() {
+        // an explicit (clearance_class ...) on a wire overrides the net's
+        // class default (Java Wiring.read_wire_scope)
+        let dsn = r#"(pcb "wcc.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (rule (width 200) (clearance 200))
+    (rule (clearance 900 (type special_special)))
+  )
+  (placement)
+  (library)
+  (network (net "N1"))
+  (wiring
+    (wire (path F.Cu 400 10000 10000 20000 20000) (net "N1") (type route)
+      (clearance_class special))
+  )
+)"#;
+        let board = import_dsn(dsn).expect("import");
+        let special = board
+            .rules
+            .clearance_matrix
+            .get_no("special")
+            .expect("typed rule creates the class");
+        let wire_cc = board
+            .items()
+            .find(|(_, it)| matches!(it.kind, crate::board::ItemKind::PolylineTrace(_)))
+            .map(|(_, it)| it.base.clearance_class)
+            .expect("wire imported");
+        assert_eq!(
+            wire_cc, special,
+            "the wire must carry its explicit clearance class"
+        );
+    }
+
+    #[test]
+    fn class_use_layer_and_shove_fixed_are_imported() {
+        // (circuit (use_layer ...)) leaves ONLY the listed layers active and
+        // zeroes the width on inactive layers (Java
+        // Network.create_active_trace_layers); (shove_fixed on) is recorded
+        let dsn = r#"(pcb "ul.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (rule (width 200) (clearance 200))
+  )
+  (placement)
+  (library)
+  (network
+    (net "TOP1")
+    (class toponly "TOP1"
+      (circuit (use_layer F.Cu))
+      (shove_fixed on)
+      (rule (width 300) (clearance 200))
+    )
+  )
+)"#;
+        let board = import_dsn(dsn).expect("import");
+        let net = &board.rules.nets.get_by_name("TOP1")[0];
+        let class = board.rules.net_classes.get(net.get_class());
+        assert!(class.is_active_routing_layer(0), "F.Cu stays active");
+        assert!(!class.is_active_routing_layer(1), "B.Cu must be inactive");
+        assert_eq!(
+            class.get_trace_half_width(1),
+            0,
+            "inactive layers carry width 0"
+        );
+        assert!(class.get_trace_half_width(0) > 0);
+        assert!(class.is_shove_fixed(), "(shove_fixed on) must be recorded");
+        let n = net.net_number;
+        assert!(board.rules.is_active_routing_layer(n, 0));
+        assert!(!board.rules.is_active_routing_layer(n, 1));
+        // the single-width router samples the max over ACTIVE layers
+        assert_eq!(board.rules.get_trace_half_width_max_active(n), 1500);
+    }
 
     #[test]
     fn per_net_class_clearance_becomes_a_distinct_class() {

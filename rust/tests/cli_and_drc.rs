@@ -321,6 +321,10 @@ fn ses_import_reconnects_a_routed_net() {
     let mut fresh = import_dsn(&content).expect("import failed");
     let summary = import_ses(&mut fresh, &ses).expect("SES import failed");
     assert!(summary.wires > 0, "SES import applied no wires");
+    assert!(
+        summary.unknown_nets.is_empty(),
+        "own session must not name unknown nets"
+    );
     let after: usize = net_nos
         .iter()
         .filter(|n| fresh.net_is_completely_connected(**n))
@@ -332,6 +336,39 @@ fn ses_import_reconnects_a_routed_net() {
     assert!(
         after * 10 >= routed_complete * 9,
         "SES round-trip lost too many nets: routed {routed_complete}, reloaded {after}"
+    );
+    // DRC equivalence, not just connectivity: the reloaded session must be
+    // exactly as clean as the routed board it came from (imported vias
+    // carry the real attach_allowed flag, so the same-net drill exemptions
+    // survive the round trip)
+    let routed_violations = freerouting::drc::check_board(&routed).violations.len();
+    let reloaded_violations = freerouting::drc::check_board(&fresh).violations.len();
+    assert!(
+        reloaded_violations <= routed_violations,
+        "SES reload must not introduce violations: routed {routed_violations}, \
+         reloaded {reloaded_violations}"
+    );
+
+    // an unknown net scope must be skipped (reported), never imported as
+    // netless copper that violates against every real net
+    let renamed = ses.replacen("(net \"", "(net \"UNKNOWN-", 1);
+    assert_ne!(renamed, ses, "fixture session should contain a net scope");
+    let mut fresh2 = import_dsn(&content).expect("import failed");
+    let summary2 = import_ses(&mut fresh2, &renamed).expect("SES import failed");
+    assert_eq!(
+        summary2.unknown_nets.len(),
+        1,
+        "the renamed scope must be reported as unknown"
+    );
+    assert!(
+        fresh2.items().all(|(_, it)| it.base.component_no != 0
+            || it.base.net_count() > 0
+            || !matches!(
+                it.kind,
+                freerouting::board::ItemKind::Via(_)
+                    | freerouting::board::ItemKind::PolylineTrace(_)
+            )),
+        "no netless copper may be imported from an unknown net scope"
     );
 }
 
@@ -390,6 +427,49 @@ fn full_board_drc_over_a_routed_board() {
     );
     let json = report.to_kicad_json(&board, "j2.dsn");
     assert!(json.contains("schemas.kicad.org/drc.v1.json"));
+
+    // Off-center termination regression bound (the assessed electrical-
+    // equivalence gap): after the CLI's own post-processing, at most a
+    // couple of route-trace endpoints may land inside a same-net drill pad
+    // OFF its connection point (J2 measures 1 of ~100 ends; pin_exit_corner
+    // and endpoint-preserving pull-tight keep it there). A regression in
+    // those mechanisms shows up as a jump in this count.
+    freerouting::autoroute::combine_all_traces(&mut board);
+    freerouting::autoroute::pull_tight_all(&mut board, 3);
+    let mut off_center = 0usize;
+    let mut total_ends = 0usize;
+    for (_, item) in board.items() {
+        let freerouting::board::ItemKind::PolylineTrace(t) = &item.kind else {
+            continue;
+        };
+        if item.base.component_no != 0 {
+            continue;
+        }
+        for corner in [t.first_corner(), t.last_corner()] {
+            total_ends += 1;
+            let cp = corner.to_float().round();
+            for (_, other) in board.items() {
+                let freerouting::board::ItemKind::Via(v) = &other.kind else {
+                    continue;
+                };
+                if !other.base.shares_net(&item.base) || v.center == cp {
+                    continue;
+                }
+                let in_pad = other.tile_shapes(&board.padstacks).iter().any(|(s, l)| {
+                    *l == t.layer && s.contains(&freerouting::geometry::planar::Point::Int(cp))
+                });
+                if in_pad {
+                    off_center += 1;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(total_ends > 0, "routed board has trace ends to audit");
+    assert!(
+        off_center <= 2,
+        "off-center pad terminations regressed: {off_center} of {total_ends} trace ends"
+    );
 }
 
 /// Finding #6: J2 must route to zero unconnected nets (as Java does), not the

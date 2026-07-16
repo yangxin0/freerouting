@@ -1,7 +1,27 @@
 //! Minimal JSON parser for the KiCad board JSON reader (the crate has no
-//! external dependencies; this covers the subset the format uses).
+//! external dependencies; this covers the subset the format uses), plus
+//! the one string escaper every JSON writer in the crate shares.
 
 use std::collections::HashMap;
+
+/// Escapes a string for embedding in a JSON document: quotes, backslashes,
+/// and ALL control characters (RFC 8259 requires U+0000..U+001F escaped —
+/// a net name with an embedded newline or tab must not corrupt the file).
+pub fn escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Json {

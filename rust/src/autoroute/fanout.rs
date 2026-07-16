@@ -60,35 +60,27 @@ pub fn fanout_pin(board: &mut BasicBoard, pin_id: ItemId, request: &BatchRequest
     let Some(net_no) = needs_fanout(board, pin_id) else {
         return false;
     };
-    // Java (a7cc6e42): the pin's net-class via rule decides the fanout
-    // via; nets without one fall back to the board-level via rules
-    // (fanout.fallback_to_board_vias, default true). A pin is skipped
-    // only when neither yields a via.
-    let via_padstack = board
-        .rules
-        .via_padstack_for_net(net_no)
-        .unwrap_or(request.via_padstack);
+    // the whole net-class rule set at once (Java AutorouteControl): the
+    // class's trace width and clearance, its via rule (falling back to the
+    // board-level vias, Java fanout.fallback_to_board_vias) and the attach
+    // flag — fanout previously escaped with the BASE request width, so a
+    // wide-trace class fanned out undersized copper
+    let net_request = crate::autoroute::batch::request_for_net(board, net_no, request);
+    let via_padstack = net_request.via_padstack;
     if via_padstack == 0 {
         return false;
     }
-    // fanout copper belongs to the pin's net: use its clearance class, not the
-    // batch's base class, so a high-clearance net's escape keeps its spacing
-    // (finding #4)
-    let clearance_class = board.rules.get_trace_clearance_class(net_no);
+    let clearance_class = net_request.clearance_class;
     let maze_request = MazeRouteRequest {
         net_no,
         start_item: pin_id,
         dest_item: pin_id,
         start_items: vec![pin_id],
         dest_items: Vec::new(),
-        trace_half_width: request.trace_half_width,
+        trace_half_width: net_request.trace_half_width,
         clearance_class,
         via_padstack,
-        via_attach_allowed: crate::autoroute::batch::via_attach_allowed_for_net(
-            board,
-            net_no,
-            request.via_padstack,
-        ),
+        via_attach_allowed: net_request.via_attach_allowed,
         via_cost: request.via_cost,
         // fanout escapes are local: a small budget keeps hopeless pins
         // cheap (Java bounds the whole stage with a timeout instead)
@@ -101,7 +93,7 @@ pub fn fanout_pin(board: &mut BasicBoard, pin_id: ItemId, request: &BatchRequest
         net_no,
         false,
         clearance_class,
-        request.trace_half_width,
+        net_request.trace_half_width,
     );
     crate::board::basic_board::set_birth_tag(1);
     maze_route_with_engine(board, &mut engine, &maze_request).is_some()
