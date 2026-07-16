@@ -98,8 +98,14 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
             // radius missed clearances above 1 mm. Java sizes the search by the
             // item's clearance class; the layer-wide maximum is a safe superset
             // (the matrix is not guaranteed symmetric, so a per-class maximum
-            // could under-reach).
-            let search_radius = board.rules.clearance_matrix.max_value(layer) as f64;
+            // could under-reach). Same-net clearances live OUTSIDE the matrix,
+            // so a `*_same_net` value larger than every matrix entry must widen
+            // the radius too, or those pairs are never discovered.
+            let search_radius = board
+                .rules
+                .clearance_matrix
+                .max_value(layer)
+                .max(board.rules.max_same_net_clearance()) as f64;
             for other_id in board.overlapping_items(&shape.offset(search_radius), Some(layer)) {
                 if other_id <= id {
                     continue; // dedup: A-B equals B-A (both sides are outer items)
@@ -212,10 +218,14 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                         continue;
                     }
                     let d = shape.euclidean_distance_to(os);
-                    // A same-net drill pair that OVERLAPS (d ~ 0) is a connection
-                    // (via on its pad), not a spacing violation; only a genuinely
-                    // separated same-net drill pair is a breakout.
-                    if same_net_drill && d < 1.0 {
+                    // A same-net drill pair that TOUCHES is a connection (via on
+                    // its pad), not a spacing violation; only a genuinely
+                    // separated pair is a breakout. euclidean_distance_to
+                    // returns exactly 0.0 for touching or interpenetrating
+                    // shapes, so `<= 0.0` is the precise "connected" test; a
+                    // fixed `< 1.0` was one board unit — 25.4 µm at `resolution
+                    // mil 1` — and could swallow a real sub-unit breakout gap.
+                    if same_net_drill && d <= 0.0 {
                         continue;
                     }
                     // Tolerance guards ONLY against floating-point noise in the
@@ -393,6 +403,29 @@ mod tests {
         assert!(
             check_board(&board).violations.is_empty(),
             "via_via_same_net (50) < 100 gap -> clean"
+        );
+    }
+
+    #[test]
+    fn same_net_clearance_beyond_matrix_max_is_found() {
+        let mut board = test_board();
+        // two SAME-net vias with an edge gap (700) beyond the matrix maximum
+        // (200): clean without a same-net rule...
+        board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        board.insert_via(1, IntPoint::new(0, 1300), vec![1], 1, false);
+        assert!(check_board(&board).violations.is_empty());
+        // ...but a via_via_same_net of 1000 must flag it — which requires the
+        // candidate-search radius to include same-net values, since they live
+        // outside the clearance matrix and can exceed its maximum.
+        board.rules.set_same_net_clearance(
+            crate::rules::ItemClass::Via,
+            crate::rules::ItemClass::Via,
+            1000,
+        );
+        assert_eq!(
+            check_board(&board).violations.len(),
+            1,
+            "same-net rule larger than every matrix value must still be enforced"
         );
     }
 

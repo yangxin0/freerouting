@@ -81,6 +81,13 @@ impl BoardRules {
         self.same_net_clearance.get(&(a, b)).copied()
     }
 
+    /// The largest same-net clearance (0 when none are defined) — used to size
+    /// the DRC candidate-search radius, since these values live outside the
+    /// clearance matrix and may exceed its maximum.
+    pub fn max_same_net_clearance(&self) -> i32 {
+        self.same_net_clearance.values().copied().max().unwrap_or(0)
+    }
+
     /// The default item clearance class.
     pub fn default_clearance_class() -> usize {
         1

@@ -219,17 +219,22 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     // default class, the item classes via/pin/smd/area also point the default
     // net class's item clearance classes at their class, any other name is
     // created on demand. `smd_to_turn_gap` sets the pin-edge-to-turn distance;
-    // pairs with more than one '_' (e.g. *_same_net) are left unhandled, as in
-    // Java. Hyphen spellings (`smd-smd`) are normalized to underscore.
+    // `A_B_same_net` records a same-net clearance for the DRC. Splitting is at
+    // the FIRST '_' (Java `split("_", 2)`), so the second name may itself carry
+    // underscores (e.g. `wire_kicad_default`); a two-token `(type NAME1 NAME2)`
+    // is ONE pair split across tokens (Java's quoted-pair form, the second
+    // token optionally led by the '_' separator). Hyphen spellings (`smd-smd`)
+    // are normalized to underscore.
     if let Some(rule) = structure.child("rule") {
         // if any wire pair appears, pre-create the four default item classes
         // (Java create_default_clearance_classes)
         let has_wire_pair = rule
             .children("clearance")
             .chain(rule.children("clear"))
-            .filter_map(|c| c.child("type").and_then(|t| t.arg()))
+            .filter_map(|c| c.child("type"))
+            .flat_map(|t| t.args())
             .any(|k| {
-                let k = k.to_ascii_lowercase();
+                let k = k.to_ascii_lowercase().replace('-', "_");
                 k.starts_with("wire_") || k.ends_with("_wire")
             });
         if has_wire_pair {
@@ -241,39 +246,52 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
             let Some(value) = clearance_node.arg_f64().map(&scale) else {
                 continue;
             };
-            let Some(kind) = clearance_node.child("type").and_then(|t| t.arg()) else {
+            let Some(type_node) = clearance_node.child("type") else {
                 continue; // the untyped default, already applied
             };
-            let kind = kind.to_ascii_lowercase().replace('-', "_");
-            if kind == "smd_to_turn_gap" {
-                rules.set_pin_edge_to_turn_dist(value as f64);
-                continue;
-            }
-            // `(clear V (type A_B_same_net))`: the clearance required between
-            // two SAME-NET item-class items (a drill-breakout rule). Java parses
-            // but never applies these; the DRC uses them (see drc.rs).
-            if let Some(base) = kind.strip_suffix("_same_net") {
-                if let Some((a, b)) = base.split_once('_') {
-                    if let (Some(ica), Some(icb)) = (item_class_of(a), item_class_of(b)) {
-                        rules.set_same_net_clearance(ica, icb, value);
+            let tokens: Vec<String> = type_node
+                .args()
+                .map(|t| t.to_ascii_lowercase().replace('-', "_"))
+                .collect();
+            let mut pairs: Vec<(String, String)> = Vec::new();
+            if tokens.len() == 2 {
+                // one pair split across two tokens
+                let b = tokens[1].strip_prefix('_').unwrap_or(&tokens[1]);
+                pairs.push((tokens[0].clone(), b.to_string()));
+            } else {
+                for kind in &tokens {
+                    if kind == "smd_to_turn_gap" {
+                        rules.set_pin_edge_to_turn_dist(value as f64);
+                        continue;
+                    }
+                    // `A_B_same_net`: the clearance required between two
+                    // SAME-NET item-class items (a drill-breakout rule). Java
+                    // parses but never applies these; the DRC uses them.
+                    if let Some(base) = kind.strip_suffix("_same_net") {
+                        if let Some((a, b)) = base.split_once('_') {
+                            if let (Some(ica), Some(icb)) = (item_class_of(a), item_class_of(b)) {
+                                rules.set_same_net_clearance(ica, icb, value);
+                            }
+                        }
+                        continue;
+                    }
+                    // split at the FIRST '_': the second name may contain
+                    // underscores (a single-token type has no pair to set)
+                    if let Some((a, b)) = kind.split_once('_') {
+                        pairs.push((a.to_string(), b.to_string()));
                     }
                 }
-                continue;
             }
-            let Some((a, b)) = kind.split_once('_') else {
-                continue; // a single-token type has no pair to set
-            };
-            if b.contains('_') {
-                continue; // more than one '_' — not a simple item-class pair
+            for (a, b) in pairs {
+                let ci = resolve_clearance_class(&mut rules, &a);
+                let cj = resolve_clearance_class(&mut rules, &b);
+                rules
+                    .clearance_matrix
+                    .set_value_on_all_layers(ci, cj, value);
+                rules
+                    .clearance_matrix
+                    .set_value_on_all_layers(cj, ci, value);
             }
-            let ci = resolve_clearance_class(&mut rules, a);
-            let cj = resolve_clearance_class(&mut rules, b);
-            rules
-                .clearance_matrix
-                .set_value_on_all_layers(ci, cj, value);
-            rules
-                .clearance_matrix
-                .set_value_on_all_layers(cj, ci, value);
         }
     }
     rules.set_default_trace_half_widths((default_width / 2).max(1));
@@ -433,8 +451,15 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 }
             }
             if any {
-                rules.via_rules.push(via_rule);
-                via_rule_ids.insert(rule_name.to_string(), rules.via_rules.len() - 1);
+                // Java add_via_rule: a redeclared rule REPLACES the existing
+                // one (in place, so indices already bound to net classes stay
+                // valid) rather than accumulating orphan duplicates.
+                if let Some(&existing) = via_rule_ids.get(rule_name) {
+                    rules.via_rules[existing] = via_rule;
+                } else {
+                    rules.via_rules.push(via_rule);
+                    via_rule_ids.insert(rule_name.to_string(), rules.via_rules.len() - 1);
+                }
             }
         }
     }
@@ -1438,6 +1463,8 @@ mod tests {
       (clearance 500 (type wire_via))
       (clearance 600 (type power_default))
       (clearance 70 (type via_via_same_net))
+      (clearance 800 (type wire_kicad_default))
+      (clearance 900 (type shield _via))
     )
   )
   (placement
@@ -1472,6 +1499,14 @@ mod tests {
         );
         // arbitrary named class paired with default
         assert_eq!(m.get_value(power, 1, 0, false), 6000, "power_default");
+        // the SECOND name may itself contain underscores (Java split("_", 2))
+        let kd = m
+            .get_no("kicad_default")
+            .expect("underscored second class name");
+        assert_eq!(m.get_value(1, kd, 0, false), 8000, "wire_kicad_default");
+        // two-token pair form `(type NAME1 _NAME2)` (Java's quoted-pair form)
+        let shield = m.get_no("shield").expect("two-token pair class");
+        assert_eq!(m.get_value(shield, via, 0, false), 9000, "shield _via");
         // a *_same_net rule is stored as a same-net clearance, not a matrix class
         use crate::rules::ItemClass;
         assert_eq!(
@@ -1522,7 +1557,9 @@ mod tests {
   (network
     (net "HV")
     (via "HVVia" "Via1" Power attach)
+    (via "HVVia2" "Via1" Power)
     (via_rule Power "HVVia")
+    (via_rule Power "HVVia2")
     (class hv "HV" (via_rule Power) (rule (width 250)))
   )
 )"#;
@@ -1537,15 +1574,33 @@ mod tests {
             .expect("net class binds the named via rule");
         let rule = &board.rules.via_rules[rule_id];
         assert_eq!(rule.name, "Power");
+        // a redeclared rule REPLACES the first (Java add_via_rule) — no orphan
+        assert_eq!(
+            board
+                .rules
+                .via_rules
+                .iter()
+                .filter(|r| r.name == "Power")
+                .count(),
+            1,
+            "duplicate via_rule declaration must replace, not accumulate"
+        );
         let via_info = board.rules.via_infos.get(rule.vias()[0]);
-        assert_eq!(via_info.get_name(), "HVVia");
-        assert!(via_info.attach_smd_allowed(), "attach token honored");
+        assert_eq!(via_info.get_name(), "HVVia2", "the redeclaration wins");
+        // via-info attribute parsing is covered by the first declaration
+        let first = board
+            .rules
+            .via_infos
+            .get_by_name("HVVia")
+            .expect("HVVia info");
+        let first = board.rules.via_infos.get(first);
+        assert!(first.attach_smd_allowed(), "attach token honored");
         let power = board
             .rules
             .clearance_matrix
             .get_no("Power")
             .expect("named Power clearance class");
-        assert_eq!(via_info.get_clearance_class(), power);
+        assert_eq!(first.get_clearance_class(), power);
     }
 
     #[test]
