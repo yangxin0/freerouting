@@ -153,7 +153,34 @@ impl MazeRouteRequest {
 
 /// Runs the maze expansion from the start item towards the destination
 /// item. Returns the corner list of the found connection.
+/// Runs the maze search and corrects both connection endpoints so the route
+/// begins and ends exactly at a pin's connection point (the drill center) when
+/// it lands inside a pad off-centre. Applied here, on the search result, so
+/// every consumer — the inline insertion of `maze_route_with_engine` and the
+/// `insert_connection` path alike — sees connection points that reload as
+/// genuine connections rather than dangling tracks (finding #2).
 pub fn find_connection(
+    board: &BasicBoard,
+    engine: &mut AutorouteEngine,
+    request: &MazeRouteRequest,
+) -> Option<MazeSearchResult> {
+    let mut result = find_connection_inner(board, engine, request)?;
+    if let Some(&(first, l)) = result.corners.first() {
+        if let Some(c) = pin_exit_corner(board, request.net_no, first, l) {
+            result.corners.insert(0, (c, l));
+            result.rooms.insert(0, None);
+        }
+    }
+    if let Some(&(last, l)) = result.corners.last() {
+        if let Some(c) = pin_exit_corner(board, request.net_no, last, l) {
+            result.corners.push((c, l));
+            result.rooms.push(None);
+        }
+    }
+    Some(result)
+}
+
+fn find_connection_inner(
     board: &BasicBoard,
     engine: &mut AutorouteEngine,
     request: &MazeRouteRequest,
@@ -391,12 +418,6 @@ pub fn find_connection(
             );
             corners.push((dest_point, layer));
             rooms.push(None);
-            // extend into the pad to the pin connection point when the arrival
-            // room only reached the pad edge
-            if let Some(ext) = drill_center_extension(board, arrival_target, layer, dest_point) {
-                corners.push((ext, layer));
-                rooms.push(None);
-            }
             return Some(MazeSearchResult { corners, rooms });
         }
 
@@ -683,35 +704,40 @@ fn via_free(board: &BasicBoard, request: &MazeRouteRequest, point: IntPoint) -> 
     true
 }
 
-/// The extra corner extending a connection from `dest_point` (a safe point in
-/// the arrival room, typically on the pad edge) to a drill item's connection
-/// point — its center — or None when not applicable. The extension segment lies
-/// inside the convex same-net pad, so it crosses no foreign clearance; this is
-/// what lands the trace exactly at the pin connection point (finding #2) even
-/// when the arrival room only clips the pad edge and cannot itself reach center.
-fn drill_center_extension(
+/// Models the legal exit of a connection through a pin: if `corner` (an
+/// endpoint of a routed connection) lies inside a same-net drill's pad on this
+/// layer but off its connection point, returns that connection point (the drill
+/// center). The segment corner→center stays inside the convex same-net pad, so
+/// it crosses no foreign clearance — this is NOT a generic stub but the pin exit
+/// itself, the part of the route the arrival room had to exclude for clearance.
+/// Landing exactly on the connection point is what makes the routed net
+/// electrically equivalent on SES reload (finding #2).
+fn pin_exit_corner(
     board: &BasicBoard,
-    dest_item: ItemId,
+    net_no: i32,
+    corner: FloatPoint,
     layer: usize,
-    dest_point: FloatPoint,
 ) -> Option<FloatPoint> {
-    let item = board.get_item(dest_item)?;
-    let crate::board::ItemKind::Via(v) = &item.kind else {
-        return None;
-    };
-    if v.center.to_float().round() == dest_point.round() {
-        return None; // already at the connection point
+    let cp = corner.round();
+    let query = TileShape::Box(IntBox::from_coords(cp.x - 1, cp.y - 1, cp.x + 1, cp.y + 1));
+    for oid in board.overlapping_items(&query, Some(layer)) {
+        let Some(item) = board.get_item(oid) else { continue };
+        if !item.base.contains_net(net_no) {
+            continue;
+        }
+        let crate::board::ItemKind::Via(v) = &item.kind else { continue };
+        if v.center == cp {
+            return None; // already at the connection point
+        }
+        let in_pad = item
+            .tile_shapes(&board.padstacks)
+            .iter()
+            .any(|(s, l)| *l == layer && s.contains(&crate::geometry::planar::Point::Int(cp)));
+        if in_pad {
+            return Some(v.center.to_float());
+        }
     }
-    let center = crate::geometry::planar::Point::Int(v.center);
-    let in_pad = item
-        .tile_shapes(&board.padstacks)
-        .iter()
-        .any(|(s, l)| *l == layer && s.contains(&center));
-    if in_pad {
-        Some(v.center.to_float())
-    } else {
-        None
-    }
+    None
 }
 
 /// The point where the connection enters the destination item. The
@@ -1440,8 +1466,27 @@ fn insert_connection(
     crate::board::basic_board::set_birth_tag(1);
 
     let mut new_items = Vec::new();
+    // Correct the two endpoints so the connection begins and ends exactly at the
+    // pin connection point when it lands inside a pad off-centre. Doing it here,
+    // on the final corner list, covers every path that produced it (the direct
+    // same-room route, the general backtrack, both start and dest sides) — the
+    // arrival/departure rooms exclude the pad centre for clearance, so the pin
+    // exit must be modelled explicitly. The added segment stays inside the
+    // convex same-net pad, so `trace_run_is_clear` (which skips same-net items)
+    // always accepts it.
+    let mut corners = result.corners.clone();
+    if let Some(&(first, l)) = corners.first() {
+        if let Some(c) = pin_exit_corner(board, request.net_no, first, l) {
+            corners.insert(0, (c, l));
+        }
+    }
+    if let Some(&(last, l)) = corners.last() {
+        if let Some(c) = pin_exit_corner(board, request.net_no, last, l) {
+            corners.push((c, l));
+        }
+    }
     let mut run: Vec<IntPoint> = Vec::new();
-    let mut run_layer = result.corners.first()?.1;
+    let mut run_layer = corners.first()?.1;
     let flush =
         |board: &mut BasicBoard, run: &mut Vec<IntPoint>, layer: usize, items: &mut Vec<ItemId>| -> bool {
             run.dedup();
@@ -1526,7 +1571,7 @@ fn insert_connection(
             }
             true
         };
-    for (corner, layer) in &result.corners {
+    for (corner, layer) in &corners {
         let p = corner.round();
         if *layer != run_layer {
             // the drill NODE's location is the via site: the travel from

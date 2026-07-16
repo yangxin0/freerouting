@@ -774,6 +774,51 @@ impl BasicBoard {
         if !self.trace_is_cycle(id) {
             return false;
         }
+        // Protect a trace that is the SOLE wire reaching a component pin's
+        // connection point (its drill center). The cycle test uses the lenient
+        // in-pad containment rule, which treats the pin as already connected via
+        // a nearby off-centre trace end, so it would remove the only wire
+        // actually reaching the connection point — leaving the net reloadable
+        // only as a dangling track (finding #2). Only protect when no OTHER wire
+        // (trace end or fanout via) already sits on that point, so a genuinely
+        // redundant detour that merely touches a pin is still removable.
+        let layer0 = t.layer;
+        let net0 = item.base.net_nos.clone();
+        let sole_pin_connection = [t.first_corner(), t.last_corner()].iter().any(|c| {
+            let cp = c.to_float().round();
+            let q = TileShape::Box(IntBox::from_coords(cp.x - 1, cp.y - 1, cp.x + 1, cp.y + 1));
+            let hits = self.overlapping_items(&q, Some(layer0));
+            let is_pin_center = hits.iter().any(|&oid| {
+                self.get_item(oid).is_some_and(|it| {
+                    it.base.component_no != 0
+                        && matches!(&it.kind, ItemKind::Via(v) if v.center == cp)
+                })
+            });
+            if !is_pin_center {
+                return false;
+            }
+            // another same-net wire already on this point → this trace is not sole
+            let other_wire = hits.iter().any(|&oid| {
+                oid != id
+                    && self.get_item(oid).is_some_and(|it| {
+                        it.base.net_nos == net0
+                            && match &it.kind {
+                                ItemKind::PolylineTrace(ot) => {
+                                    ot.first_corner().to_float().round() == cp
+                                        || ot.last_corner().to_float().round() == cp
+                                }
+                                ItemKind::Via(v) => {
+                                    it.base.component_no == 0 && v.center == cp
+                                }
+                                _ => false,
+                            }
+                    })
+            });
+            !other_wire
+        });
+        if sole_pin_connection {
+            return false;
+        }
         if std::env::var_os("FR_CYCLE_DEBUG").is_some() {
             eprintln!(
                 "CYCLE REMOVE trace {id} nets {:?} {:?} -> {:?}",

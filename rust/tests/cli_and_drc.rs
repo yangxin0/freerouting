@@ -51,97 +51,145 @@ fn cli_routes_a_board_and_writes_a_session() {
     let _ = std::fs::remove_file(&ses);
 }
 
-#[test]
-#[ignore = "electrical equivalence (finding #2) is NOT yet achieved: routed \
-traces stop inside a pad rather than at the pin connection point. Enable once \
-the maze search terminates connections at the drill connection point."]
-fn routed_nets_reach_pin_connection_points() {
-    // TARGET PROPERTY (currently unmet — see the ignore reason): every pin of a
-    // net the router reports complete must be physically reached at its
-    // connection point (drill center) by actual wiring (a trace endpoint or a
-    // routing via), the property Java's SES reader enforces. Rust's lenient
-    // in-pad containment rule counts a trace that stops ~50 um off center as
-    // connected, so such a net reloads with dangling tracks. Pins are excluded
-    // from the reached set so a pin cannot trivially prove its own reachedness.
-    use freerouting::autoroute::{
-        batch_route_passes_with_time_limit, combine_all_traces, pull_tight_all, BatchRequest,
-    };
+/// Strict connectivity oracle approximating what a Java SES/DRC reload checks:
+/// two connection points are joined ONLY when a wire endpoint sits exactly on
+/// each. Union-find keyed by exact (x, y): a trace unions its two endpoints;
+/// pins/vias are points joined in when a trace endpoint lands on them. A pin
+/// whose centre no wire reaches ends up in its own component — a dangling track.
+fn every_real_pin_strictly_wired(board: &freerouting::board::basic_board::BasicBoard) -> Result<usize, String> {
     use freerouting::board::ItemKind;
-    use freerouting::datastructures::TimeLimit;
-    use freerouting::io::import_dsn;
+    use std::collections::HashMap;
 
-    let root = root();
-    let content = std::fs::read_to_string(format!("{root}/fixtures/SMD-routing-issue-demo.dsn"))
-        .expect("SMD fixture missing");
-    let mut board = import_dsn(&content).expect("import failed");
-    let request = BatchRequest {
-        trace_half_width: board.rules.get_min_trace_half_width().max(500),
-        clearance_class: 1,
-        via_padstack: (1..=board.padstacks.count())
-            .find(|no| {
-                board
-                    .padstacks
-                    .get_by_no(*no)
-                    .is_some_and(|p| p.name.starts_with("Via"))
-            })
-            .unwrap_or(1),
-        via_cost: 50_000.0,
-        max_expansions: 100_000,
-        ripup_penalty: 0.0,
-        deadline: None,
-    };
-    let limit = TimeLimit::new(20_000);
-    batch_route_passes_with_time_limit(&mut board, &request, 100, Some(&limit));
-    // Run the SAME post-processing the CLI does: combine + pull-tight. A prior
-    // version verified before this stage and missed that a naive connecting
-    // stub is deleted here by cycle removal.
-    combine_all_traces(&mut board);
-    pull_tight_all(&mut board, 3);
+    fn find(parent: &mut HashMap<(i32, i32), (i32, i32)>, x: (i32, i32)) -> (i32, i32) {
+        let mut r = x;
+        while let Some(&p) = parent.get(&r) {
+            if p == r {
+                break;
+            }
+            r = p;
+        }
+        // path-compress
+        let mut c = x;
+        while let Some(&p) = parent.get(&c) {
+            if p == r {
+                break;
+            }
+            parent.insert(c, r);
+            c = p;
+        }
+        r
+    }
 
-    let mut checked_pins = 0usize;
+    let mut checked = 0usize;
     for net in 1..=board.rules.nets.max_net_no() {
+        // real pins = placed component drill items of this net
+        let pins: Vec<(i32, i32)> = board
+            .items()
+            .filter(|(_, it)| it.base.component_no != 0 && it.base.contains_net(net))
+            .filter_map(|(_, it)| match &it.kind {
+                ItemKind::Via(v) => Some((v.center.x, v.center.y)),
+                _ => None,
+            })
+            .collect();
+        // only nets that actually need routing between >= 2 pins are meaningful
+        if pins.len() < 2 {
+            continue;
+        }
+        // and only nets the router claims to have completed
         if !board.net_is_completely_connected(net) {
             continue;
         }
-        // Points reached by actual WIRING: trace endpoints and routing (non-pin)
-        // via centers only. Pins are deliberately EXCLUDED — including them would
-        // make every pin trivially prove its own reachedness (the vacuous check
-        // this test previously had).
-        let mut reached: Vec<(i32, i32)> = Vec::new();
-        for (_, item) in board.items() {
-            if !item.base.contains_net(net) {
+
+        let mut parent: HashMap<(i32, i32), (i32, i32)> = HashMap::new();
+        for &p in &pins {
+            parent.entry(p).or_insert(p);
+        }
+        for (_, it) in board.items() {
+            if !it.base.contains_net(net) {
                 continue;
             }
-            match &item.kind {
+            match &it.kind {
                 ItemKind::PolylineTrace(t) => {
-                    for c in [t.first_corner(), t.last_corner()] {
-                        let p = c.to_float().round();
-                        reached.push((p.x, p.y));
+                    let a = t.first_corner().to_float().round();
+                    let b = t.last_corner().to_float().round();
+                    let (a, b) = ((a.x, a.y), (b.x, b.y));
+                    parent.entry(a).or_insert(a);
+                    parent.entry(b).or_insert(b);
+                    let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                    if ra != rb {
+                        parent.insert(ra, rb);
                     }
                 }
-                ItemKind::Via(v) if item.base.component_no == 0 => {
-                    reached.push((v.center.x, v.center.y))
+                ItemKind::Via(v) => {
+                    parent.entry((v.center.x, v.center.y)).or_insert((v.center.x, v.center.y));
                 }
                 _ => {}
             }
         }
-        // every pin (placed drill item) of this net must be reached at its center
-        for (_, item) in board.items() {
-            if item.base.component_no == 0 || !item.base.contains_net(net) {
-                continue;
-            }
-            if let ItemKind::Via(pin) = &item.kind {
-                let center = (pin.center.x, pin.center.y);
-                assert!(
-                    reached.contains(&center),
-                    "net {net}: pin at {center:?} is not reached at its connection point \
-                     by wiring (would reload as a dangling track)"
-                );
-                checked_pins += 1;
+        let root0 = find(&mut parent, pins[0]);
+        for &p in &pins[1..] {
+            if find(&mut parent, p) != root0 {
+                return Err(format!(
+                    "net {net}: pin at {p:?} is not strictly wired to the net \
+                     (no wire endpoint on its connection point — a dangling track)"
+                ));
             }
         }
+        checked += pins.len();
     }
-    assert!(checked_pins > 0, "no complete nets with pins were verified");
+    Ok(checked)
+}
+
+// Enabled for PLANE-FREE fixtures only: the strict oracle joins connection
+// points through trace/via endpoints, but not through conduction-area (plane)
+// connections, so on a board with GND/power planes it would flag genuinely
+// plane-connected pins. SMD-routing-issue-demo and J2 have no planes, so every
+// real pin must be reached by a wire endpoint at its connection point. This is
+// the regression guard for the finding #2 fix (maze search lands connections at
+// the drill center via pin_exit_corner; cycle removal no longer deletes the sole
+// wire reaching a pin center).
+#[test]
+fn routed_nets_reach_pin_connection_points() {
+    use freerouting::autoroute::{
+        batch_route_passes_with_time_limit, combine_all_traces, pull_tight_all, BatchRequest,
+    };
+    use freerouting::datastructures::TimeLimit;
+    use freerouting::io::import_dsn;
+
+    let root = root();
+    for fixture in [
+        "fixtures/SMD-routing-issue-demo.dsn",
+        "fixtures/Issue026-J2_reference.dsn",
+    ] {
+        let content = std::fs::read_to_string(format!("{root}/{fixture}"))
+            .unwrap_or_else(|_| panic!("fixture {fixture} missing"));
+        let mut board = import_dsn(&content).expect("import failed");
+        let request = BatchRequest {
+            trace_half_width: board.rules.get_min_trace_half_width().max(500),
+            clearance_class: 1,
+            via_padstack: (1..=board.padstacks.count())
+                .find(|no| {
+                    board
+                        .padstacks
+                        .get_by_no(*no)
+                        .is_some_and(|p| p.name.starts_with("Via"))
+                })
+                .unwrap_or(1),
+            via_cost: 50_000.0,
+            max_expansions: 100_000,
+            ripup_penalty: 0.0,
+            deadline: None,
+        };
+        let limit = TimeLimit::new(30_000);
+        batch_route_passes_with_time_limit(&mut board, &request, 100, Some(&limit));
+        // the SAME post-processing the CLI does
+        combine_all_traces(&mut board);
+        pull_tight_all(&mut board, 3);
+
+        let checked = every_real_pin_strictly_wired(&board)
+            .unwrap_or_else(|e| panic!("{fixture}: {e}"));
+        assert!(checked > 0, "{fixture}: no >=2-pin complete nets to verify");
+    }
 }
 
 #[test]

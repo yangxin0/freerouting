@@ -104,21 +104,33 @@ Also fixed in the third round:
 - **Integration assertions strengthened** — the full-board DRC test now asserts
   J2 reports zero clearance violations (not just zero unconnected).
 
-PARTIALLY fixed / open, with rationale:
+Electrical equivalence (finding #2) — FIXED for plane-free boards, verified:
 
-- **Electrical equivalence at pin connection points (finding #2) — PARTIAL.**
-  The maze search now lands a connection at the drill CONNECTION POINT (center)
-  when the center lies in the arrival room, and otherwise extends one corner into
-  the convex same-net pad to reach it (`destination_point` + `drill_center_
-  extension`, and the symmetric start-side preference). This reduces off-centre
-  endings without fleet regression, but does NOT fully close the gap: many small
-  SMD arrivals still terminate on the pad edge, so a routed board can still reload
-  with dangling tracks. Two earlier post-hoc attempts were reverted (a stub is
-  deleted by cycle removal; a naive trace rebuild panics the polyline machinery).
-  A complete fix needs the arrival to always route to the center. The
-  `routed_nets_reach_pin_connection_points` test encodes the target and is
-  `#[ignore]`d (its flat "every pin reached" metric also over-counts trivially
-  connected nets, so it needs refining alongside the real fix).
+- The maze search now terminates connections at the pin CONNECTION POINT (drill
+  center). `find_connection` wraps the search and corrects both endpoints via
+  `pin_exit_corner`: when an endpoint lands inside a same-net pad off-centre, a
+  corner extends to the center. The segment stays inside the convex same-net pad,
+  so it crosses no foreign clearance and `trace_run_is_clear` (which skips
+  same-net items) accepts it — modelling the pin exit as part of the legal route,
+  not a post-hoc stub. Applied on the search result so BOTH insert paths (the
+  inline `maze_route_with_engine` and `insert_connection`) benefit.
+- `remove_if_cycle` no longer deletes the SOLE wire reaching a pin center. The
+  cycle test uses the lenient in-pad containment rule, so it treated a pin as
+  already connected via a nearby off-centre end and removed the wire that
+  actually reached the center; it is now protected when no other same-net wire
+  sits on that point (a redundant detour merely touching a pin is still removed —
+  `cycle_traces_are_removed` still passes).
+- Verified by a strict, enabled regression test
+  (`routed_nets_reach_pin_connection_points`): a union-find oracle joins
+  connection points only through exact wire-endpoint coincidence (the Java-reload
+  criterion), restricted to >=2-real-pin complete nets, on the plane-free SMD and
+  J2 fixtures. Both now have every real pin strictly wired.
+- SCOPE: the oracle does not model conduction-area (plane) connections, so
+  boards with GND/power planes (pic_programmer, wavefolder) are not yet asserted;
+  a plane-aware oracle is future work. No fleet completion or violation
+  regression.
+
+Open, with rationale:
 - **Per-net clearance class is inert for DSN inputs (finding #4).** The plumbing
   (router + optimizer use `get_trace_clearance_class`) is correct, but DSN import
   assigns clearance class 1 to *every* net class, so there is nothing to
