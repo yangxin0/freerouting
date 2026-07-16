@@ -1020,6 +1020,27 @@ impl BasicBoard {
         true
     }
 
+    /// Splits same-net traces passing through the via's center on every
+    /// layer it spans, so the via's contacts register. Imported wiring
+    /// (DSN/SES/KiCad JSON) may place vias mid-trace; contacts require a
+    /// trace ENDPOINT at the pad (Java routes always end at via centers).
+    pub fn split_traces_at_via(&mut self, via_id: ItemId) {
+        let Some(item) = self.get_item(via_id).cloned() else {
+            return;
+        };
+        let ItemKind::Via(v) = &item.kind else {
+            return;
+        };
+        let center = v.center;
+        let first = item.first_layer(&self.padstacks);
+        let last = item.last_layer(&self.padstacks);
+        for net in item.base.net_nos.clone() {
+            for layer in first..=last {
+                while self.split_traces_at(center, layer, net) {}
+            }
+        }
+    }
+
     /// Combines a trace with neighbour traces at its end corners while the
     /// only contact there is exactly one other trace with the same layer,
     /// half width and nets (Java: `PolylineTrace.combine`). Returns the id

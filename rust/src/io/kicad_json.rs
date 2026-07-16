@@ -440,6 +440,9 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
         let cl = board.rules.get_trace_clearance_class(net);
         let id = board.insert_via(ps, center, vec![net], cl, false);
         board.set_fixed_state(id, FixedState::UserFixed);
+        // register contacts when the via lands mid-trace (a contact
+        // needs a trace endpoint at the pad)
+        board.split_traces_at_via(id);
     }
     Ok(board)
 }

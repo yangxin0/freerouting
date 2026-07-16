@@ -87,21 +87,32 @@ pub fn move_via(
     // position after the move. Java's `DrillItem.move_by` translates the via
     // in place and inserts old->new connecting stubs for each contacting
     // trace; this port removes and reinserts the via, so without these
-    // bridges the contacting traces would be left dangling at the old center
-    // and the via's net would be disconnected.
-    let mut bridge_contacts: Vec<(usize, i32, usize)> = Vec::new(); // (layer, half_width, clearance_class)
+    // bridges the contacting traces would be left dangling and the via's net
+    // disconnected. Java bridges center-to-center because its contacts are
+    // always center-exact; here a contact endpoint may sit anywhere inside
+    // the pad, so the bridge departs from the ACTUAL trace endpoint.
+    let mut bridge_contacts: Vec<(IntPoint, usize, i32, usize)> = Vec::new(); // (endpoint, layer, half_width, clearance_class)
     for contact in board.get_normal_contacts(via_id) {
         if let Some(c) = board.get_item(contact) {
             if let ItemKind::PolylineTrace(t) = &c.kind {
-                bridge_contacts.push((t.layer, t.half_width, c.base.clearance_class));
+                let first = t.first_corner().to_float();
+                let last = t.last_corner().to_float();
+                let endpoint = if first.distance(old_center.to_float())
+                    <= last.distance(old_center.to_float())
+                {
+                    first.round()
+                } else {
+                    last.round()
+                };
+                bridge_contacts.push((endpoint, t.layer, t.half_width, c.base.clearance_class));
             }
         }
     }
-    // Deduplicate: several traces can contact the via on the same layer with
-    // identical width/class, and one bridge per distinct (layer, width, class)
-    // suffices — inserting a coincident duplicate bridge is wasteful and can
-    // itself create a zero-area overlap.
-    bridge_contacts.sort_unstable();
+    // Deduplicate: several traces can contact the via at the same point on
+    // the same layer with identical width/class, and one bridge each
+    // suffices — a coincident duplicate bridge is wasteful and can itself
+    // create a zero-area overlap.
+    bridge_contacts.sort_unstable_by_key(|(p, l, hw, cl)| (p.x, p.y, *l, *hw, *cl));
     bridge_contacts.dedup();
 
     board.generate_snapshot();
@@ -155,14 +166,17 @@ pub fn move_via(
         cl_class,
         attach_allowed,
     );
-    // Bridge each previously-contacting trace from the old via center to the
-    // new one, preserving connectivity (Java: DrillItem.move_by insert_trace).
-    if old_center != new_center {
-        for (layer, half_width, trace_cl_class) in bridge_contacts {
-            let bridge =
-                crate::geometry::planar::Polyline::from_int_points(&[old_center, new_center]);
-            board.insert_trace(bridge, layer, half_width, net_nos.clone(), trace_cl_class);
+    // Bridge each previously-contacting trace from its endpoint to the new
+    // center, preserving connectivity (Java: DrillItem.move_by insert_trace).
+    for (endpoint, layer, half_width, trace_cl_class) in bridge_contacts {
+        if endpoint == new_center {
+            continue;
         }
+        let bridge = crate::geometry::planar::Polyline::from_int_points(&[endpoint, new_center]);
+        if bridge.is_empty() {
+            continue;
+        }
+        board.insert_trace(bridge, layer, half_width, net_nos.clone(), trace_cl_class);
     }
     board.pop_snapshot();
     true

@@ -124,6 +124,9 @@ pub fn import_ses(board: &mut BasicBoard, content: &str) -> Result<SesImportSumm
                 false,
             );
             board.set_fixed_state(id, crate::board::FixedState::UserFixed);
+            // register contacts when the via lands mid-trace (a contact
+            // needs a trace endpoint at the pad)
+            board.split_traces_at_via(id);
             summary.vias += 1;
         }
     }

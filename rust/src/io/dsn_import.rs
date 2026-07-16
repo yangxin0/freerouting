@@ -1149,6 +1149,19 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
             }
         }
     }
+    // Register the contacts of pre-routed vias landing mid-trace: a
+    // contact needs a trace ENDPOINT at the pad, so split the same-net
+    // traces at each routing via's center (raw insert_via does not).
+    let via_ids: Vec<crate::board::basic_board::ItemId> = board
+        .items()
+        .filter(|(_, it)| {
+            it.base.component_no == 0 && matches!(it.kind, crate::board::ItemKind::Via(_))
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    for id in via_ids {
+        board.split_traces_at_via(id);
+    }
     Ok(board)
 }
 

@@ -98,7 +98,18 @@ pub fn pull_tight_trace(board: &mut BasicBoard, id: ItemId) -> (ItemId, usize) {
     // audit); keep the original geometry when anything is blocked
     // (unchanged geometry = unchanged DRC status).
     let rebuilt = Polyline::from_int_points(&corners);
-    let rebuilt_free = !rebuilt.is_empty()
+    // the trace's contacts register at its EXACT end corners; rounding
+    // may move a rational endpoint (polyline_path wiring) off the pad or
+    // junction it touched, silently disconnecting the net — a rebuild
+    // that moves an endpoint is discarded (as is a no-op rebuild)
+    let endpoints_kept = removed > 0
+        && !rebuilt.is_empty()
+        && rebuilt.corner_approx(0) == trace.polyline.corner_approx(0)
+        && rebuilt.corner_approx(rebuilt.corner_count() - 1)
+            == trace
+                .polyline
+                .corner_approx(trace.polyline.corner_count() - 1);
+    let rebuilt_free = endpoints_kept
         && polyline_keeps_clearance(board, &rebuilt, half_width, layer, net_no, clearance_class);
     let (polyline, removed) = if rebuilt_free {
         (rebuilt, removed)
