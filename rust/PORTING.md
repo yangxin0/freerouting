@@ -261,11 +261,17 @@ RESOLVED — router performance (was the last finding-#6 gap):
   one shot. A **plateau guard** now breaks the pass loop after 8 consecutive
   non-improving passes and hands off to the restart fallback (a stronger
   completion path that also gets more wall-clock this way). J2: 25.3 s → 0.14 s
-  routing (24/24, 0 violations, score 999.94 — unchanged). Fleet spot-check:
-  interf_u 173/173 @0.21 s, wavefolder 31/31 @0.37 s, pic_programmer 111/111
-  @0.05 s. (A full fleet re-benchmark is still advisable before relying on it.)
-  Note: Issue145-smoothieboard panics with a capacity overflow BOTH before and
-  after this change — a separate, PRE-EXISTING crash, not a regression.
+  routing (24/24, 0 violations, score 999.94 — unchanged).
+  **Fleet-validated (2026-07-16):** all 91 fixture boards ran at tl=60 s on the
+  guarded binary; every board the guard could have hurt — the 17 that now give
+  up early with time to spare — plus 9 time-pinned ones were re-run on the
+  pre-guard binary (6d0d22f4): **0 completion regressions, 1 improvement
+  (Issue022 +2 nets), 23 identical**, with the guard reaching the same
+  completion up to ~10x sooner on plateau boards (e.g. RelayModule 43 s → 4 s,
+  Issue208 45 s → 5 s). Remaining time-pinned boards were not re-compared (both
+  binaries spend the identical budget there). Note: the capacity-overflow panic
+  (see open gaps) predates the guard — verified on smoothieboard both before
+  and after — and is not a regression.
 
 KNOWN OPEN GAPS (not yet fixed) — do NOT claim these are done:
 
@@ -276,10 +282,12 @@ KNOWN OPEN GAPS (not yet fixed) — do NOT claim these are done:
    distance + via-cost + ripup only, and `active_routing_layer` has no
    consumers). Router-behavior work (a route-quality / cost-model feature), not
    a bounded importer feature.
-2. **Issue145-smoothieboard capacity-overflow panic.** A 4-layer, 245-net board
-   panics (`raw_vec capacity overflow`) during routing — a huge `with_capacity`
-   somewhere in the router/import. Pre-existing (crashes before and after the
-   performance change); not in the tuned fleet list. Untriaged.
+2. **Capacity-overflow panic on 5 fixture boards.** Issue145-smoothieboard,
+   Issue508-DAC2020_bm06, Issue508-DAC2020_bm11, Issue730-DAC2020_bm11 and
+   Issue732-RoyalBlue54L-Feather panic (`raw_vec capacity overflow`) during
+   routing — a huge `with_capacity` somewhere in the router/import. Pre-existing
+   (smoothieboard verified to crash before and after the performance change);
+   surfaced by the 91-board fleet sweep of 2026-07-16. Untriaged.
 
 ## OPEN ITEMS (reconciled 2026-07-15, iter 190)
 
