@@ -79,6 +79,7 @@ pub fn opt_via_location(board: &mut BasicBoard, via_id: ItemId, max_recursion: u
     };
     let via_center = via.center;
     let padstack = via.padstack;
+    let attach_allowed = via.attach_allowed;
     let net_nos = item.base.net_nos.clone();
     let cl_class = item.base.clearance_class;
     let tolerance = board
@@ -128,8 +129,16 @@ pub fn opt_via_location(board: &mut BasicBoard, via_id: ItemId, max_recursion: u
         ok = ok && t2_now;
         if ok {
             board.remove_item(via_id);
-            ok = insert_forced_via(board, padstack, cand, &net_nos, cl_class, hw1.max(hw2))
-                .is_some();
+            ok = insert_forced_via(
+                board,
+                padstack,
+                cand,
+                &net_nos,
+                cl_class,
+                hw1.max(hw2),
+                attach_allowed,
+            )
+            .is_some();
         }
         // both nets must remain connected AND the reconnected stubs must
         // keep clearance (the stub inserts are not shove-validated)
@@ -211,6 +220,7 @@ fn opt_single_contact_via(board: &mut BasicBoard, via_id: ItemId, trace_id: Item
     }
     let via_center = via.center;
     let padstack = via.padstack;
+    let attach_allowed = via.attach_allowed;
     let net_nos = item.base.net_nos.clone();
     let cl_class = item.base.clearance_class;
     let tolerance = board
@@ -240,7 +250,16 @@ fn opt_single_contact_via(board: &mut BasicBoard, via_id: ItemId, trace_id: Item
     };
     let ok = ok && {
         board.remove_item(via_id);
-        insert_forced_via(board, padstack, cand, &net_nos, cl_class, hw).is_some()
+        insert_forced_via(
+            board,
+            padstack,
+            cand,
+            &net_nos,
+            cl_class,
+            hw,
+            attach_allowed,
+        )
+        .is_some()
     };
     let connected = ok
         && net_nos

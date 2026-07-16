@@ -174,10 +174,16 @@ impl ShapeTraceEntries {
                             self.shove_via_list.push(item_id);
                         }
                     } else {
-                        // a component pin
+                        // a component pin. For a pad (via) check, a same-net
+                        // pin blocks unless it is a drillable SMD pin (Java
+                        // ShapeTraceEntries: `pin.drill_allowed()`, NOT the
+                        // padstack attach flag).
+                        let _ = v;
                         if !contains_own_net
                             || !copper_sharing_allowed
-                            || (is_pad_check && !v.attach_allowed)
+                            || (is_pad_check
+                                && item.first_layer(&board.padstacks)
+                                    != item.last_layer(&board.padstacks))
                         {
                             self.found_obstacle = Some(item_id);
                             return false;

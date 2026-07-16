@@ -228,6 +228,7 @@ fn routed_nets_reach_pin_connection_points() {
                         .is_some_and(|p| p.name.starts_with("Via"))
                 })
                 .unwrap_or(1),
+            via_attach_allowed: false,
             via_cost: 50_000.0,
             max_expansions: 100_000,
             ripup_penalty: 0.0,
@@ -300,6 +301,7 @@ fn ses_import_reconnects_a_routed_net() {
                     .is_some_and(|p| p.name.starts_with("Via"))
             })
             .unwrap_or(1),
+        via_attach_allowed: false,
         via_cost: 50_000.0,
         max_expansions: 100_000,
         ripup_penalty: 0.0,
@@ -355,6 +357,7 @@ fn full_board_drc_over_a_routed_board() {
                     .is_some_and(|p| p.name.starts_with("Via"))
             })
             .unwrap_or(1),
+        via_attach_allowed: false,
         via_cost: 50_000.0,
         max_expansions: 100_000,
         ripup_penalty: 0.0,

@@ -108,6 +108,9 @@ pub struct MazeRouteRequest {
     pub clearance_class: usize,
     /// 1-based padstack for layer-change vias.
     pub via_padstack: usize,
+    /// Vias may land on drillable (SMD) pads of their own net; the
+    /// inserted via carries the flag (Java `attach_smd_allowed`).
+    pub via_attach_allowed: bool,
     /// Additional cost of a layer change in board units.
     pub via_cost: f64,
     /// Budget for the expansion: the maximum number of queue pops before
@@ -594,7 +597,13 @@ fn seed_room(
             + board.rules.clearance_matrix.max_value(layer).max(0);
         let pages = engine.drill_pages.as_mut().unwrap();
         pages.sync_board_changes(board);
-        for drill in pages.drills_overlapping(board, &bb, request.net_no, via_margin) {
+        for drill in pages.drills_overlapping(
+            board,
+            &bb,
+            request.net_no,
+            via_margin,
+            request.via_attach_allowed,
+        ) {
             if drill_points.len() >= 17 {
                 break;
             }
@@ -638,6 +647,61 @@ fn seed_room(
     }
 }
 
+/// The clearance a via of `request` must keep to `other` on `layer`, or
+/// `None` when `other` does not constrain the via site. Mirrors the DRC's
+/// same-net drill rule (Java `Via`/`Pin.is_obstacle`): same-net traces and
+/// areas never constrain; same-net pins and vias do — unless the via may
+/// attach and the pin is a drillable SMD pad — at the `*_same_net` rule
+/// value when one exists, the ordinary matrix value otherwise. The search
+/// (`via_free`) and the insert gate (`via_site_is_clear`) share this rule,
+/// so the maze never picks a site the insert then rejects.
+fn via_site_clearance(
+    board: &BasicBoard,
+    request: &MazeRouteRequest,
+    other: &crate::board::Item,
+    layer: usize,
+) -> Option<f64> {
+    let mut same_net_required: Option<f64> = None;
+    if other.base.contains_net(request.net_no) {
+        if !crate::drc::is_drill(&other.kind) {
+            return None;
+        }
+        if request.via_attach_allowed
+            && crate::drc::is_pin(other)
+            && crate::drc::drill_allowed(other, &board.padstacks)
+        {
+            return None;
+        }
+        let other_class = if !crate::drc::is_pin(other) {
+            crate::rules::ItemClass::Via
+        } else if crate::drc::drill_allowed(other, &board.padstacks) {
+            crate::rules::ItemClass::Smd
+        } else {
+            crate::rules::ItemClass::Pin
+        };
+        same_net_required = board
+            .rules
+            .get_same_net_clearance(crate::rules::ItemClass::Via, other_class)
+            .map(|v| v as f64);
+    } else if let crate::board::ItemKind::ObstacleArea(a) = &other.kind {
+        if a.is_conduction {
+            return None;
+        }
+    }
+    Some(same_net_required.unwrap_or_else(|| {
+        board
+            .rules
+            .clearance_matrix
+            .get_value(
+                other.base.clearance_class,
+                request.clearance_class,
+                layer,
+                false,
+            )
+            .max(0) as f64
+    }))
+}
+
 /// True if a via at `point` keeps its clearance on all layers it spans.
 fn via_free(board: &BasicBoard, request: &MazeRouteRequest, point: IntPoint) -> bool {
     let Some(padstack) = board.padstacks.get_by_no(request.via_padstack) else {
@@ -658,31 +722,16 @@ fn via_free(board: &BasicBoard, request: &MazeRouteRequest, point: IntPoint) -> 
             let Some(item) = board.get_item(id) else {
                 continue;
             };
-            if item.base.contains_net(request.net_no) {
-                continue;
-            }
-            if let crate::board::ItemKind::ObstacleArea(a) = &item.kind {
-                if a.is_conduction {
-                    continue; // planes get fabrication cutouts
-                }
-            }
-            // with ripup, rippable items do not block drills: the via
-            // insertion rips whatever its footprint overlaps
+            // with ripup, rippable (foreign) items do not block drills:
+            // the via insertion rips whatever its footprint overlaps
             if request.ripup_penalty > 0.0
                 && crate::autoroute::room_completion::is_rippable(item, request.net_no)
             {
                 continue;
             }
-            let pairwise = board
-                .rules
-                .clearance_matrix
-                .get_value(
-                    item.base.clearance_class,
-                    request.clearance_class,
-                    layer,
-                    false,
-                )
-                .max(0) as f64;
+            let Some(pairwise) = via_site_clearance(board, request, item, layer) else {
+                continue;
+            };
             let check = via_shape.offset(pairwise);
             let conflicts = item
                 .tile_shapes(&board.padstacks)
@@ -1397,22 +1446,9 @@ fn via_site_is_clear(board: &BasicBoard, request: &MazeRouteRequest, p: IntPoint
             let Some(other) = board.get_item(other_id) else {
                 continue;
             };
-            if other.base.contains_net(request.net_no) {
+            let Some(cl) = via_site_clearance(board, request, other, layer) else {
                 continue;
-            }
-            if let crate::board::ItemKind::ObstacleArea(a) = &other.kind {
-                if a.is_conduction {
-                    continue;
-                }
-            }
-            let cl = matrix
-                .get_value(
-                    request.clearance_class,
-                    other.base.clearance_class,
-                    layer,
-                    false,
-                )
-                .max(0) as f64;
+            };
             if other.tile_shapes(&board.padstacks).iter().any(|(os, ol)| {
                 *ol == layer
                     && os.intersection(&shape.offset(cl)).dimension() >= 2
@@ -1486,6 +1522,9 @@ fn insert_connection(
     // convex same-net pad, so `trace_run_is_clear` (which skips same-net items)
     // always accepts it.
     let mut corners = result.corners.clone();
+    if crate::debug::maze() {
+        eprintln!("FOUND net {} corners {:?}", request.net_no, corners);
+    }
     if let Some(&(first, l)) = corners.first() {
         if let Some(c) = pin_exit_corner(board, request.net_no, first, l) {
             corners.insert(0, (c, l));
@@ -1507,6 +1546,17 @@ fn insert_connection(
             run.dedup();
             if run.len() > 1 {
                 let polyline = Polyline::from_int_points(run);
+                // A run that folds back on itself (e.g. [a, b, a]) collapses
+                // to fewer than two corners: nothing to insert.
+                if polyline.is_empty() {
+                    if crate::debug::maze() {
+                        eprintln!(
+                            "DEGENERATE RUN skipped net {} layer {layer}: {run:?}",
+                            request.net_no
+                        );
+                    }
+                    return true;
+                }
                 // corridor runs bypass room geometry where foreign items
                 // were ripped or shovable: a conflicted run first shoves
                 // the offenders aside (traces and vias), and fails the
@@ -1525,6 +1575,9 @@ fn insert_connection(
                         );
                     }
                     if !trace_run_is_clear(board, request, &polyline, layer) {
+                        if crate::debug::maze() {
+                            eprintln!("RUN BLOCKED net {} layer {layer}: {run:?}", request.net_no);
+                        }
                         return false;
                     }
                 }
@@ -1583,8 +1636,8 @@ fn insert_connection(
                 );
                 if crate::debug::maze() {
                     eprintln!(
-                        "INSERTED trace {new_id} net {} layer {layer}",
-                        request.net_no
+                        "INSERTED trace {new_id} net {} layer {layer} run {:?}",
+                        request.net_no, run
                     );
                 }
                 items.push(new_id);
@@ -1622,7 +1675,7 @@ fn insert_connection(
                     p,
                     vec![request.net_no],
                     request.clearance_class,
-                    false,
+                    request.via_attach_allowed,
                 ));
             } else {
                 match crate::board::forced_via::insert_forced_via(
@@ -1632,11 +1685,15 @@ fn insert_connection(
                     &[request.net_no],
                     request.clearance_class,
                     request.trace_half_width,
+                    request.via_attach_allowed,
                 ) {
                     Some(id) => new_items.push(id),
                     None => {
                         // an illegal via site fails the whole insert; the
                         // caller's transaction removes the partial items
+                        if crate::debug::maze() {
+                            eprintln!("VIA SITE BLOCKED net {} at {p:?}", request.net_no);
+                        }
                         for id in new_items {
                             board.remove_item(id);
                         }
@@ -1757,6 +1814,7 @@ mod tests {
 
     fn request(start: ItemId, dest: ItemId) -> MazeRouteRequest {
         MazeRouteRequest {
+            via_attach_allowed: false,
             net_no: 1,
             start_items: Vec::new(),
             dest_items: Vec::new(),

@@ -84,6 +84,11 @@ pub fn fanout_pin(board: &mut BasicBoard, pin_id: ItemId, request: &BatchRequest
         trace_half_width: request.trace_half_width,
         clearance_class,
         via_padstack,
+        via_attach_allowed: crate::autoroute::batch::via_attach_allowed_for_net(
+            board,
+            net_no,
+            request.via_padstack,
+        ),
         via_cost: request.via_cost,
         // fanout escapes are local: a small budget keeps hopeless pins
         // cheap (Java bounds the whole stage with a timeout instead)

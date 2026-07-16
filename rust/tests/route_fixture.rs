@@ -39,6 +39,7 @@ fn import_route_export_real_board() {
         trace_half_width: board.rules.get_min_trace_half_width().max(500),
         clearance_class: 1,
         via_padstack,
+        via_attach_allowed: false,
         via_cost: 50_000.0,
         max_expansions: 100_000,
         ripup_penalty: 0.0,

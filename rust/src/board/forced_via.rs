@@ -53,6 +53,7 @@ pub fn insert_forced_via(
     net_nos: &[i32],
     cl_class: usize,
     trace_half_width: i32,
+    attach_allowed: bool,
 ) -> Option<ItemId> {
     let shapes = forced_shapes(board, via_padstack, location, trace_half_width);
     if shapes.is_empty() {
@@ -63,6 +64,9 @@ pub fn insert_forced_via(
         let max_cl = board.rules.clearance_matrix.max_value(*layer).max(0) as f64;
         let corridor = shape.offset(max_cl + 1.0);
         if !shove_aside(board, &corridor, *layer, net_nos, cl_class, &[]) {
+            if crate::debug::shove() {
+                eprintln!("FORCED VIA shove failed at {location:?} layer {layer}");
+            }
             board.undo();
             return None;
         }
@@ -77,11 +81,20 @@ pub fn insert_forced_via(
                 })
             });
         if blocked {
+            if crate::debug::shove() {
+                eprintln!("FORCED VIA blocked at {location:?} layer {layer}");
+            }
             board.undo();
             return None;
         }
     }
-    let id = board.insert_via(via_padstack, location, net_nos.to_vec(), cl_class, false);
+    let id = board.insert_via(
+        via_padstack,
+        location,
+        net_nos.to_vec(),
+        cl_class,
+        attach_allowed,
+    );
     board.pop_snapshot();
     Some(id)
 }
@@ -104,6 +117,7 @@ pub fn check_forced_via(
         net_nos,
         cl_class,
         trace_half_width,
+        false,
     )
     .is_some();
     board.undo();
@@ -143,7 +157,7 @@ mod tests {
             vec![2],
             1,
         );
-        let via = insert_forced_via(&mut board, 1, IntPoint::new(0, 0), &[1], 1, 100);
+        let via = insert_forced_via(&mut board, 1, IntPoint::new(0, 0), &[1], 1, 100, false);
         assert!(via.is_some(), "forced via must succeed by shoving");
         // the blocker net must still be connected (its trace was shoved,
         // possibly replaced by pieces, never just deleted)

@@ -13,20 +13,20 @@ const DISTANCE_EPS: f64 = 1e-6;
 
 /// A drill item (via or pin — both are `ItemKind::Via` here, as in Java's
 /// `DrillItem` hierarchy).
-fn is_drill(kind: &ItemKind) -> bool {
+pub(crate) fn is_drill(kind: &ItemKind) -> bool {
     matches!(kind, ItemKind::Via(_))
 }
 
 /// A component pin (Java `Pin`): a drill item owned by a component. Routing
 /// vias have `component_no == 0`; the DSN/KiCad importers tag pins with a
 /// nonzero component. This is the only pin-vs-via proxy in the collapsed model.
-fn is_pin(item: &crate::board::Item) -> bool {
+pub(crate) fn is_pin(item: &crate::board::Item) -> bool {
     is_drill(&item.kind) && item.base.component_no > 0
 }
 
 /// A single-layer (SMD) drill item: Java `DrillItem.drill_allowed()` is
 /// `first_layer() == last_layer()`.
-fn drill_allowed(item: &crate::board::Item, padstacks: &crate::core::Padstacks) -> bool {
+pub(crate) fn drill_allowed(item: &crate::board::Item, padstacks: &crate::core::Padstacks) -> bool {
     item.first_layer(padstacks) == item.last_layer(padstacks)
 }
 
@@ -113,11 +113,6 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                 let Some(other) = board.get_item(other_id) else {
                     continue;
                 };
-                // Set for a same-net drill pair that survives to the geometry
-                // check: those are only a violation when the two drills are
-                // SEPARATED (drill breakout), never when they overlap — an
-                // overlap is a connection (a via landing on its own pad).
-                let mut same_net_drill = false;
                 // If a `*_same_net` rule applies to this same-net drill pair, its
                 // value overrides the normal (foreign-net) clearance below.
                 let mut same_net_required: Option<f64> = None;
@@ -128,11 +123,13 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                     if !(is_drill(&item.kind) && is_drill(&other.kind)) {
                         continue;
                     }
-                    // Via<->Via and Pin<->Pin are obstacles to each other. The
-                    // Java exception (Via/Pin.is_obstacle): an attach_allowed via
-                    // overlapping a same-net SMD pin (fanout). Rust's router does
-                    // not tag connection vias attach_allowed, so we additionally
-                    // treat any OVERLAP as a connection below (same_net_drill).
+                    // Via<->Via and Pin<->Pin are obstacles to each other; the
+                    // only Java exception (Via/Pin.is_obstacle) is an
+                    // attach_allowed via on a same-net drillable SMD pin
+                    // (fanout). Router-placed vias carry the flag from their
+                    // via rule, so no broader overlap exemption applies:
+                    // pin-pin, via-via and via-through-pin contact is a
+                    // violation exactly like in Java.
                     let a_pin = is_pin(item);
                     let b_pin = is_pin(other);
                     let attach = |it: &crate::board::Item| matches!(&it.kind, ItemKind::Via(v) if v.attach_allowed);
@@ -145,7 +142,6 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                     if exempt {
                         continue;
                     }
-                    same_net_drill = true;
                     // classify each drill item (routing via / through-pin / smd
                     // pad) and look up the same-net clearance for the pair
                     let ic = |it: &crate::board::Item| -> crate::rules::ItemClass {
@@ -218,16 +214,6 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                         continue;
                     }
                     let d = shape.euclidean_distance_to(os);
-                    // A same-net drill pair that TOUCHES is a connection (via on
-                    // its pad), not a spacing violation; only a genuinely
-                    // separated pair is a breakout. euclidean_distance_to
-                    // returns exactly 0.0 for touching or interpenetrating
-                    // shapes, so `<= 0.0` is the precise "connected" test; a
-                    // fixed `< 1.0` was one board unit — 25.4 µm at `resolution
-                    // mil 1` — and could swallow a real sub-unit breakout gap.
-                    if same_net_drill && d <= 0.0 {
-                        continue;
-                    }
                     // Tolerance guards ONLY against floating-point noise in the
                     // Euclidean distance (matrix values and coordinates are
                     // integers). A relative epsilon is unit-independent; the
@@ -426,6 +412,43 @@ mod tests {
             check_board(&board).violations.len(),
             1,
             "same-net rule larger than every matrix value must still be enforced"
+        );
+    }
+
+    #[test]
+    fn same_net_drill_touch_is_a_violation_unless_attach_exempt() {
+        // Java Via/Pin.is_obstacle: overlapping same-net drills are a
+        // violation; the ONLY exemption is an attach-allowed via on a
+        // drillable (SMD) pin.
+        let mut board = test_board();
+        // two same-net vias stacked at the same spot: violation
+        board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        board.insert_via(1, IntPoint::new(0, 100), vec![1], 1, false);
+        assert_eq!(
+            check_board(&board).violations.len(),
+            1,
+            "overlapping same-net vias must be a violation"
+        );
+
+        // an attach-allowed via on a same-net SMD pin: exempt
+        let mut board = test_board();
+        let pin = board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        board.set_component_no(pin, 1); // single-layer padstack -> SMD pin
+        board.insert_via(1, IntPoint::new(0, 100), vec![1], 1, true);
+        assert!(
+            check_board(&board).violations.is_empty(),
+            "attach-allowed via on same-net SMD pin is the fanout exemption"
+        );
+
+        // the same via WITHOUT attach: violation
+        let mut board = test_board();
+        let pin = board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        board.set_component_no(pin, 1);
+        board.insert_via(1, IntPoint::new(0, 100), vec![1], 1, false);
+        assert_eq!(
+            check_board(&board).violations.len(),
+            1,
+            "a non-attach via on a same-net pin stays a violation"
         );
     }
 

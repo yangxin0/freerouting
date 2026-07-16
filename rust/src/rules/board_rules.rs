@@ -49,6 +49,9 @@ pub struct BoardRules {
     /// applies them; the DRC uses them to require spacing between same-net
     /// drill items. Both orderings of a pair are stored.
     same_net_clearance: std::collections::HashMap<(ItemClass, ItemClass), i32>,
+    /// DSN `(structure (control (via_at_smd on)))`: vias may attach to
+    /// drillable (SMD) pads by default (Java `via_at_smd_allowed`).
+    pub via_at_smd_allowed: bool,
 }
 
 impl BoardRules {
@@ -67,6 +70,7 @@ impl BoardRules {
             pin_edge_to_turn_dist: 0.0,
             use_slow_autoroute_algorithm: false,
             same_net_clearance: std::collections::HashMap::new(),
+            via_at_smd_allowed: false,
         }
     }
 
@@ -292,6 +296,17 @@ impl BoardRules {
         let rule = self.via_rules.get(rule_id)?;
         let via_info_id = *rule.vias().first()?;
         Some(self.via_infos.get(via_info_id).get_padstack())
+    }
+
+    /// Whether the via the router would use for `net_no` (the same
+    /// selection as [`Self::via_padstack_for_net`]) may attach to
+    /// drillable (SMD) pads (Java `ViaInfo.attach_smd_allowed`).
+    pub fn via_attach_allowed_for_net(&self, net_no: i32) -> Option<bool> {
+        let net = self.nets.get_by_no(net_no)?;
+        let rule_id = self.net_classes.get(net.get_class()).get_via_rule()?;
+        let rule = self.via_rules.get(rule_id)?;
+        let via_info_id = *rule.vias().first()?;
+        Some(self.via_infos.get(via_info_id).attach_smd_allowed())
     }
 
     /// The index of the default via rule, if any.

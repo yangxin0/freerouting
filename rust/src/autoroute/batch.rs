@@ -25,6 +25,10 @@ pub struct BatchRequest {
     pub trace_half_width: i32,
     pub clearance_class: usize,
     pub via_padstack: usize,
+    /// Layer-change vias may land on drillable (SMD) pads of their net
+    /// (Java `AutorouteControl.attach_smd_allowed`); the inserted via
+    /// carries the flag for the DRC's fanout exemption.
+    pub via_attach_allowed: bool,
     pub via_cost: f64,
     /// Expansion budget per connection (see
     /// `MazeRouteRequest::max_expansions`).
@@ -234,6 +238,7 @@ pub fn route_net_with_store(
             trace_half_width: request.trace_half_width,
             clearance_class: request.clearance_class,
             via_padstack: request.via_padstack,
+            via_attach_allowed: request.via_attach_allowed,
             via_cost: request.via_cost,
             max_expansions: request.max_expansions,
             ripup_penalty: request.ripup_penalty,
@@ -427,8 +432,50 @@ pub(crate) fn request_for_net(
             .rules
             .via_padstack_for_net(net_no)
             .unwrap_or(base.via_padstack),
+        via_attach_allowed: via_attach_allowed_for_net(board, net_no, base.via_padstack),
         ..*base
     }
+}
+
+/// Whether the net's layer-change vias may land on its own drillable
+/// (SMD) pads: the via rule's flag (Java `ViaInfo.attach_smd_allowed`),
+/// falling back to `via_at_smd && padstack attach` like Java's default
+/// via infos, and relaxed for pure-SMD nets on multilayer boards
+/// (Java `AutorouteControl.rebuild_via_info`), which otherwise could
+/// never escape their component layer.
+pub(crate) fn via_attach_allowed_for_net(
+    board: &BasicBoard,
+    net_no: i32,
+    base_padstack: usize,
+) -> bool {
+    let attach = board
+        .rules
+        .via_attach_allowed_for_net(net_no)
+        .unwrap_or_else(|| {
+            board.rules.via_at_smd_allowed
+                && board
+                    .padstacks
+                    .get_by_no(base_padstack)
+                    .is_some_and(|p| p.attach_allowed)
+        });
+    if attach || board.layer_structure.layer_count() <= 1 {
+        return attach;
+    }
+    // pure-SMD net: every connectable item is a single-layer pin
+    let mut any = false;
+    for (_, item) in board.items() {
+        if !item.base.contains_net(net_no) || !item.is_connectable() {
+            continue;
+        }
+        any = true;
+        let is_smd_pin = matches!(item.kind, crate::board::ItemKind::Via(_))
+            && item.base.component_no > 0
+            && item.first_layer(&board.padstacks) == item.last_layer(&board.padstacks);
+        if !is_smd_pin {
+            return false;
+        }
+    }
+    any
 }
 
 /// The nets of routed items violating the pairwise clearance to another
@@ -920,6 +967,7 @@ mod tests {
             trace_half_width: 100,
             clearance_class: 1,
             via_padstack: 1,
+            via_attach_allowed: false,
             via_cost: 5000.0,
             max_expansions: 100_000,
             ripup_penalty: 0.0,
@@ -1028,6 +1076,7 @@ mod tests {
             trace_half_width: 100,
             clearance_class: 1,
             via_padstack: 1,
+            via_attach_allowed: false,
             via_cost: 5000.0,
             max_expansions: 30_000,
             ripup_penalty: 0.0,

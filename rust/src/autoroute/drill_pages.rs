@@ -39,6 +39,9 @@ struct DrillPage {
     /// vias 496 units too close to foreign vias through exactly that).
     base_margin: i32,
     net_margin: i32,
+    /// Whether `net_drills` was computed with attach-to-SMD allowed
+    /// (same-net drillable pins usable as via sites).
+    net_attach: bool,
 }
 
 /// The array of drill pages covering the board
@@ -113,6 +116,7 @@ impl DrillPageArray {
         area: &IntBox,
         net_no: i32,
         via_margin: i32,
+        attach_smd: bool,
     ) -> Vec<ExpansionDrill> {
         let (x0, x1) = (
             area.ll.x.div_euclid(self.page_width),
@@ -144,9 +148,11 @@ impl DrillPageArray {
                     net_no: -1,
                     base_margin: -1,
                     net_margin: -1,
+                    net_attach: false,
                 });
                 if page.base_drills.is_none() || page.base_margin != via_margin {
-                    let (drills, nets) = calculate_page_drills(board, page.shape, -1, via_margin);
+                    let (drills, nets) =
+                        calculate_page_drills(board, page.shape, -1, via_margin, false);
                     page.base_drills = Some(drills);
                     page.nets_present = nets;
                     page.net_drills = None;
@@ -160,11 +166,17 @@ impl DrillPageArray {
                     if page.net_drills.is_none()
                         || page.net_no != net_no
                         || page.net_margin != via_margin
+                        || page.net_attach != attach_smd
                     {
                         page.net_no = net_no;
                         page.net_margin = via_margin;
-                        page.net_drills =
-                            Some(calculate_page_drills(board, page.shape, net_no, via_margin).0);
+                        page.net_attach = attach_smd;
+                        page.net_drills = Some(
+                            calculate_page_drills(
+                                board, page.shape, net_no, via_margin, attach_smd,
+                            )
+                            .0,
+                        );
                     }
                     page.net_drills.as_ref().unwrap()
                 } else {
@@ -190,6 +202,7 @@ fn calculate_page_drills(
     page: IntBox,
     net_no: i32,
     via_margin: i32,
+    attach_smd: bool,
 ) -> (Vec<ExpansionDrill>, Vec<i32>) {
     let page_shape = TileShape::Box(page);
     let query = page_shape.offset(via_margin as f64);
@@ -200,9 +213,21 @@ fn calculate_page_drills(
             continue;
         };
         nets_present.extend(item.base.net_nos.iter().copied());
-        // drillable for this net: own-net items and conduction planes
+        // Drillable for this net (Java Item.is_drillable): own-net traces
+        // and conduction planes. Own-net PINS and VIAS are not — a via
+        // must not land on them (Java DrillPage.get_drills cuts them
+        // out) — except a drillable (SMD) pin when attach is allowed.
         if item.base.contains_net(net_no) {
-            continue;
+            let drillable = if crate::drc::is_drill(&item.kind) {
+                crate::drc::is_pin(item)
+                    && attach_smd
+                    && crate::drc::drill_allowed(item, &board.padstacks)
+            } else {
+                true
+            };
+            if drillable {
+                continue;
+            }
         }
         if let crate::board::ItemKind::ObstacleArea(a) = &item.kind {
             if a.is_conduction {
@@ -269,7 +294,7 @@ mod tests {
         board.insert_via(1, IntPoint::new(20000, 20000), vec![2], 1, false);
         let mut pages = DrillPageArray::new(&board, 1);
         let area = IntBox::from_coords(-2000, -2000, 22000, 22000);
-        let drills = pages.drills_overlapping(&board, &area, 1, 600);
+        let drills = pages.drills_overlapping(&board, &area, 1, 600, false);
         assert!(!drills.is_empty(), "free space must yield drills");
         for d in &drills {
             let _ = d.bbox;
@@ -292,7 +317,7 @@ mod tests {
         let count_before = drills.len();
         board.insert_via(1, IntPoint::new(10000, 10000), vec![3], 1, false);
         pages.sync_board_changes(&board);
-        let drills_after = pages.drills_overlapping(&board, &area, 1, 600);
+        let drills_after = pages.drills_overlapping(&board, &area, 1, 600, false);
         assert_ne!(
             count_before,
             drills_after.len(),

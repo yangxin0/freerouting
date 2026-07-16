@@ -104,6 +104,12 @@ fn shove_insert(
                     .iter()
                     .any(|(s, l)| *l == layer && s.intersection(&query).dimension() >= 2);
                 if conflicts {
+                    if crate::debug::shove() {
+                        eprintln!(
+                            "SHOVE blocked by drill {id} nets {:?} comp {}",
+                            item.base.net_nos, item.base.component_no
+                        );
+                    }
                     return false;
                 }
             }
