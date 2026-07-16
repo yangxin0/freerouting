@@ -8,8 +8,17 @@ use crate::board::ItemKind;
 
 /// Relative tolerance absorbing floating-point rounding in the Euclidean
 /// copper-distance check. Unit-independent: it scales with the required
-/// clearance, never with the board's resolution.
-const DISTANCE_EPS: f64 = 1e-6;
+/// clearance, never with the board's resolution. The router's own
+/// clearance gates use the same tolerance, so a route the maze accepts
+/// is never a (sub-unit) violation for the DRC.
+pub(crate) const DISTANCE_EPS: f64 = 1e-6;
+
+/// True when a measured copper distance violates `required` clearance,
+/// beyond floating-point noise. One predicate for the DRC and the
+/// router's insert gates.
+pub(crate) fn violates(distance: f64, required: f64) -> bool {
+    distance < required - required.max(1.0) * DISTANCE_EPS
+}
 
 /// A drill item (via or pin — both are `ItemKind::Via` here, as in Java's
 /// `DrillItem` hierarchy).
@@ -220,7 +229,7 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                     // former fixed `- 1.0` was one board unit — 0.1 µm at
                     // `resolution um 10`, but 25.4 µm at `mil 1`, which let
                     // materially undersized clearances pass.
-                    if d < required - required.max(1.0) * DISTANCE_EPS {
+                    if violates(d, required) {
                         worst = Some(worst.map_or(d, |w: f64| w.min(d)));
                     }
                 }

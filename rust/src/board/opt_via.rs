@@ -176,11 +176,9 @@ pub fn opt_via_location(board: &mut BasicBoard, via_id: ItemId, max_recursion: u
                             *l,
                             false,
                         ) as f64;
-                        if other
-                            .tile_shapes(&board.padstacks)
-                            .iter()
-                            .any(|(os, ol)| ol == l && s.euclidean_distance_to(os) < cl - 1.0)
-                        {
+                        if other.tile_shapes(&board.padstacks).iter().any(|(os, ol)| {
+                            ol == l && crate::drc::violates(s.euclidean_distance_to(os), cl)
+                        }) {
                             clear = false;
                             break 'outer;
                         }

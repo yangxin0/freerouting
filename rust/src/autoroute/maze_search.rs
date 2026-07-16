@@ -1452,7 +1452,7 @@ fn via_site_is_clear(board: &BasicBoard, request: &MazeRouteRequest, p: IntPoint
             if other.tile_shapes(&board.padstacks).iter().any(|(os, ol)| {
                 *ol == layer
                     && os.intersection(&shape.offset(cl)).dimension() >= 2
-                    && shape.euclidean_distance_to(os) < cl - 1.0
+                    && crate::drc::violates(shape.euclidean_distance_to(os), cl)
             }) {
                 return false;
             }
@@ -1485,10 +1485,13 @@ fn trace_run_is_clear(
                     continue;
                 }
             }
+            // matrix order like the DRC (Java get_value(other, this)):
+            // the KiCad-JSON importer builds an asymmetric matrix where
+            // the transposed cell is the wrong value
             let cl = matrix
                 .get_value(
-                    request.clearance_class,
                     other.base.clearance_class,
+                    request.clearance_class,
                     layer,
                     false,
                 )
@@ -1496,7 +1499,7 @@ fn trace_run_is_clear(
             if other.tile_shapes(&board.padstacks).iter().any(|(os, ol)| {
                 *ol == layer
                     && os.intersection(&seg.offset(cl)).dimension() >= 2
-                    && seg.euclidean_distance_to(os) < cl - 1.0
+                    && crate::drc::violates(seg.euclidean_distance_to(os), cl)
             }) {
                 return false;
             }

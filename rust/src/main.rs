@@ -361,9 +361,18 @@ fn main() -> ExitCode {
     if complete_final != complete {
         println!("final completion: {complete_final}/{net_count} nets connected");
     }
-    if complete_final == net_count {
-        ExitCode::SUCCESS
-    } else {
+    // Success requires a DRC-clean result, not just connectivity: a fully
+    // connected board with clearance violations is not a usable route.
+    // Exit 2 = nets unconnected, exit 3 = connected but violating.
+    let violations = freerouting::drc::check_board(&board).violations.len();
+    if violations > 0 {
+        println!("DRC: {violations} clearance violation(s) remain");
+    }
+    if complete_final != net_count {
         ExitCode::from(2)
+    } else if violations > 0 {
+        ExitCode::from(3)
+    } else {
+        ExitCode::SUCCESS
     }
 }

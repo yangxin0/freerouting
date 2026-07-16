@@ -52,7 +52,7 @@ fn net_violations(board: &BasicBoard, net_no: i32) -> usize {
                 if other.tile_shapes(&board.padstacks).iter().any(|(os, ol)| {
                     ol == l
                         && os.intersection(&check).dimension() >= 2
-                        && s.euclidean_distance_to(os) < cl - cl.max(1.0) * 1e-6
+                        && crate::drc::violates(s.euclidean_distance_to(os), cl)
                 }) {
                     count += 1;
                 }

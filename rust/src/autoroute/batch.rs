@@ -478,67 +478,38 @@ pub(crate) fn via_attach_allowed_for_net(
     any
 }
 
-/// The nets of routed items violating the pairwise clearance to another
-/// routed foreign item (post-routing audit; planes excepted).
-fn violating_nets(board: &BasicBoard) -> Vec<i32> {
-    use crate::board::ItemKind;
+/// The nets involved in repairable clearance violations plus the count
+/// of those violations, from the authoritative DRC — one rule set for
+/// routing, repair and reporting (previously a hand-rolled audit that
+/// skipped pins, conduction flags and same-net drills, and read the
+/// transposed matrix cell).
+fn violating_nets(board: &BasicBoard) -> (Vec<i32>, usize) {
+    let report = crate::drc::check_board(board);
     let mut nets = Vec::new();
-    let routed: Vec<ItemId> = board
-        .items()
-        .filter(|(_, it)| {
-            it.base.component_no == 0
-                && it.base.net_count() > 0
-                && !matches!(it.kind, ItemKind::ObstacleArea(_))
-        })
-        .map(|(id, _)| *id)
-        .collect();
-    for &id in &routed {
-        let Some(item) = board.get_item(id) else {
+    let mut repairable = 0usize;
+    for v in &report.violations {
+        // only violations touching a route item can be repaired by
+        // rerouting; a placement-level overlap (pin vs pin/keepout) is
+        // not routable away
+        let routable = [v.first_item, v.second_item].iter().any(|&id| {
+            board
+                .get_item(id)
+                .is_some_and(|it| it.base.component_no == 0)
+        });
+        if !routable {
             continue;
-        };
-        let shapes: Vec<_> = item.tile_shapes(&board.padstacks).to_vec();
-        'shapes: for (shape, layer) in shapes {
-            let max_cl = board.rules.clearance_matrix.max_value(layer).max(0) as f64;
-            for other_id in board.overlapping_items(&shape.offset(max_cl), Some(layer)) {
-                if other_id == id {
-                    continue;
-                }
-                let Some(other) = board.get_item(other_id) else {
-                    continue;
-                };
-                if other.base.shares_net(&item.base) || other.base.component_no != 0 {
-                    continue;
-                }
-                if let ItemKind::ObstacleArea(a) = &other.kind {
-                    if a.is_conduction {
-                        continue;
-                    }
-                    if a.via_only && !matches!(item.kind, ItemKind::Via(_)) {
-                        continue;
-                    }
-                }
-                let cl = board.rules.clearance_matrix.get_value(
-                    item.base.clearance_class,
-                    other.base.clearance_class,
-                    layer,
-                    false,
-                ) as f64;
-                let check = shape.offset(cl);
-                let conflict = other
-                    .tile_shapes(&board.padstacks)
-                    .iter()
-                    .any(|(s, l)| *l == layer && s.intersection(&check).dimension() >= 2);
-                if conflict {
-                    nets.extend(item.base.net_nos.iter().copied());
-                    nets.extend(other.base.net_nos.iter().copied());
-                    break 'shapes;
-                }
+        }
+        repairable += 1;
+        for id in [v.first_item, v.second_item] {
+            if let Some(it) = board.get_item(id) {
+                nets.extend(it.base.net_nos.iter().copied());
             }
         }
     }
-    nets.sort();
+    nets.sort_unstable();
     nets.dedup();
-    nets
+    nets.retain(|&n| n > 0);
+    (nets, repairable)
 }
 
 /// Rips and reroutes the nets with clearance violations among routed
@@ -551,7 +522,7 @@ fn repair_violations(
     let mut repaired = 0;
     let all_nets: Vec<i32> = (1..=board.rules.nets.max_net_no()).collect();
     for _round in 0..2 {
-        let nets = violating_nets(board);
+        let (nets, violations_before) = violating_nets(board);
         if nets.is_empty() {
             break;
         }
@@ -594,23 +565,28 @@ fn repair_violations(
             .iter()
             .filter(|&&n| board.net_is_completely_connected(n))
             .count();
+        // a repair round is kept only when it made real progress: no
+        // completion traded away AND strictly fewer violations — a round
+        // that merely preserves the complete-net count while leaving the
+        // violations in place (or moving them) is rolled back
+        let (_, violations_after) = violating_nets(board);
+        let keep = complete_after >= complete_before && violations_after < violations_before;
         if crate::debug::stats() {
             eprintln!(
-                "REPAIR round {_round}: {} violating nets {:?}, complete {} -> {} ({})",
+                "REPAIR round {_round}: {} violating nets {:?}, complete {} -> {}, \
+                 violations {} -> {} ({})",
                 nets.len(),
                 nets,
                 complete_before,
                 complete_after,
-                if complete_after >= complete_before {
-                    "KEPT"
-                } else {
-                    "ROLLED BACK"
-                }
+                violations_before,
+                violations_after,
+                if keep { "KEPT" } else { "ROLLED BACK" }
             );
         }
-        if complete_after >= complete_before {
+        if keep {
             board.pop_snapshot();
-            repaired += nets.len();
+            repaired += violations_before - violations_after;
         } else {
             board.undo();
             break; // this round's reroutes failed; keep completion
