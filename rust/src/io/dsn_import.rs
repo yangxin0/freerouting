@@ -32,6 +32,20 @@ fn err(message: impl Into<String>) -> ImportError {
     ImportError(message.into())
 }
 
+/// Maps a DSN item-class token to the [`ItemClass`] enum (for `*_same_net`
+/// rules). `wire` maps to a trace; unknown names return `None`.
+fn item_class_of(name: &str) -> Option<crate::rules::ItemClass> {
+    use crate::rules::ItemClass;
+    match name {
+        "via" => Some(ItemClass::Via),
+        "pin" => Some(ItemClass::Pin),
+        "smd" => Some(ItemClass::Smd),
+        "area" => Some(ItemClass::Area),
+        "wire" => Some(ItemClass::Trace),
+        _ => None,
+    }
+}
+
 /// Resolves a DSN clearance-class name to a clearance-matrix class index,
 /// creating the class on demand (Java `Structure.append_clearance_class` /
 /// `Network.get_clearance_class`). `wire` and `default` map to the default
@@ -235,11 +249,22 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 rules.set_pin_edge_to_turn_dist(value as f64);
                 continue;
             }
+            // `(clear V (type A_B_same_net))`: the clearance required between
+            // two SAME-NET item-class items (a drill-breakout rule). Java parses
+            // but never applies these; the DRC uses them (see drc.rs).
+            if let Some(base) = kind.strip_suffix("_same_net") {
+                if let Some((a, b)) = base.split_once('_') {
+                    if let (Some(ica), Some(icb)) = (item_class_of(a), item_class_of(b)) {
+                        rules.set_same_net_clearance(ica, icb, value);
+                    }
+                }
+                continue;
+            }
             let Some((a, b)) = kind.split_once('_') else {
                 continue; // a single-token type has no pair to set
             };
             if b.contains('_') {
-                continue; // more than one '_' (same_net variants) — not ported
+                continue; // more than one '_' — not a simple item-class pair
             }
             let ci = resolve_clearance_class(&mut rules, a);
             let cj = resolve_clearance_class(&mut rules, b);
@@ -368,6 +393,52 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     // its own matrix class so set_all can point its pins at the class value
     // (2002) rather than the tighter smd class (500), matching Java.
     let mut class_for_clearance: HashMap<i32, usize> = HashMap::new();
+
+    // named via infos and via rules declared in the network scope
+    // ((via NAME PADSTACK [CLEARANCE_CLASS] [attach]) and
+    //  (via_rule NAME VIA_INFO...)); net classes reference the rule by name.
+    let mut via_rule_ids: HashMap<String, usize> = HashMap::new();
+    for network in pcb.children("network") {
+        for via_node in network.children("via") {
+            let mut a = via_node.args();
+            let (Some(name), Some(padstack_name)) = (a.next(), a.next()) else {
+                continue;
+            };
+            let Some(&padstack_no) = padstack_nos.get(padstack_name) else {
+                continue;
+            };
+            let rest: Vec<&str> = a.collect();
+            let attach = rest.iter().any(|t| t.eq_ignore_ascii_case("attach"));
+            // the optional clearance class is the non-"attach" trailing token
+            let cl = rest
+                .iter()
+                .find(|t| !t.eq_ignore_ascii_case("attach"))
+                .map(|n| resolve_clearance_class(&mut rules, n))
+                .unwrap_or_else(BoardRules::default_clearance_class);
+            let _ = rules
+                .via_infos
+                .add(crate::rules::ViaInfo::new(name, padstack_no, cl, attach));
+        }
+        for rule_node in network.children("via_rule") {
+            let mut a = rule_node.args();
+            let Some(rule_name) = a.next() else {
+                continue;
+            };
+            let mut via_rule = crate::rules::ViaRule::new(rule_name);
+            let mut any = false;
+            for via_name in a {
+                if let Some(id) = rules.via_infos.get_by_name(via_name) {
+                    via_rule.append_via(id);
+                    any = true;
+                }
+            }
+            if any {
+                rules.via_rules.push(via_rule);
+                via_rule_ids.insert(rule_name.to_string(), rules.via_rules.len() - 1);
+            }
+        }
+    }
+
     for network in pcb.children("network") {
         for class_node in network.children("class") {
             let mut class_args = class_node.args();
@@ -472,7 +543,19 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                         .set_all(clearance_class_idx);
                 }
             }
-            if let Some(padstack_no) = via_padstack {
+            // a `(via_rule NAME)` reference binds the class to a named via rule
+            // declared in the network scope (Java insert_net_class); it wins
+            // over the `(circuit (use_via ...))` fallback below.
+            let named_via_rule = class_node
+                .child("via_rule")
+                .and_then(|v| v.arg())
+                .and_then(|name| via_rule_ids.get(name).copied());
+            if let Some(rule_id) = named_via_rule {
+                rules
+                    .net_classes
+                    .get_mut(class_idx)
+                    .set_via_rule(Some(rule_id));
+            } else if let Some(padstack_no) = via_padstack {
                 let via_info = crate::rules::ViaInfo::new(
                     format!("via::{class_name}"),
                     padstack_no,
@@ -1354,6 +1437,7 @@ mod tests {
       (clearance 400 (type via_via))
       (clearance 500 (type wire_via))
       (clearance 600 (type power_default))
+      (clearance 70 (type via_via_same_net))
     )
   )
   (placement
@@ -1388,6 +1472,19 @@ mod tests {
         );
         // arbitrary named class paired with default
         assert_eq!(m.get_value(power, 1, 0, false), 6000, "power_default");
+        // a *_same_net rule is stored as a same-net clearance, not a matrix class
+        use crate::rules::ItemClass;
+        assert_eq!(
+            board
+                .rules
+                .get_same_net_clearance(ItemClass::Via, ItemClass::Via),
+            Some(700),
+            "via_via_same_net stored"
+        );
+        assert!(
+            m.get_no("via_same_net").is_none(),
+            "no junk 'via_same_net' matrix class is created"
+        );
         // net class hv references the named `power` class for its traces
         let n1 = board.rules.nets.get_by_name("N1")[0].net_number;
         assert_eq!(board.rules.get_trace_clearance_class(n1), power);
@@ -1401,6 +1498,54 @@ mod tests {
             })
             .expect("pad");
         assert_eq!(pin_cc, power, "per-pin (clearance_class power) override");
+    }
+
+    #[test]
+    fn named_via_rule_reference() {
+        // (via ...) + (via_rule ...) declarations, referenced by a net class.
+        let dsn = r#"(pcb "v.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb 0 0 200000 200000))
+    (rule (width 200) (clearance 200))
+  )
+  (placement)
+  (library
+    (padstack "Via1"
+      (shape (circle F.Cu 600 0 0))
+      (shape (circle B.Cu 600 0 0))
+      (attach off)
+    )
+  )
+  (network
+    (net "HV")
+    (via "HVVia" "Via1" Power attach)
+    (via_rule Power "HVVia")
+    (class hv "HV" (via_rule Power) (rule (width 250)))
+  )
+)"#;
+        let board = import_dsn(dsn).expect("import");
+        let hv = board.rules.nets.get_by_name("HV")[0].net_number;
+        let class_idx = board.rules.nets.get_by_no(hv).unwrap().get_class();
+        let rule_id = board
+            .rules
+            .net_classes
+            .get(class_idx)
+            .get_via_rule()
+            .expect("net class binds the named via rule");
+        let rule = &board.rules.via_rules[rule_id];
+        assert_eq!(rule.name, "Power");
+        let via_info = board.rules.via_infos.get(rule.vias()[0]);
+        assert_eq!(via_info.get_name(), "HVVia");
+        assert!(via_info.attach_smd_allowed(), "attach token honored");
+        let power = board
+            .rules
+            .clearance_matrix
+            .get_no("Power")
+            .expect("named Power clearance class");
+        assert_eq!(via_info.get_clearance_class(), power);
     }
 
     #[test]

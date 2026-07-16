@@ -112,6 +112,9 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                 // SEPARATED (drill breakout), never when they overlap — an
                 // overlap is a connection (a via landing on its own pad).
                 let mut same_net_drill = false;
+                // If a `*_same_net` rule applies to this same-net drill pair, its
+                // value overrides the normal (foreign-net) clearance below.
+                let mut same_net_required: Option<f64> = None;
                 if other.base.shares_net(&item.base) {
                     // Same-net: Java `Trace.is_obstacle` is always false for a
                     // same-net item, so a pair involving a trace or an area is
@@ -137,6 +140,21 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                         continue;
                     }
                     same_net_drill = true;
+                    // classify each drill item (routing via / through-pin / smd
+                    // pad) and look up the same-net clearance for the pair
+                    let ic = |it: &crate::board::Item| -> crate::rules::ItemClass {
+                        if !is_pin(it) {
+                            crate::rules::ItemClass::Via
+                        } else if drill_allowed(it, &board.padstacks) {
+                            crate::rules::ItemClass::Smd
+                        } else {
+                            crate::rules::ItemClass::Pin
+                        }
+                    };
+                    same_net_required = board
+                        .rules
+                        .get_same_net_clearance(ic(item), ic(other))
+                        .map(|v| v as f64);
                 }
                 let other_obstacle = matches!(&other.kind, ItemKind::ObstacleArea(_));
                 // Two constraint areas do not clear against each other.
@@ -177,12 +195,16 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                 // the lookup is (other, item). The DSN matrix is symmetric, but
                 // the KiCad-JSON importer builds an asymmetric matrix, where the
                 // former (item, other) order read the transposed (wrong) cell.
-                let required = board.rules.clearance_matrix.get_value(
-                    other.base.clearance_class,
-                    item.base.clearance_class,
-                    layer,
-                    false,
-                ) as f64;
+                // A `*_same_net` rule value takes precedence for a same-net drill
+                // pair; otherwise use the ordinary (foreign-net) matrix value.
+                let required = same_net_required.unwrap_or_else(|| {
+                    board.rules.clearance_matrix.get_value(
+                        other.base.clearance_class,
+                        item.base.clearance_class,
+                        layer,
+                        false,
+                    ) as f64
+                });
                 let check = shape.offset(required);
                 let mut worst: Option<f64> = None;
                 for (os, ol) in other.tile_shapes(&board.padstacks).iter() {
@@ -347,6 +369,31 @@ mod tests {
             0,
         );
         BasicBoard::new(stack, rules, padstacks)
+    }
+
+    #[test]
+    fn same_net_drill_clearance_overrides_default() {
+        let mut board = test_board();
+        // two SAME-net vias, edge-to-edge gap 100 (padstack spans -300..300)
+        board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        board.insert_via(1, IntPoint::new(0, 700), vec![1], 1, false);
+        // with no same-net rule, same-net drills are checked at the default
+        // clearance (200) -> the 100 gap is a violation
+        assert_eq!(
+            check_board(&board).violations.len(),
+            1,
+            "same-net drills default to the ordinary clearance"
+        );
+        // a via_via_same_net of 50 relaxes the requirement below the gap
+        board.rules.set_same_net_clearance(
+            crate::rules::ItemClass::Via,
+            crate::rules::ItemClass::Via,
+            50,
+        );
+        assert!(
+            check_board(&board).violations.is_empty(),
+            "via_via_same_net (50) < 100 gap -> clean"
+        );
     }
 
     #[test]

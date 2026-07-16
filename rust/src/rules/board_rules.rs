@@ -44,6 +44,11 @@ pub struct BoardRules {
     /// restriction).
     pin_edge_to_turn_dist: f64,
     use_slow_autoroute_algorithm: bool,
+    /// Same-net clearances by item-class pair, from DSN `*_same_net` typed
+    /// clearance rules (e.g. `via_via_same_net`). Java parses these but never
+    /// applies them; the DRC uses them to require spacing between same-net
+    /// drill items. Both orderings of a pair are stored.
+    same_net_clearance: std::collections::HashMap<(ItemClass, ItemClass), i32>,
 }
 
 impl BoardRules {
@@ -61,7 +66,19 @@ impl BoardRules {
             max_trace_half_width: 100,
             pin_edge_to_turn_dist: 0.0,
             use_slow_autoroute_algorithm: false,
+            same_net_clearance: std::collections::HashMap::new(),
         }
+    }
+
+    /// Records a same-net clearance between two item classes (both orderings).
+    pub fn set_same_net_clearance(&mut self, a: ItemClass, b: ItemClass, value: i32) {
+        self.same_net_clearance.insert((a, b), value);
+        self.same_net_clearance.insert((b, a), value);
+    }
+
+    /// The same-net clearance required between two item classes, if any.
+    pub fn get_same_net_clearance(&self, a: ItemClass, b: ItemClass) -> Option<i32> {
+        self.same_net_clearance.get(&(a, b)).copied()
     }
 
     /// The default item clearance class.
