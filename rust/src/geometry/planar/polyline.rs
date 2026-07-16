@@ -284,6 +284,9 @@ impl Polyline {
         from_no: usize,
         to_no: usize,
     ) -> Vec<TileShape> {
+        if self.is_empty() {
+            return Vec::new();
+        }
         let to_no = to_no.min(self.arr.len() - 1);
         let shape_count = (to_no.saturating_sub(from_no)).saturating_sub(1);
         let mut shape_arr = Vec::with_capacity(shape_count);
@@ -433,7 +436,7 @@ impl Polyline {
 
     /// Offset shapes for all lines of this polyline.
     pub fn offset_shapes(&self, half_width: i32) -> Vec<TileShape> {
-        self.offset_shapes_between(half_width, 0, self.arr.len() - 1)
+        self.offset_shapes_between(half_width, 0, self.arr.len().saturating_sub(1))
     }
 
     /// The offset shape around the `no`-th line segment.
