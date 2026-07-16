@@ -167,10 +167,10 @@ Open, with rationale:
   default (vs Java disabled) are deliberate deviations, not alignment.
 - **Multithreaded board clones** — parity with Java (`deepCopy` per task).
 
-Full test count: 227 passing + 1 `#[ignore]`d (`j2_routes_fully_like_java`, the
-codified maze-completion gap — finding #6). `cargo fmt --check` and
-`cargo clippy -D warnings` both pass. No fleet completion regression across J2,
-pic_programmer, wavefolder, display, 8088sbc, ecc83.
+Full test count: 228 passing, 0 ignored (`j2_routes_fully_like_java` now passes:
+J2 routes 24/24). `cargo fmt --check` and `cargo clippy -D warnings` both pass.
+No fleet completion regression across J2, pic_programmer, wavefolder, display,
+8088sbc, ecc83.
 
 ## Second-round audit (2026-07-16) — partial, honest status
 
@@ -214,17 +214,26 @@ remaining items:
   accepting partial progress (Java `ItemRouteResult`). The `broke_a_net`
   guard is retained.
 
-KNOWN OPEN GAPS (surfaced, not yet fixed) — do NOT claim these are done:
+RESOLVED after the third round:
 
-1. **J2 routing-quality gap (finding #6).** Current Java Freerouting routes
-   J2 to 0 unconnected in ~0.7 s with no violations; the Rust maze reaches
-   only 23/24. Diagnosis: not budget (dies at ~10 expansions; 5M no help) and
-   not a hard blockage (each net routes fine alone) — an algorithmic
-   space-efficiency deficit in push-and-shove / room-door generation for
-   dense fine-pitch pin fields (Java packs 2 more escapes into the J2↔U1
-   corridor). Codified as the ignored `j2_routes_fully_like_java` test; the
-   two J2 pipeline tests document the gap rather than assert it is correct.
-   This is a real, deep maze-completion gap, not a quick fix.
+- **J2 routing completeness (finding #6).** The current code routes J2 to
+  24/24 nets, 0 clearance violations (score 999.94) — verified deterministically
+  in both debug (batch ~4 s) and release, and end-to-end via the CLI. The
+  mid-round diagnosis measured 22-23/24 and suspected an algorithmic wall, but
+  that was on the earlier second-round code; the third-round changes altered
+  the obstacle/clearance geometry the deterministic router sees, and the
+  current router reaches full completion (I did not bisect which change flipped
+  it). `j2_routes_fully_like_java` is now a normal (un-ignored) test and the two
+  J2 pipeline tests assert full, clean completion. A **performance** gap remains
+  (Rust routes J2 in seconds vs Java's ~0.7 s) — a speed concern, not a
+  correctness one.
+
+KNOWN OPEN GAPS (not yet fixed) — do NOT claim these are done:
+
+1. **Router performance vs Java (from finding #6).** Functionally J2 routes
+   fully, but the multi-pass ripup loop is much slower than Java's push-and-
+   shove — seconds vs sub-second on a small board. A real optimization target
+   (door generation / shove efficiency in dense pin fields), not a bug.
 2. **Named-rule clearance grammar (finding #2, Part B).** The general
    named-clearance-class system — `(clearance_class NAME)`/`(via_rule NAME)`
    net-class references, per-pin `(clearance_class …)` overrides in

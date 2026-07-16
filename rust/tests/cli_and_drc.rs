@@ -30,19 +30,15 @@ fn cli_routes_a_board_and_writes_a_session() {
         .output()
         .expect("failed to run freerouting binary");
 
-    // This is a PIPELINE smoke test: the CLI must run end to end and emit a
-    // valid session, not hard-fail (exit 1) or crash. It deliberately does NOT
-    // assert full completion, because J2 is a KNOWN ROUTING-QUALITY GAP: current
-    // Java Freerouting routes J2 to 0 unconnected in ~0.7 s, but the Rust maze
-    // reaches only 23/24 (exit code 2). That gap is codified as the ignored
-    // `j2_routes_fully_like_java` test below and tracked as finding #6 — it is
-    // NOT correct behavior, just the current state. (Before the finding #1 fix
-    // the maze faked 24/24 by deleting the blocking pins.)
-    let code = output.status.code();
+    // J2 routes to completion, so the CLI exits 0 (the exit code is computed
+    // after routing from the completion count — see main.rs). This exercises the
+    // whole pipeline end to end and asserts the honest outcome. (Before the
+    // finding #1 fix the maze faked 24/24 by deleting blocking pins; the finding
+    // #6 investigation later confirmed the router genuinely reaches 24/24.)
     assert!(
-        matches!(code, Some(0) | Some(2)),
-        "CLI should run end to end (exit 0 = fully routed, or 2 = incomplete — the \
-         known J2 gap); got {code:?}\nstderr: {}",
+        output.status.success(),
+        "CLI should route J2 fully (exit 0); got {:?}\nstderr: {}",
+        output.status.code(),
         String::from_utf8_lossy(&output.stderr)
     );
     let ses_text = std::fs::read_to_string(&ses).expect("session file not written");
@@ -368,18 +364,15 @@ fn full_board_drc_over_a_routed_board() {
     let limit = TimeLimit::new(30_000);
     batch_route_passes_with_time_limit(&mut board, &request, 100, Some(&limit));
 
-    // A full-board DRC must run to completion and produce a serializable
-    // KiCad report. NOTE: J2 not routing fully here is a KNOWN GAP (finding #6,
-    // see `j2_routes_fully_like_java`), not correct behavior — Java routes it to
-    // 0 unconnected. This test bounds the current gap so a REGRESSION (more nets
-    // dropping out) fails, while asserting the invariant that always holds: the
-    // routed copper is clean (no clearance violations), and each violation, if
-    // any, names two distinct real items. (Before the finding #1 fix the maze
-    // deleted the blocking pins, faking full completion with hidden violations.)
+    // A full-board DRC must run to completion and produce a serializable KiCad
+    // report. J2 routes fully AND cleanly: every net connected, no clearance
+    // violations, and each violation (if any) names two distinct real items.
+    // (Before the finding #1 fix the maze faked completion by deleting blocking
+    // pins; finding #6 then confirmed the router genuinely reaches 24/24.)
     let report = check_board(&board);
     assert!(
-        report.unconnected.len() <= 2,
-        "J2 regressed further: {} nets unconnected (known gap is 2; finding #6)",
+        report.unconnected.is_empty(),
+        "J2 should route fully: {} nets unconnected",
         report.unconnected.len()
     );
     for v in &report.violations {
@@ -396,13 +389,13 @@ fn full_board_drc_over_a_routed_board() {
     assert!(json.contains("schemas.kicad.org/drc.v1.json"));
 }
 
-/// KNOWN GAP (finding #6): current Java Freerouting routes J2 to zero
-/// unconnected groups in ~0.7 s with no clearance/hole violations. The Rust
-/// maze currently reaches only 23/24. This test codifies the CORRECT target
-/// (J2 IS fully routable) and is ignored until the maze-completion gap closes —
-/// it is the opposite of a claim that J2 is unroutable. Un-ignore when fixed.
+/// Finding #6: J2 must route to zero unconnected nets (as Java does), not the
+/// 22-23/24 the second-round code reached. The gap turned out to be
+/// convergence time in the slow debug build, not an algorithmic wall — the
+/// router genuinely completes J2. Rust is still slower than Java (a separate
+/// performance gap), but the multi-pass ripup loop converges to 24/24 well
+/// within the routing budget.
 #[test]
-#[ignore = "known maze-completion gap vs Java (finding #6): J2 reaches 23/24; target is 24/24"]
 fn j2_routes_fully_like_java() {
     let root = root();
     let dsn = format!("{root}/{SMALL_FIXTURE}");
@@ -416,6 +409,6 @@ fn j2_routes_fully_like_java() {
     // exit 0 requires every net connected (see main.rs completion check)
     assert!(
         status.success(),
-        "J2 should route fully (exit 0) as Java does in ~0.7 s; got {status:?}"
+        "J2 should route fully (exit 0); got {status:?}"
     );
 }
