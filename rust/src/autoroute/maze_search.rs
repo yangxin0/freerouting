@@ -242,7 +242,18 @@ pub fn find_connection(
             // the arrival side)
             let room_shape = engine.graph.room(room).shape.clone();
             let start_door = room_shape.intersection(start_shape);
-            let start_point = if start_door.dimension() >= 1 {
+            // Prefer the start pad's connection point (its centre of gravity,
+            // = the drill centre for a symmetric pad) when it lies in the room,
+            // so the trace BEGINS at the pin connection point — the same
+            // electrical-equivalence requirement as the arrival side (#2).
+            // Fall back to the door centroid only when the centre is outside the
+            // room (else the first segment would cross foreign clearance).
+            let sc = crate::geometry::planar::Point::Int(start_center.round());
+            let center_in_room =
+                room_shape.contains(&sc) || room_shape.to_simplex().offset(2.0).contains(&sc);
+            let start_point = if center_in_room {
+                start_center
+            } else if start_door.dimension() >= 1 {
                 start_door.centre_of_gravity()
             } else {
                 start_center
@@ -380,6 +391,12 @@ pub fn find_connection(
             );
             corners.push((dest_point, layer));
             rooms.push(None);
+            // extend into the pad to the pin connection point when the arrival
+            // room only reached the pad edge
+            if let Some(ext) = drill_center_extension(board, arrival_target, layer, dest_point) {
+                corners.push((ext, layer));
+                rooms.push(None);
+            }
             return Some(MazeSearchResult { corners, rooms });
         }
 
@@ -666,6 +683,37 @@ fn via_free(board: &BasicBoard, request: &MazeRouteRequest, point: IntPoint) -> 
     true
 }
 
+/// The extra corner extending a connection from `dest_point` (a safe point in
+/// the arrival room, typically on the pad edge) to a drill item's connection
+/// point — its center — or None when not applicable. The extension segment lies
+/// inside the convex same-net pad, so it crosses no foreign clearance; this is
+/// what lands the trace exactly at the pin connection point (finding #2) even
+/// when the arrival room only clips the pad edge and cannot itself reach center.
+fn drill_center_extension(
+    board: &BasicBoard,
+    dest_item: ItemId,
+    layer: usize,
+    dest_point: FloatPoint,
+) -> Option<FloatPoint> {
+    let item = board.get_item(dest_item)?;
+    let crate::board::ItemKind::Via(v) = &item.kind else {
+        return None;
+    };
+    if v.center.to_float().round() == dest_point.round() {
+        return None; // already at the connection point
+    }
+    let center = crate::geometry::planar::Point::Int(v.center);
+    let in_pad = item
+        .tile_shapes(&board.padstacks)
+        .iter()
+        .any(|(s, l)| *l == layer && s.contains(&center));
+    if in_pad {
+        Some(v.center.to_float())
+    } else {
+        None
+    }
+}
+
 /// The point where the connection enters the destination item. The
 /// straight segment from the arrival location to this point must stay
 /// legal: when the arrival room is known, the point is taken inside
@@ -716,6 +764,28 @@ fn destination_point(
                     }
                 }
                 return Some(tap.to_float());
+            }
+            // arriving at a DRILL item (via/pin): prefer its connection point,
+            // the drill center, so the trace terminates exactly where Java lands
+            // it. Landing at the door centroid (room ∩ pad) instead left the end
+            // ~50 um off a small SMD pin, which the lenient in-pad containment
+            // rule still counts as connected but a reloaded SES reads as a
+            // dangling track (finding #2). Only taken when the center lies in the
+            // arrival room and the pad on this layer, so the final segment stays
+            // inside the convex room and does not cross foreign clearance;
+            // otherwise fall back to the door centroid.
+            if let crate::board::ItemKind::Via(v) = &item.kind {
+                let center = crate::geometry::planar::Point::Int(v.center);
+                let center_in_room = arrival_room.is_none_or(|room| {
+                    room.contains(&center) || room.to_simplex().offset(2.0).contains(&center)
+                });
+                let center_in_pad = item
+                    .tile_shapes(&board.padstacks)
+                    .iter()
+                    .any(|(s, l)| *l == layer && s.contains(&center));
+                if center_in_room && center_in_pad {
+                    return Some(v.center.to_float());
+                }
             }
             let shapes = item.tile_shapes(&board.padstacks);
             let dest_shape = shapes

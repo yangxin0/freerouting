@@ -4,6 +4,16 @@ Incremental port of the Java sources (`src/main/java/app/freerouting`, 484 files
 to the `rust/` crate. Updated by each `/loop` iteration; the next iteration
 should pick up the first unchecked item below.
 
+> **Authoritative status: see "Audit remediation (2026-07-16)" below.** The
+> per-iteration sections that follow are HISTORICAL and contain claims that
+> later parity audits corrected — e.g. the test count and "no warnings" (both
+> stale; `clippy -D warnings` and `fmt --check` currently fail), "board-wide"
+> optimizer acceptance (it is completeness-set based, still narrower than
+> Java's airline metric), "exactly Java" ratsnest semantics (only the airline
+> count matches), and the "non-GUI checklist complete" claim (electrical
+> equivalence, DSN clearance classes, and the design-rule cost model are open).
+> Treat those sections as a build log, not current truth.
+
 ## Status (as of iteration 118)
 
 - **Working end to end**: DSN import (planes, net classes, back-side /
@@ -84,17 +94,31 @@ an explicit list of what is NOT fixed. Fixes landed (with regression tests):
   writer keeps its own separate board-units-per-mm convention and is NOT yet
   unit-correct for DSN-imported boards — still TODO.
 
-NOT fixed / reverted, with rationale (honest status after the second audit):
+Also fixed in the third round:
 
-- **Electrical equivalence at pin connection points (finding #2) — NOT FIXED.**
-  Routed traces still stop anywhere inside a target pad rather than at the pin
-  connection point, so a "complete" net's SES can reload with dangling tracks. A
-  first fix (a connecting stub) is deleted by cycle removal; a second (rebuilding
-  the trace to end at the centre) creates degenerate sub-grid segments that break
-  the polyline offset machinery. Both were reverted. A correct fix must terminate
-  the maze connection at the drill connection point during the search — a larger
-  router change, still open. The `routed_nets_reach_pin_connection_points` test
-  encodes the target property and is `#[ignore]`d until then.
+- **DRC report dedup** — one violation per (item pair, layer); a multi-shape
+  padstack no longer reports the same breach several times.
+- **DRC/scoring/ratsnest unit-aware mm** — the ratsnest JSON now uses
+  `board_units_per_mm` too (KiCad + rules writers still on the raw-resolution
+  convention — TODO).
+- **Integration assertions strengthened** — the full-board DRC test now asserts
+  J2 reports zero clearance violations (not just zero unconnected).
+
+PARTIALLY fixed / open, with rationale:
+
+- **Electrical equivalence at pin connection points (finding #2) — PARTIAL.**
+  The maze search now lands a connection at the drill CONNECTION POINT (center)
+  when the center lies in the arrival room, and otherwise extends one corner into
+  the convex same-net pad to reach it (`destination_point` + `drill_center_
+  extension`, and the symmetric start-side preference). This reduces off-centre
+  endings without fleet regression, but does NOT fully close the gap: many small
+  SMD arrivals still terminate on the pad edge, so a routed board can still reload
+  with dangling tracks. Two earlier post-hoc attempts were reverted (a stub is
+  deleted by cycle removal; a naive trace rebuild panics the polyline machinery).
+  A complete fix needs the arrival to always route to the center. The
+  `routed_nets_reach_pin_connection_points` test encodes the target and is
+  `#[ignore]`d (its flat "every pin reached" metric also over-counts trivially
+  connected nets, so it needs refining alongside the real fix).
 - **Per-net clearance class is inert for DSN inputs (finding #4).** The plumbing
   (router + optimizer use `get_trace_clearance_class`) is correct, but DSN import
   assigns clearance class 1 to *every* net class, so there is nothing to

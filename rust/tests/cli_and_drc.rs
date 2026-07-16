@@ -246,9 +246,9 @@ fn full_board_drc_over_a_routed_board() {
     batch_route_passes_with_time_limit(&mut board, &request, 100, Some(&limit));
 
     // A full-board DRC must run to completion and produce a serializable
-    // KiCad report. J2 routes cleanly, so there should be no unconnected
-    // nets left; the violation set must be internally consistent (each
-    // violation names two distinct real items).
+    // KiCad report. J2 routes fully and cleanly, so the report must show no
+    // unconnected nets AND no clearance violations; each violation, if any,
+    // must also name two distinct real items.
     let report = check_board(&board);
     assert!(
         report.unconnected.is_empty(),
@@ -260,6 +260,11 @@ fn full_board_drc_over_a_routed_board() {
         assert!(board.get_item(v.first_item).is_some());
         assert!(board.get_item(v.second_item).is_some());
     }
+    assert!(
+        report.violations.is_empty(),
+        "J2 should route cleanly, but DRC reported {} clearance violation(s)",
+        report.violations.len()
+    );
     let json = report.to_kicad_json(&board, "j2.dsn");
     assert!(json.contains("schemas.kicad.org/drc.v1.json"));
 }

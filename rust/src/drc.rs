@@ -51,6 +51,11 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
         })
         .map(|(id, _)| *id)
         .collect();
+    // One violation per (item pair, layer): an item with several tile shapes on
+    // the same layer (e.g. a multi-shape padstack) would otherwise report the
+    // same pairwise clearance breach several times.
+    let mut seen: std::collections::HashSet<(ItemId, ItemId, usize)> =
+        std::collections::HashSet::new();
     for &id in &candidates {
         let Some(item) = board.get_item(id) else { continue };
         let item_obstacle = matches!(&item.kind, ItemKind::ObstacleArea(_));
@@ -113,6 +118,9 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                     }
                 }
                 if let Some(actual) = worst {
+                    if !seen.insert((id, other_id, layer)) {
+                        continue; // already reported this pair on this layer
+                    }
                     let bb = shape.bounding_box();
                     report.violations.push(DrcViolation {
                         first_item: id,

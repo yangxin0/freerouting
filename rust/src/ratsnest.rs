@@ -43,11 +43,14 @@ fn item_points(board: &BasicBoard, id: crate::board::basic_board::ItemId) -> Vec
     }
 }
 
-/// The airlines of all incomplete nets, exactly Java's
-/// `NetIncompletes` semantics: Kruskal's MST over the net items'
-/// representative points, edges ascending by length, one airline per
-/// edge joining two different connected sets, endpoints at the actual
-/// nearest item points. (Java prunes the candidate edges with a
+/// The airlines of all incomplete nets: Kruskal's MST over the net items'
+/// representative points, edges ascending by length, one airline per edge
+/// joining two different connected sets, endpoints at the actual nearest item
+/// points. This approximates Java's `NetIncompletes` but is NOT identical: the
+/// set of representative points differs (this port uses all trace endpoints and
+/// bounding-box centers; Java filters different representatives and breaks ties
+/// differently), so a specific airline pair may differ even though the airline
+/// COUNT per net matches. (Java prunes the candidate edges with a
 /// Delaunay triangulation before Kruskal; the triangulation always
 /// contains the Euclidean MST, so the complete graph yields the same
 /// airlines at ratsnest sizes — the 975-line triangulation is a pure
@@ -137,7 +140,7 @@ pub fn ratsnest(board: &BasicBoard) -> Vec<AirLine> {
 
 /// Serializes the airlines as JSON.
 pub fn ratsnest_json(board: &BasicBoard) -> String {
-    let scale = 1.0 / (board.resolution.max(1) as f64 * 1000.0);
+    let scale = 1.0 / board.board_units_per_mm(); // unit-aware board units → mm
     let lines = ratsnest(board);
     let mut out = String::from("{\n  \"airlines\": [\n");
     for (i, l) in lines.iter().enumerate() {
