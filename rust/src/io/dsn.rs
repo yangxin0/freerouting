@@ -220,10 +220,7 @@ mod tests {
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
         for fixture in ["empty_board.dsn", "Issue093-interf_u.dsn"] {
             let path = format!("{root}/fixtures/{fixture}");
-            let Ok(content) = std::fs::read_to_string(&path) else {
-                // fixture not present in this checkout: skip
-                continue;
-            };
+            let content = std::fs::read_to_string(&path).expect("fixture missing from checkout");
             let expr =
                 parse_dsn(&content).unwrap_or_else(|e| panic!("failed to parse {fixture}: {e}"));
             assert_eq!(expr.name(), Some("pcb"), "{fixture} root");

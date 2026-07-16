@@ -115,21 +115,67 @@ struct Image {
 pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
     let mut board = import_dsn_inner(content)?;
     // retain the document without its wiring for DSN export (the router
-    // only changes the wiring section)
-    let stripped = match content.find("(wiring") {
-        Some(pos) => {
-            let prefix = &content[..pos];
-            let trimmed = prefix.trim_end();
-            format!(
-                "{}
-)",
-                trimmed.strip_suffix(')').unwrap_or(trimmed)
-            )
-        }
-        None => content.to_string(),
-    };
-    board.dsn_source = Some(stripped);
+    // only changes the wiring section): remove exactly the balanced
+    // `(wiring ...)` span, keeping everything before and after it
+    board.dsn_source = Some(strip_wiring(content));
     Ok(board)
+}
+
+/// The document with its `(wiring ...)` sections removed. Spans are found
+/// by paren counting (quoted strings have no escapes, matching the
+/// parser); an unbalanced span leaves the document untouched.
+fn strip_wiring(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    while let Some(pos) = rest.find("(wiring") {
+        // require a real section name: "(wiring" then a delimiter
+        let after = rest[pos + "(wiring".len()..].bytes().next();
+        let is_section = after.is_none_or(|c| c.is_ascii_whitespace() || c == b')' || c == b'(');
+        let mut end = None;
+        if is_section {
+            let bytes = rest.as_bytes();
+            let mut depth = 0usize;
+            let mut i = pos;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'"' => {
+                        // parser rule: a lone quote before whitespace/`)`
+                        // is an atom, otherwise a quoted string (no escapes)
+                        let next = bytes.get(i + 1);
+                        if next.is_some_and(|c| !c.is_ascii_whitespace() && *c != b')') {
+                            match bytes[i + 1..].iter().position(|&c| c == b'"') {
+                                Some(q) => i += q + 1,
+                                None => break, // unterminated string
+                            }
+                        }
+                    }
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(i + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
+        match end {
+            Some(end) => {
+                out.push_str(rest[..pos].trim_end_matches([' ', '\t']));
+                rest = &rest[end..];
+            }
+            None => {
+                // not a wiring section (or unbalanced): keep it verbatim
+                out.push_str(&rest[..pos + "(wiring".len()]);
+                rest = &rest[pos + "(wiring".len()..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
@@ -203,6 +249,13 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
         ClearanceMatrix::new(layer_structure.clone(), &["null", "default", "smd"]);
     let mut rules = BoardRules::new(layer_structure.clone(), clearance_matrix);
     rules.clearance_matrix.set_default_value(default_clearance);
+    // (structure (control (via_at_smd on))): vias may attach to SMD pads
+    // (Java Structure.read_control_scope -> via_at_smd_allowed, default off)
+    rules.via_at_smd_allowed = structure
+        .child("control")
+        .and_then(|c| c.child("via_at_smd"))
+        .and_then(|v| v.arg())
+        .is_some_and(|v| v.eq_ignore_ascii_case("on"));
     let default_nc = rules.get_default_net_class();
     // The default net class keeps SMD pads on the tight smd class (2), so plain
     // (unclassed) nets' smd pads stay at the smd clearance. Classed nets that
@@ -317,10 +370,13 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                     shapes[l] = Some(shape);
                 }
             }
+            // Java read_padstack_scope: attach defaults ON when the
+            // `(attach ...)` scope is omitted; only an explicit `off`
+            // forbids attaching to SMD pads.
             let attach = padstack_node
                 .child("attach")
                 .and_then(|a| a.arg())
-                .is_some_and(|v| v.eq_ignore_ascii_case("on"));
+                .is_none_or(|v| !v.eq_ignore_ascii_case("off"));
             let no = padstacks.add(name, shapes, attach, false);
             padstack_nos.insert(padstacks.get_by_no(no).unwrap().name.clone(), no);
         }
@@ -581,13 +637,24 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                     .get_mut(class_idx)
                     .set_via_rule(Some(rule_id));
             } else if let Some(padstack_no) = via_padstack {
-                let via_info = crate::rules::ViaInfo::new(
-                    format!("via::{class_name}"),
-                    padstack_no,
-                    clearance_class_idx,
-                    false,
-                );
-                if let Some(via_info_id) = rules.via_infos.add(via_info) {
+                // Java create_via_rule reuses the existing via info for the
+                // padstack; only when none was declared is one created, with
+                // the default attach rule (via_at_smd && padstack attach).
+                let existing = (0..rules.via_infos.count())
+                    .find(|&i| rules.via_infos.get(i).get_padstack() == padstack_no);
+                let via_info_id = existing.or_else(|| {
+                    let attach = rules.via_at_smd_allowed
+                        && padstacks
+                            .get_by_no(padstack_no)
+                            .is_some_and(|p| p.attach_allowed);
+                    rules.via_infos.add(crate::rules::ViaInfo::new(
+                        format!("via::{class_name}"),
+                        padstack_no,
+                        clearance_class_idx,
+                        attach,
+                    ))
+                });
+                if let Some(via_info_id) = via_info_id {
                     let mut via_rule = crate::rules::ViaRule::new(class_name);
                     via_rule.append_via(via_info_id);
                     rules.via_rules.push(via_rule);
@@ -960,8 +1027,17 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     // routes with (type protect))
     for wiring in pcb.children("wiring") {
         for wire_node in wiring.children("wire") {
-            let Some(path) = wire_node.child("path") else {
-                continue;
+            // (path <layer> <width> x y ...) lists corners;
+            // (polyline_path <layer> <width> x1 y1 x2 y2 ...) lists groups
+            // of four numbers, each a line through two points — corners are
+            // the intersections of consecutive lines (Java PolylinePath,
+            // freerouting's own non-compat wiring export format).
+            let (path, is_polyline_path) = match wire_node.child("path") {
+                Some(p) => (p, false),
+                None => match wire_node.child("polyline_path") {
+                    Some(p) => (p, true),
+                    None => continue,
+                },
             };
             let Some(layer) = path.arg().and_then(|n| board.layer_structure.get_no(n)) else {
                 continue;
@@ -971,10 +1047,6 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 continue;
             }
             let half_width = (scale(nums[0]) / 2).max(1);
-            let corners: Vec<IntPoint> = nums[1..]
-                .chunks_exact(2)
-                .map(|c| IntPoint::new(scale(c[0]), scale(c[1])))
-                .collect();
             let net_nos = wire_node
                 .child("net")
                 .and_then(|n| n.arg())
@@ -994,7 +1066,23 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 .is_some_and(|t| {
                     t.eq_ignore_ascii_case("protect") || t.eq_ignore_ascii_case("fix")
                 });
-            let polyline = crate::geometry::planar::Polyline::from_int_points(&corners);
+            let polyline = if is_polyline_path {
+                let lines: Vec<crate::geometry::planar::Line> = nums[1..]
+                    .chunks_exact(4)
+                    .filter_map(|c| {
+                        let a = IntPoint::new(scale(c[0]), scale(c[1]));
+                        let b = IntPoint::new(scale(c[2]), scale(c[3]));
+                        (a != b).then(|| crate::geometry::planar::Line::new(a, b))
+                    })
+                    .collect();
+                crate::geometry::planar::Polyline::from_lines(lines)
+            } else {
+                let corners: Vec<IntPoint> = nums[1..]
+                    .chunks_exact(2)
+                    .map(|c| IntPoint::new(scale(c[0]), scale(c[1])))
+                    .collect();
+                crate::geometry::planar::Polyline::from_int_points(&corners)
+            };
             if polyline.is_empty() {
                 continue;
             }
@@ -1042,12 +1130,19 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 .first()
                 .map(|&n| board.rules.get_trace_clearance_class(n))
                 .unwrap_or_else(BoardRules::default_clearance_class);
+            // Java Wiring.read_via_scope: attach_allowed =
+            // via_at_smd_allowed && padstack.attach_allowed
+            let attach = board.rules.via_at_smd_allowed
+                && board
+                    .padstacks
+                    .get_by_no(padstack_no)
+                    .is_some_and(|p| p.attach_allowed);
             let id = board.insert_via(
                 padstack_no,
                 IntPoint::new(scale(x), scale(y)),
                 net_nos,
                 clearance_class,
-                false,
+                attach,
             );
             if protected {
                 board.set_fixed_state(id, crate::board::FixedState::UserFixed);
@@ -1607,9 +1702,7 @@ mod tests {
     fn imports_real_fixture() {
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
         let path = format!("{root}/fixtures/Issue093-interf_u.dsn");
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            return; // fixture not present
-        };
+        let content = std::fs::read_to_string(&path).expect("fixture missing from checkout");
         let board = import_dsn(&content).expect("import failed");
         assert_eq!(board.layer_structure.layer_count(), 2);
         assert_eq!(board.layer_structure.arr[0].name, "top_copper");
@@ -1650,9 +1743,7 @@ mod tests {
         use crate::board::ItemKind;
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
         let path = format!("{root}/fixtures/empty_board.dsn");
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            return;
-        };
+        let content = std::fs::read_to_string(&path).expect("fixture missing from checkout");
         let board = import_dsn(&content).expect("import failed");
         assert_eq!(board.layer_structure.layer_count(), 2);
         // no pins, but the boundary keepout strips are present
@@ -1674,9 +1765,7 @@ mod tests {
         use crate::board::{FixedState, ItemKind};
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
         let path = format!("{root}/fixtures/Issue027-zMRETestFixture.dsn");
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            return;
-        };
+        let content = std::fs::read_to_string(&path).expect("fixture missing from checkout");
         let board = import_dsn(&content).expect("import failed");
         // the fixture's protected pre-routed wires became fixed traces
         let protected_traces: Vec<_> = board
@@ -1695,6 +1784,23 @@ mod tests {
         assert!(protected_traces.iter().all(|(_, i)| i.base.net_count() > 0));
         // fixed traces are not routable (protected from ripup)
         assert!(protected_traces.iter().all(|(_, i)| !i.is_routable()));
+    }
+
+    #[test]
+    fn imports_polyline_path_wiring() {
+        use crate::board::ItemKind;
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let path = format!("{root}/fixtures/Issue187-processor.Z80.dsn");
+        let content = std::fs::read_to_string(&path).expect("fixture missing from checkout");
+        let board = import_dsn(&content).expect("import failed");
+        // the fixture's routing is stored exclusively as (polyline_path ...)
+        // wires: 2026 of them, all carrying nets
+        let traces: Vec<_> = board
+            .items()
+            .filter(|(_, i)| matches!(i.kind, ItemKind::PolylineTrace(_)))
+            .collect();
+        assert!(traces.len() > 1900, "only {} wires imported", traces.len());
+        assert!(traces.iter().all(|(_, i)| i.base.net_count() > 0));
     }
 
     #[test]
