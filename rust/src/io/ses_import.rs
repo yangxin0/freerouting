@@ -92,13 +92,17 @@ pub fn import_ses(board: &mut BasicBoard, content: &str) -> Result<SesImportSumm
             if polyline.is_empty() {
                 continue;
             }
-            board.insert_trace(
+            // Java SesReader inserts session routing USER_FIXED: an
+            // imported session is existing copper to preserve, not a
+            // draft for the optimizer to rip
+            let id = board.insert_trace(
                 polyline,
                 layer,
                 half_width,
                 net_nos.clone(),
                 clearance_class,
             );
+            board.set_fixed_state(id, crate::board::FixedState::UserFixed);
             summary.wires += 1;
         }
         for via in net_node.children("via") {
@@ -112,13 +116,14 @@ pub fn import_ses(board: &mut BasicBoard, content: &str) -> Result<SesImportSumm
             let (Ok(x), Ok(y)) = (args[1].parse::<f64>(), args[2].parse::<f64>()) else {
                 continue;
             };
-            board.insert_via(
+            let id = board.insert_via(
                 padstack_no,
                 IntPoint::new(scale(x), scale(y)),
                 net_nos.clone(),
                 clearance_class,
                 false,
             );
+            board.set_fixed_state(id, crate::board::FixedState::UserFixed);
             summary.vias += 1;
         }
     }

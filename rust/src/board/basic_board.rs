@@ -1009,9 +1009,14 @@ impl BasicBoard {
         let layer = t.layer;
         let net_nos = item.base.net_nos.clone();
         let clearance_class = item.base.clearance_class;
+        // splitting is normalization, not a route change: the pieces keep
+        // the protected state (Java Trace.split keeps the fixed state)
+        let fixed_state = item.base.fixed_state;
         self.remove_item(id);
-        self.insert_trace(first, layer, half_width, net_nos.clone(), clearance_class);
-        self.insert_trace(second, layer, half_width, net_nos, clearance_class);
+        let a = self.insert_trace(first, layer, half_width, net_nos.clone(), clearance_class);
+        let b = self.insert_trace(second, layer, half_width, net_nos, clearance_class);
+        self.set_fixed_state(a, fixed_state);
+        self.set_fixed_state(b, fixed_state);
         true
     }
 
@@ -1067,6 +1072,8 @@ impl BasicBoard {
                 let layer = t.layer;
                 let net_nos = base.net_nos.clone();
                 let clearance_class = base.clearance_class;
+                // Java combines into `this`, keeping its fixed state
+                let fixed_state = base.fixed_state;
                 self.remove_item(current);
                 self.remove_item(other_id);
                 current = self.insert_trace(
@@ -1076,6 +1083,7 @@ impl BasicBoard {
                     net_nos,
                     clearance_class,
                 );
+                self.set_fixed_state(current, fixed_state);
                 combined = true;
                 break;
             }
@@ -1185,6 +1193,25 @@ mod tests {
 
     fn query_box(llx: i32, lly: i32, urx: i32, ury: i32) -> TileShape {
         TileShape::Box(IntBox::from_coords(llx, lly, urx, ury))
+    }
+
+    #[test]
+    fn split_preserves_fixed_state() {
+        let mut board = test_board();
+        let trace = board.insert_trace(trace_polyline(&[(0, 0), (10000, 0)]), 0, 100, vec![1], 1);
+        board.set_fixed_state(trace, crate::board::FixedState::UserFixed);
+        assert!(board.split_traces_at(IntPoint::new(5000, 0), 0, 1));
+        let pieces: Vec<_> = board
+            .items()
+            .filter(|(_, i)| matches!(i.kind, ItemKind::PolylineTrace(_)))
+            .collect();
+        assert_eq!(pieces.len(), 2);
+        assert!(
+            pieces
+                .iter()
+                .all(|(_, i)| i.base.fixed_state == crate::board::FixedState::UserFixed),
+            "split pieces must keep the protected state"
+        );
     }
 
     #[test]

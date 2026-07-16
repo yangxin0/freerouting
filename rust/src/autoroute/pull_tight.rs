@@ -20,7 +20,9 @@ pub fn pull_tight_trace(board: &mut BasicBoard, id: ItemId) -> (ItemId, usize) {
     let ItemKind::PolylineTrace(trace) = &item.kind else {
         return (id, 0);
     };
-    if item.base.is_user_fixed() || trace.corner_count() < 3 {
+    // Java PullTightAlgo: shove-fixed traces (which includes user-fixed)
+    // are never pulled — their geometry is protected
+    if item.base.is_shove_fixed() || trace.corner_count() < 3 {
         return (id, 0);
     }
     let net_no = item.base.net_nos.first().copied().unwrap_or(0);
@@ -133,7 +135,7 @@ pub fn pull_tight_all(board: &mut BasicBoard, max_rounds: usize) -> usize {
         let trace_ids: Vec<ItemId> = board
             .items()
             .filter(|(_, item)| {
-                matches!(item.kind, ItemKind::PolylineTrace(_)) && !item.base.is_user_fixed()
+                matches!(item.kind, ItemKind::PolylineTrace(_)) && !item.base.is_shove_fixed()
             })
             .map(|(id, _)| *id)
             .collect();
