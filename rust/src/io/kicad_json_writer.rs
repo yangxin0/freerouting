@@ -90,7 +90,15 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
         "  \"clearanceRules\": [{}],\n",
         rule_json.join(", ")
     ));
-    // nets, each tagged with its real class name
+    // nets, each tagged with its real class name and whether it carries a
+    // copper pour (containsPlane, consumed by the reader)
+    let plane_nets: std::collections::HashSet<i32> = board
+        .items()
+        .filter_map(|(_, it)| match &it.kind {
+            ItemKind::ObstacleArea(a) if a.is_conduction => it.base.net_nos.first().copied(),
+            _ => None,
+        })
+        .collect();
     out.push_str("  \"nets\": [\n");
     for n in 1..=net_count {
         let (name, class_name) = board
@@ -111,9 +119,10 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
             .unwrap_or_default();
         let comma = if n < net_count { "," } else { "" };
         out.push_str(&format!(
-            "    {{\"id\": {n}, \"name\": \"{}\", \"className\": \"{}\", \"containsPlane\": false}}{comma}\n",
+            "    {{\"id\": {n}, \"name\": \"{}\", \"className\": \"{}\", \"containsPlane\": {}}}{comma}\n",
             esc(&name),
             esc(&class_name),
+            plane_nets.contains(&n),
         ));
     }
     out.push_str("  ],\n");
@@ -140,21 +149,29 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
             .padstacks
             .get_by_no(v.padstack)
             .is_some_and(|p| p.from_layer() == 0 && p.to_layer() + 1 == layer_count);
-        let layer_name = board
+        // the pad must name EVERY layer of its span: the reader derives the
+        // span from the named layers, so a through pad listing one layer
+        // came back single-layer (electrically different)
+        let layers_json = board
             .padstacks
             .get_by_no(v.padstack)
-            .and_then(|p| board.layer_structure.arr.get(p.from_layer()))
-            .map(|l| l.name.clone())
-            .unwrap_or_else(|| "F.Cu".into());
+            .map(|p| {
+                (p.from_layer()..=p.to_layer())
+                    .filter_map(|l| board.layer_structure.arr.get(l))
+                    .map(|l| format!("\"{}\"", esc(&l.name)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_else(|| "\"F.Cu\"".into());
         comp_pads.entry(item.base.component_no).or_default().push(format!(
-            "{{\"name\": \"\", \"netName\": \"{}\", \"shape\": \"rect\", \"size\": {{\"x\": {:.6}, \"y\": {:.6}}}, \"offset\": {{\"x\": {:.6}, \"y\": {:.6}}}, \"drill\": {}, \"layers\": [\"{}\"]}}",
+            "{{\"name\": \"\", \"netName\": \"{}\", \"shape\": \"rect\", \"size\": {{\"x\": {:.6}, \"y\": {:.6}}}, \"offset\": {{\"x\": {:.6}, \"y\": {:.6}}}, \"drill\": {}, \"layers\": [{}]}}",
             esc(&net_name),
             mm(w),
             mm(h),
             mm(v.center.x as f64),
             mm(-v.center.y as f64),
             if through { 1 } else { 0 },
-            esc(&layer_name),
+            layers_json,
         ));
     }
     out.push_str("  \"components\": [\n");
@@ -167,7 +184,32 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
         ));
     }
     out.push_str("  ],\n");
-    out.push_str("  \"outline\": {\"corners\": [], \"clearance\": 0.2},\n");
+    // outline: the board's bounding box (the exact outline polygon is not
+    // reconstructible from the boundary keepout strips)
+    let bb = board.bounding_box();
+    let outline_corners = if bb.is_empty() {
+        String::new()
+    } else {
+        [
+            (bb.ll.x, bb.ll.y),
+            (bb.ur.x, bb.ll.y),
+            (bb.ur.x, bb.ur.y),
+            (bb.ll.x, bb.ur.y),
+        ]
+        .iter()
+        .map(|(x, y)| {
+            format!(
+                "{{\"x\": {:.6}, \"y\": {:.6}}}",
+                mm(*x as f64),
+                mm(-*y as f64)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+    };
+    out.push_str(&format!(
+        "  \"outline\": {{\"corners\": [{outline_corners}], \"clearance\": 0.2}},\n"
+    ));
     // routed traces and vias
     let mut traces = Vec::new();
     let mut vias = Vec::new();
@@ -199,12 +241,29 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
                 ));
             }
             ItemKind::Via(v) => {
+                // the via's real layer span and pad diameter, not a
+                // hardcoded full-stack 0.6 mm via (blind/buried vias and
+                // real sizes must survive the round trip)
+                let (from, to, dia) = board
+                    .padstacks
+                    .get_by_no(v.padstack)
+                    .map(|p| {
+                        (
+                            p.from_layer(),
+                            p.to_layer(),
+                            p.get_shape(p.from_layer())
+                                .map(|s| s.bounding_box().max_width())
+                                .unwrap_or(0.0),
+                        )
+                    })
+                    .unwrap_or((0, layer_count - 1, 0.0));
                 vias.push(format!(
-                    "    {{\"id\": {id}, \"netName\": \"{}\", \"position\": {{\"x\": {:.6}, \"y\": {:.6}}}, \"diameter\": 0.6, \"drill\": 0.3, \"startLayerIndex\": 0, \"endLayerIndex\": {}}}",
+                    "    {{\"id\": {id}, \"netName\": \"{}\", \"position\": {{\"x\": {:.6}, \"y\": {:.6}}}, \"diameter\": {:.6}, \"drill\": {:.6}, \"startLayerIndex\": {from}, \"endLayerIndex\": {to}}}",
                     esc(&net_name),
                     mm(v.center.x as f64),
                     mm(-v.center.y as f64),
-                    layer_count - 1
+                    mm(dia),
+                    mm(dia) / 2.0,
                 ));
             }
             _ => {}
@@ -212,7 +271,43 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
     }
     out.push_str(&format!("  \"traces\": [\n{}\n  ],\n", traces.join(",\n")));
     out.push_str(&format!("  \"vias\": [\n{}\n  ],\n", vias.join(",\n")));
-    out.push_str("  \"conductionAreas\": []\n}\n");
+    // conduction areas (copper pours), with their obstacle flag
+    let mut zones = Vec::new();
+    for (_, item) in board.items() {
+        let ItemKind::ObstacleArea(a) = &item.kind else {
+            continue;
+        };
+        if !a.is_conduction {
+            continue;
+        }
+        let net_name = item
+            .base
+            .net_nos
+            .first()
+            .and_then(|&n| board.rules.nets.get_by_no(n))
+            .map(|x| x.name.clone())
+            .unwrap_or_default();
+        let corners: Vec<String> = a
+            .area
+            .corner_approx_arr()
+            .iter()
+            .map(|c| format!("{{\"x\": {:.6}, \"y\": {:.6}}}", mm(c.x), mm(-c.y)))
+            .collect();
+        if corners.len() < 3 {
+            continue;
+        }
+        zones.push(format!(
+            "    {{\"netName\": \"{}\", \"layerIndex\": {}, \"isObstacle\": {}, \"polygon\": [{}]}}",
+            esc(&net_name),
+            a.layer,
+            a.is_obstacle,
+            corners.join(", ")
+        ));
+    }
+    out.push_str(&format!(
+        "  \"conductionAreas\": [\n{}\n  ]\n}}\n",
+        zones.join(",\n")
+    ));
     out
 }
 
@@ -263,6 +358,59 @@ mod tests {
             .filter(|(_, it)| matches!(it.kind, ItemKind::PolylineTrace(_)))
             .count();
         assert_eq!(traces, 1, "the trace must survive the round trip");
+    }
+
+    #[test]
+    fn through_pads_vias_and_pours_survive_round_trip() {
+        use crate::geometry::planar::{IntPoint, PolygonShape, PolylineArea};
+        let mut board = import_dsn(MINI_DSN).expect("import");
+        // a through pad (the Via padstack spans both layers)
+        let pad = board.insert_via(1, IntPoint::new(20000, 20000), vec![1], 1, false);
+        board.set_component_no(pad, 1);
+        // a routed via
+        board.insert_via(1, IntPoint::new(40000, 40000), vec![1], 1, false);
+        // an obstacle-flagged pour
+        let area = PolylineArea::new(
+            PolygonShape::from_int_points(&[
+                IntPoint::new(0, 0),
+                IntPoint::new(30000, 0),
+                IntPoint::new(30000, 30000),
+                IntPoint::new(0, 30000),
+            ]),
+            Vec::new(),
+        );
+        let zone = board.insert_area(area, 1, "N1", vec![1], 1, true);
+        board.set_area_is_obstacle(zone, true);
+
+        let json = export_kicad_json(&board);
+        assert!(json.contains("\"containsPlane\": true"));
+        let board2 = import_kicad_json(&json).expect("re-import");
+        // the through pad still spans both layers
+        let pad2 = board2
+            .items()
+            .find(|(_, it)| it.base.component_no != 0)
+            .map(|(_, it)| it.clone())
+            .expect("pad");
+        assert_eq!(pad2.first_layer(&board2.padstacks), 0);
+        assert_eq!(pad2.last_layer(&board2.padstacks), 1);
+        // the routed via kept its real 600 um pad, not a hardcoded 0.6 mm
+        // full-stack default (they coincide here; assert the span at least)
+        let via2 = board2
+            .items()
+            .find(|(_, it)| it.base.component_no == 0 && matches!(it.kind, ItemKind::Via(_)))
+            .map(|(_, it)| it.clone())
+            .expect("via");
+        assert_eq!(via2.first_layer(&board2.padstacks), 0);
+        assert_eq!(via2.last_layer(&board2.padstacks), 1);
+        // the pour survived with its obstacle flag
+        let zone2 = board2
+            .items()
+            .find_map(|(_, it)| match &it.kind {
+                ItemKind::ObstacleArea(a) if a.is_conduction => Some(a.clone()),
+                _ => None,
+            })
+            .expect("conduction area");
+        assert!(zone2.is_obstacle, "obstacle flag must survive");
     }
 
     // A DSN with a custom high-clearance net class: export→import must preserve
