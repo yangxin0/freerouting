@@ -37,9 +37,14 @@ fn net_violations(board: &BasicBoard, net_no: i32) -> usize {
                         continue;
                     }
                 }
+                // Same argument order and tolerance as the authoritative DRC
+                // (drc.rs): (other, item) to match Java's asymmetric matrix, and
+                // a unit-independent relative epsilon instead of one board unit,
+                // so the optimizer's own violation gate agrees with the final DRC
+                // and cannot accept a candidate the final check would reject.
                 let cl = board.rules.clearance_matrix.get_value(
-                    item.base.clearance_class,
                     other.base.clearance_class,
+                    item.base.clearance_class,
                     *l,
                     false,
                 ) as f64;
@@ -47,7 +52,7 @@ fn net_violations(board: &BasicBoard, net_no: i32) -> usize {
                 if other.tile_shapes(&board.padstacks).iter().any(|(os, ol)| {
                     ol == l
                         && os.intersection(&check).dimension() >= 2
-                        && s.euclidean_distance_to(os) < cl - 1.0
+                        && s.euclidean_distance_to(os) < cl - cl.max(1.0) * 1e-6
                 }) {
                     count += 1;
                 }
@@ -82,12 +87,11 @@ fn net_route_cost(board: &BasicBoard, net_no: i32) -> (usize, f64) {
 /// target-scoped result hides. `net_no` identifies the task for prioritized
 /// ordering; it is not part of the comparison key.
 fn global_route_result(board: &BasicBoard, net_no: i32) -> NetRouteResult {
-    let mut incomplete = 0usize;
-    for n in 1..=board.rules.nets.max_net_no() {
-        if !board.net_is_completely_connected(n) {
-            incomplete += 1;
-        }
-    }
+    // Count incomplete CONNECTIONS (ratsnest airlines), not incomplete nets,
+    // matching Java `RouterCounters.incompleteCount`. Counting nets hid the case
+    // where an already-incomplete victim net worsens from one airline to
+    // several: the net-count stayed 1 while the true incompleteness grew.
+    let incomplete = crate::ratsnest::ratsnest(board).len();
     let mut vias = 0usize;
     let mut length = 0.0f64;
     for (_, item) in board.items() {

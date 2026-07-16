@@ -30,17 +30,19 @@ fn cli_routes_a_board_and_writes_a_session() {
         .output()
         .expect("failed to run freerouting binary");
 
-    // J2 cannot be fully routed honestly: a couple of its connections would have
-    // to pass through a foreign component pin, which is illegal, so ~1-2 nets
-    // stay unconnected and the CLI reports incomplete (exit code 2). (Before the
-    // finding #1 fix the maze deleted those pins to fake 24/24.) The CLI must
-    // still run end to end and emit a valid session — it must NOT hard-fail
-    // (exit 1) or crash.
+    // This is a PIPELINE smoke test: the CLI must run end to end and emit a
+    // valid session, not hard-fail (exit 1) or crash. It deliberately does NOT
+    // assert full completion, because J2 is a KNOWN ROUTING-QUALITY GAP: current
+    // Java Freerouting routes J2 to 0 unconnected in ~0.7 s, but the Rust maze
+    // reaches only 23/24 (exit code 2). That gap is codified as the ignored
+    // `j2_routes_fully_like_java` test below and tracked as finding #6 — it is
+    // NOT correct behavior, just the current state. (Before the finding #1 fix
+    // the maze faked 24/24 by deleting the blocking pins.)
     let code = output.status.code();
     assert!(
         matches!(code, Some(0) | Some(2)),
-        "CLI should route end to end (exit 0 = fully routed, or 2 = some nets \
-         unroutable); got {code:?}\nstderr: {}",
+        "CLI should run end to end (exit 0 = fully routed, or 2 = incomplete — the \
+         known J2 gap); got {code:?}\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let ses_text = std::fs::read_to_string(&ses).expect("session file not written");
@@ -367,16 +369,17 @@ fn full_board_drc_over_a_routed_board() {
     batch_route_passes_with_time_limit(&mut board, &request, 100, Some(&limit));
 
     // A full-board DRC must run to completion and produce a serializable
-    // KiCad report. J2 cannot be fully routed honestly (a couple of connections
-    // would cross a foreign component pin — see the CLI test), so a small,
-    // bounded set of nets stays unconnected. What the board must NOT have is any
-    // clearance violation: the routed copper is clean, and each violation, if
-    // any, must name two distinct real items. (Before the finding #1 fix the
-    // maze deleted the blocking pins, faking full completion.)
+    // KiCad report. NOTE: J2 not routing fully here is a KNOWN GAP (finding #6,
+    // see `j2_routes_fully_like_java`), not correct behavior — Java routes it to
+    // 0 unconnected. This test bounds the current gap so a REGRESSION (more nets
+    // dropping out) fails, while asserting the invariant that always holds: the
+    // routed copper is clean (no clearance violations), and each violation, if
+    // any, names two distinct real items. (Before the finding #1 fix the maze
+    // deleted the blocking pins, faking full completion with hidden violations.)
     let report = check_board(&board);
     assert!(
         report.unconnected.len() <= 2,
-        "J2 should route all but a couple of unroutable nets, but {} are unconnected",
+        "J2 regressed further: {} nets unconnected (known gap is 2; finding #6)",
         report.unconnected.len()
     );
     for v in &report.violations {
@@ -391,4 +394,28 @@ fn full_board_drc_over_a_routed_board() {
     );
     let json = report.to_kicad_json(&board, "j2.dsn");
     assert!(json.contains("schemas.kicad.org/drc.v1.json"));
+}
+
+/// KNOWN GAP (finding #6): current Java Freerouting routes J2 to zero
+/// unconnected groups in ~0.7 s with no clearance/hole violations. The Rust
+/// maze currently reaches only 23/24. This test codifies the CORRECT target
+/// (J2 IS fully routable) and is ignored until the maze-completion gap closes —
+/// it is the opposite of a claim that J2 is unroutable. Un-ignore when fixed.
+#[test]
+#[ignore = "known maze-completion gap vs Java (finding #6): J2 reaches 23/24; target is 24/24"]
+fn j2_routes_fully_like_java() {
+    let root = root();
+    let dsn = format!("{root}/{SMALL_FIXTURE}");
+    let ses = std::env::temp_dir().join("fr_j2_fullroute.ses");
+    let _ = std::fs::remove_file(&ses);
+    let status = Command::new(env!("CARGO_BIN_EXE_freerouting"))
+        .args(["-de", &dsn, "-do", ses.to_str().unwrap(), "-tl", "30"])
+        .status()
+        .expect("failed to run freerouting binary");
+    let _ = std::fs::remove_file(&ses);
+    // exit 0 requires every net connected (see main.rs completion check)
+    assert!(
+        status.success(),
+        "J2 should route fully (exit 0) as Java does in ~0.7 s; got {status:?}"
+    );
 }

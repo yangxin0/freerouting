@@ -264,4 +264,66 @@ mod tests {
             .count();
         assert_eq!(traces, 1, "the trace must survive the round trip");
     }
+
+    // A DSN with a custom high-clearance net class: export→import must preserve
+    // both the class's own clearance and its cross clearance to default. The
+    // duplicate-"default" bug (finding #3) previously collapsed the cross
+    // clearance back to the default on round trip.
+    const CUSTOM_CLASS_DSN: &str = r#"(pcb "hv.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (rule (width 200) (clearance 200))
+  )
+  (placement)
+  (library
+    (padstack "Via[0-1]"
+      (shape (circle F.Cu 600 0 0))
+      (shape (circle B.Cu 600 0 0))
+      (attach off)
+    )
+  )
+  (network
+    (net "HV")
+    (net "LV")
+    (class power "HV" (rule (width 250) (clearance 600)))
+  )
+)"#;
+
+    #[test]
+    fn custom_net_class_clearance_survives_round_trip() {
+        let board = import_dsn(CUSTOM_CLASS_DSN).expect("import");
+        // sanity: the HV net really has a stricter clearance than default
+        let hv0 = board.rules.nets.get_by_name("HV")[0].net_number;
+        let hv_cl0 = board.rules.get_trace_clearance_class(hv0);
+        assert_eq!(
+            board
+                .rules
+                .clearance_matrix
+                .get_value(hv_cl0, hv_cl0, 0, false),
+            6000,
+            "precondition: HV self-clearance is 600 um = 6000 units"
+        );
+
+        let json = export_kicad_json(&board);
+        let board2 = import_kicad_json(&json).expect("re-import");
+
+        let hv = board2.rules.nets.get_by_name("HV")[0].net_number;
+        let lv = board2.rules.nets.get_by_name("LV")[0].net_number;
+        let hv_cl = board2.rules.get_trace_clearance_class(hv);
+        let lv_cl = board2.rules.get_trace_clearance_class(lv);
+        let m = &board2.rules.clearance_matrix;
+        assert_eq!(
+            m.get_value(hv_cl, hv_cl, 0, false),
+            6000,
+            "HV self-clearance must survive the round trip"
+        );
+        assert_eq!(
+            m.get_value(hv_cl, lv_cl, 0, false),
+            6000,
+            "HV<->LV (default) cross clearance must survive as the max, not collapse to default"
+        );
+    }
 }

@@ -82,11 +82,24 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
     let stack = LayerStructure::new(layers);
 
     // clearance matrix: classes null, default, then one per net class;
-    // 0.2 mm is the Java fallback for every unset pair
+    // 0.2 mm is the Java fallback for every unset pair. Each JSON net class
+    // maps to a matrix column, REUSING the built-in "null"/"default" columns
+    // for classes of those names instead of appending duplicates: a duplicate
+    // "default" made the clearanceRules resolve to the first column while nets
+    // used the appended one, silently dropping the round-tripped clearance.
     let net_classes = doc.arr("netClasses");
     let mut class_names: Vec<String> = vec!["null".into(), "default".into()];
+    let mut matrix_cl: Vec<usize> = Vec::with_capacity(net_classes.len());
     for c in net_classes {
-        class_names.push(c.str_or("name", "?"));
+        let name = c.str_or("name", "?");
+        let idx = class_names
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case(&name))
+            .unwrap_or_else(|| {
+                class_names.push(name.clone());
+                class_names.len() - 1
+            });
+        matrix_cl.push(idx);
     }
     let name_refs: Vec<&str> = class_names.iter().map(|s| s.as_str()).collect();
     let mut matrix = ClearanceMatrix::new(stack.clone(), &name_refs);
@@ -96,11 +109,15 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
         _ => 0.2,
     }));
     for (i, c) in net_classes.iter().enumerate() {
-        let cl_no = i + 2;
+        let cl_no = matrix_cl[i];
         let val = to_int(c.num("clearance"));
-        if val > 0 {
+        if val > 0 && cl_no >= 1 {
             matrix.set_value_on_all_layers(cl_no, cl_no, val);
+            // set BOTH directions: the matrix must stay symmetric like Java's,
+            // or a later get_value in the transposed direction reads a stale
+            // default — the asymmetry behind finding #5c.
             matrix.set_value_on_all_layers(1, cl_no, val);
+            matrix.set_value_on_all_layers(cl_no, 1, val);
         }
     }
     for rule in doc.arr("clearanceRules") {
@@ -109,31 +126,53 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
             matrix.get_no(&rule.str_or("classB", "")),
         );
         if let (Some(a), Some(b)) = (a, b) {
-            matrix.set_value_on_all_layers(a, b, to_int(rule.num("clearance")));
+            let v = to_int(rule.num("clearance"));
+            matrix.set_value_on_all_layers(a, b, v);
+            matrix.set_value_on_all_layers(b, a, v);
         }
     }
     let mut rules = BoardRules::new(stack.clone(), matrix);
 
-    // net classes: trace widths and clearance classes per class
+    // net classes: trace widths and clearance classes per class. A "default"
+    // (or "null") JSON class updates the built-in default net class in place
+    // rather than creating a duplicate; genuinely new classes are appended.
     let default_class = rules.get_default_net_class();
-    let mut class_index: Vec<(String, usize)> = Vec::new();
+    let mut class_index: Vec<(String, usize)> = vec![("default".to_string(), default_class)];
+    let mut net_class_of: Vec<usize> = Vec::with_capacity(net_classes.len());
     for (i, c) in net_classes.iter().enumerate() {
         let name = c.str_or("name", "?");
-        let class = rules.append_net_class(&name);
+        let cl_no = matrix_cl[i];
         let hw = to_int(c.num("traceWidth")) / 2;
-        if hw > 0 {
-            rules.net_classes.get_mut(class).set_trace_half_width(hw);
-        }
-        rules
-            .net_classes
-            .get_mut(class)
-            .set_trace_clearance_class(i + 2);
-        class_index.push((name, class));
+        let nc = if cl_no <= 1 {
+            if hw > 0 {
+                rules
+                    .net_classes
+                    .get_mut(default_class)
+                    .set_trace_half_width(hw);
+            }
+            rules
+                .net_classes
+                .get_mut(default_class)
+                .set_trace_clearance_class(cl_no.max(1));
+            default_class
+        } else {
+            let class = rules.append_net_class(&name);
+            if hw > 0 {
+                rules.net_classes.get_mut(class).set_trace_half_width(hw);
+            }
+            rules
+                .net_classes
+                .get_mut(class)
+                .set_trace_clearance_class(cl_no);
+            class_index.push((name, class));
+            class
+        };
+        net_class_of.push(nc);
     }
-    if let Some((_, first)) = class_index.first() {
+    if let Some(&first) = net_class_of.first() {
         // the default class mirrors the first document class (Java keeps
         // 0.25 mm defaults; mirroring gives unclassed nets sane widths)
-        let hw = rules.net_classes.get(*first).get_trace_half_width(0);
+        let hw = rules.net_classes.get(first).get_trace_half_width(0);
         rules.set_default_trace_half_widths(hw);
     }
 
@@ -193,7 +232,7 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
             .filter(|&d| d > 0.0)
             .map(to_int)
             .unwrap_or(def_via_d);
-        let class = class_index[i].1;
+        let class = net_class_of[i];
         add_via_rule(&mut rules, &mut padstacks, &format!("via_{name}"), d, class);
     }
 
@@ -309,7 +348,17 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
                 false,
             );
             let net = net_no_by_name(&board.rules, &pad.str_or("netName", ""));
-            let mut base = ItemBase::new(component_no, net.map(|n| vec![n]).unwrap_or_default(), 1);
+            // a pad on a high-clearance net uses that net's clearance class, not
+            // a hardcoded default (finding #3); through-hole pads fall back to
+            // the default class, smd pads to the smd class.
+            let pad_cl = board
+                .rules
+                .item_clearance_class_or(net.unwrap_or(0), if drillable { 1 } else { 2 });
+            let mut base = ItemBase::new(
+                component_no,
+                net.map(|n| vec![n]).unwrap_or_default(),
+                pad_cl,
+            );
             base.component_no = component_no;
             base.fixed_state = FixedState::SystemFixed;
             let item = Item::new_via(base, ps_no, IntPoint::new(x, y), true);
@@ -333,13 +382,14 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
         }
         let name = zone.str_or("netName", "");
         let net = net_no_by_name(&board.rules, &name);
+        let zone_cl = board.rules.item_clearance_class_or(net.unwrap_or(0), 1);
         let area = PolylineArea::new(PolygonShape::new(corners), Vec::new());
         let id = board.insert_area(
             area,
             layer,
             &name,
             net.map(|n| vec![n]).unwrap_or_default(),
-            1,
+            zone_cl,
             // with a net it is a connectable pour; without, a keepout
             net.is_some(),
         );
@@ -359,7 +409,9 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
         }
         let polyline = Polyline::from_int_points(&corners);
         if !polyline.is_empty() {
-            let id = board.insert_trace(polyline, layer, hw, vec![net], 1);
+            // pre-routed copper keeps its net's clearance class (finding #3)
+            let cl = board.rules.get_trace_clearance_class(net);
+            let id = board.insert_trace(polyline, layer, hw, vec![net], cl);
             board.set_fixed_state(id, FixedState::UserFixed);
         }
     }
@@ -382,7 +434,8 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
             from,
             to,
         );
-        let id = board.insert_via(ps, center, vec![net], 1, false);
+        let cl = board.rules.get_trace_clearance_class(net);
+        let id = board.insert_via(ps, center, vec![net], cl, false);
         board.set_fixed_state(id, FixedState::UserFixed);
     }
     Ok(board)
