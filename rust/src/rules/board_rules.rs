@@ -100,6 +100,63 @@ impl BoardRules {
             .get_trace_clearance_class()
     }
 
+    /// The clearance class an item (pin, via, plane) of `net_no` should use:
+    /// the net's trace clearance class when that class carries an explicit,
+    /// non-default clearance rule, otherwise `base` (e.g. the smd class for
+    /// smd pads). Mirrors Java's `NetClass.default_item_clearance_classes`
+    /// being `set_all(class_no)` for classed nets while leaving plain nets at
+    /// their per-item defaults, so a high-clearance net is never approached at
+    /// default/smd spacing through its non-trace items.
+    pub fn item_clearance_class_or(&self, net_no: i32, base: usize) -> usize {
+        let net_cl = self.get_trace_clearance_class(net_no);
+        if net_cl == Self::default_clearance_class() {
+            base
+        } else {
+            net_cl
+        }
+    }
+
+    /// Ensures net class `class_idx` requires clearance `value`: gives it a
+    /// dedicated clearance-matrix class (created on first use, keyed by name),
+    /// sets that class's clearance to every other class to the maximum of
+    /// `value` and the existing entry (Java's cross-class max semantics), sets
+    /// its self-clearance to exactly `value`, and points the class's trace and
+    /// item clearance classes at it. Used when reading `.rules` files so a
+    /// named class's clearance is applied rather than silently dropped.
+    pub fn ensure_net_class_clearance(&mut self, class_idx: usize, value: i32) {
+        if class_idx >= self.net_classes.count() {
+            return;
+        }
+        let name = format!("rules_cl::{class_idx}::{value}");
+        let cl_idx = match self.clearance_matrix.get_no(&name) {
+            Some(i) => i,
+            None => {
+                self.clearance_matrix.append_class(&name);
+                let Some(idx) = self.clearance_matrix.get_no(&name) else {
+                    return;
+                };
+                let n = self.clearance_matrix.get_class_count();
+                let layers = self.clearance_matrix.get_layer_count();
+                for j in 1..n {
+                    for layer in 0..layers {
+                        let curr = self
+                            .clearance_matrix
+                            .get_value(idx, j, layer, false)
+                            .max(value);
+                        self.clearance_matrix.set_value(idx, j, layer, curr);
+                        self.clearance_matrix.set_value(j, idx, layer, curr);
+                    }
+                }
+                self.clearance_matrix
+                    .set_value_on_all_layers(idx, idx, value);
+                idx
+            }
+        };
+        let class = self.net_classes.get_mut(class_idx);
+        class.set_trace_clearance_class(cl_idx);
+        class.default_item_clearance_classes.set_all(cl_idx);
+    }
+
     /// True if the trace widths for `net_no` differ between layers.
     pub fn trace_widths_are_layer_dependent(&self, net_no: i32) -> bool {
         let compare_width = self.get_trace_half_width(net_no, 0);

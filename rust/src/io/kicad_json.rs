@@ -241,6 +241,11 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
 
     let mut board = BasicBoard::new(stack, rules, padstacks);
     board.resolution = resolution;
+    // `to_units` normalized every coordinate onto an mm basis (mm * resolution),
+    // so the board's unit is millimetres regardless of the document's declared
+    // unit. Persist it, or board_units_per_mm() would later assume micrometres
+    // and mis-scale all mm reporting.
+    board.unit = "mm".to_string();
 
     // components and pads: each pad becomes a system-fixed pin
     let mut component_no = 0i32;

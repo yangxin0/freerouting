@@ -6,13 +6,21 @@ should pick up the first unchecked item below.
 
 > **Authoritative status: see "Audit remediation (2026-07-16)" below.** The
 > per-iteration sections that follow are HISTORICAL and contain claims that
-> later parity audits corrected — e.g. the test count and "no warnings" (both
-> stale; `clippy -D warnings` and `fmt --check` currently fail), "board-wide"
-> optimizer acceptance (it is completeness-set based, still narrower than
-> Java's airline metric), "exactly Java" ratsnest semantics (only the airline
-> count matches), and the "non-GUI checklist complete" claim (electrical
-> equivalence, DSN clearance classes, and the design-rule cost model are open).
-> Treat those sections as a build log, not current truth.
+> later parity audits corrected. As of the latest remediation the tree is at
+> 224 tests passing / 0 ignored, with `fmt --check` and `clippy -D warnings`
+> clean. The following audit findings have since been fixed: maze rip-up no
+> longer deletes component pins; the electrical-equivalence test snapshots
+> pins before routing and is layer-aware; DSN net-class clearances use Java's
+> cross-class max and apply to pins/vias/planes/fanout (not just traces); the
+> multithreaded optimizer accepts on WHOLE-BOARD metrics (global incomplete
+> count, vias, length) like Java's `ItemRouteResult`; the DRC checks netless
+> copper, uses Java's clearance-matrix argument order, labels hole clearances,
+> and uses a unit-independent tolerance; and the KiCad/rules/SES serializers
+> preserve custom clearance classes and handle non-µm units. Remaining known
+> narrowings: "exactly Java" ratsnest semantics (only the airline count
+> matches), obstacle-flagged conduction-area DRC, and the design-rule cost
+> model. Treat the per-iteration sections below as a build log, not current
+> truth.
 
 ## Status (as of iteration 118)
 
@@ -163,9 +171,9 @@ Open, with rationale:
   default (vs Java disabled) are deliberate deviations, not alignment.
 - **Multithreaded board clones** — parity with Java (`deepCopy` per task).
 
-Full test count: 222 passing + 1 `#[ignore]`d (the equivalence target). No fleet
-completion regression across J2, pic_programmer, wavefolder, display, 8088sbc,
-ecc83.
+Full test count: 224 passing, 0 ignored. `cargo fmt --check` and
+`cargo clippy -D warnings` both pass. No fleet completion regression across J2,
+pic_programmer, wavefolder, display, 8088sbc, ecc83.
 
 ## OPEN ITEMS (reconciled 2026-07-15, iter 190)
 

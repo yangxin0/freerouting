@@ -24,17 +24,22 @@ pub fn write_rules(board: &BasicBoard, design_name: &str) -> String {
         (2 * hw) as f64 / board.resolution.max(1) as f64,
         cl as f64 / board.resolution.max(1) as f64,
     ));
+    let scale_out = |v: i32| v as f64 / board.resolution.max(1) as f64;
     for i in 0..board.rules.net_classes.count() {
         let class = board.rules.net_classes.get(i);
         out.push_str(&format!("  (class \"{}\"\n", class.get_name()));
         let hw = class.get_trace_half_width(0);
+        // emit width AND clearance so a custom class's spacing is not discarded
+        let tcc = class.get_trace_clearance_class();
+        let class_cl = board.rules.clearance_matrix.get_value(tcc, tcc, 0, false);
+        out.push_str("    (rule");
         if hw > 0 {
-            out.push_str(&format!(
-                "    (rule (width {}))\n",
-                (2 * hw) as f64 / board.resolution.max(1) as f64
-            ));
+            out.push_str(&format!(" (width {})", scale_out(2 * hw)));
         }
-        out.push_str("  )\n");
+        if class_cl > 0 {
+            out.push_str(&format!(" (clearance {})", scale_out(class_cl)));
+        }
+        out.push_str(")\n  )\n");
     }
     out.push_str(")\n");
     out
@@ -76,6 +81,44 @@ pub fn read_rules(board: &mut BasicBoard, content: &str) -> Result<usize, String
                     .set_value(1, 1, layer, scale(c));
             }
             applied += 1;
+        }
+    }
+    // per-class (class NAME (rule (width W) (clearance C))) blocks: apply the
+    // width and clearance to the named net class instead of ignoring them.
+    for class_node in root.children("class") {
+        let Some(class_name) = class_node.arg() else {
+            continue;
+        };
+        let Some(class_idx) = board.rules.net_classes.get_by_name(class_name) else {
+            continue;
+        };
+        let Some(rule) = class_node.child("rule") else {
+            continue;
+        };
+        if let Some(w) = rule
+            .child("width")
+            .and_then(|n| n.arg())
+            .and_then(|v| v.parse::<f64>().ok())
+        {
+            board
+                .rules
+                .net_classes
+                .get_mut(class_idx)
+                .set_trace_half_width((scale(w) / 2).max(1));
+            applied += 1;
+        }
+        // the default class's clearance is carried by the global rule above;
+        // apply per-class clearance only to the non-default classes so the
+        // shared default clearance class is not perturbed.
+        if class_idx != 0 {
+            if let Some(c) = rule
+                .child("clearance")
+                .and_then(|n| n.arg())
+                .and_then(|v| v.parse::<f64>().ok())
+            {
+                board.rules.ensure_net_class_clearance(class_idx, scale(c));
+                applied += 1;
+            }
         }
     }
     Ok(applied)

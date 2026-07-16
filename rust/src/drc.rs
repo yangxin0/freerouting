@@ -6,6 +6,11 @@
 use crate::board::basic_board::{BasicBoard, ItemId};
 use crate::board::ItemKind;
 
+/// Relative tolerance absorbing floating-point rounding in the Euclidean
+/// copper-distance check. Unit-independent: it scales with the required
+/// clearance, never with the board's resolution.
+const DISTANCE_EPS: f64 = 1e-6;
+
 /// One clearance violation between two items
 /// (Java: `ClearanceViolation`/`DrcViolation`).
 #[derive(Debug, Clone)]
@@ -43,10 +48,18 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
     // checked from at least one side. Java's `DesignRulesChecker` scans every
     // `board.get_items()` and dedups by sorted-id key afterward; excluding
     // obstacles from the outer loop while keeping the `other_id <= id` skip
-    // silently dropped copper-vs-lower-id-obstacle pairs entirely.
+    // silently dropped copper-vs-lower-id-obstacle pairs entirely. Netless
+    // copper (traces/vias with no net) is a real obstacle in Java
+    // (`shares_net` is false against everything), so it must be a candidate
+    // too — filtering on `net_count() > 0` dropped netless-vs-copper pairs.
     let candidates: Vec<ItemId> = board
         .items()
-        .filter(|(_, it)| it.base.net_count() > 0 || matches!(&it.kind, ItemKind::ObstacleArea(_)))
+        .filter(|(_, it)| {
+            matches!(
+                &it.kind,
+                ItemKind::Via(_) | ItemKind::PolylineTrace(_) | ItemKind::ObstacleArea(_)
+            )
+        })
         .map(|(id, _)| *id)
         .collect();
     // One violation per (item pair, layer): an item with several tile shapes on
@@ -102,9 +115,15 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                         continue;
                     }
                 }
+                // Argument order matches Java `Item.clearance_violations`
+                // (get_value(curr_item.clearance_class, this.clearance_class)):
+                // the outer `item` is Java's `this`, `other` is `curr_item`, so
+                // the lookup is (other, item). The DSN matrix is symmetric, but
+                // the KiCad-JSON importer builds an asymmetric matrix, where the
+                // former (item, other) order read the transposed (wrong) cell.
                 let required = board.rules.clearance_matrix.get_value(
-                    item.base.clearance_class,
                     other.base.clearance_class,
+                    item.base.clearance_class,
                     layer,
                     false,
                 ) as f64;
@@ -115,7 +134,13 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                         continue;
                     }
                     let d = shape.euclidean_distance_to(os);
-                    if d < required - 1.0 {
+                    // Tolerance guards ONLY against floating-point noise in the
+                    // Euclidean distance (matrix values and coordinates are
+                    // integers). A relative epsilon is unit-independent; the
+                    // former fixed `- 1.0` was one board unit — 0.1 µm at
+                    // `resolution um 10`, but 25.4 µm at `mil 1`, which let
+                    // materially undersized clearances pass.
+                    if d < required - required.max(1.0) * DISTANCE_EPS {
                         worst = Some(worst.map_or(d, |w: f64| w.min(d)));
                     }
                 }
@@ -169,6 +194,12 @@ impl DrcReport {
                 _ => "item",
             }
         };
+        // Java `DesignRulesChecker.convertToDrcViolation`: a clearance breach
+        // involving a hole (Via or Pin — both are vias here) is reported as
+        // `hole_clearance`, not `clearance`. This is a relabel, not a separate
+        // geometric pass, so the same violations are detected either way.
+        let is_hole =
+            |id: ItemId| matches!(board.get_item(id).map(|i| &i.kind), Some(ItemKind::Via(_)));
         let mut out = String::new();
         out.push_str("{\n");
         out.push_str("  \"$schema\": \"https://schemas.kicad.org/drc.v1.json\",\n");
@@ -186,9 +217,14 @@ impl DrcReport {
             } else {
                 ""
             };
+            let (vtype, vlabel) = if is_hole(v.first_item) || is_hole(v.second_item) {
+                ("hole_clearance", "Hole clearance")
+            } else {
+                ("clearance", "Clearance")
+            };
             out.push_str(&format!(
-                "    {{\"type\": \"clearance\", \"severity\": \"error\", \
-                 \"description\": \"Clearance violation ({:.4} mm < {:.4} mm) on layer {}\", \
+                "    {{\"type\": \"{vtype}\", \"severity\": \"error\", \
+                 \"description\": \"{vlabel} violation ({:.4} mm < {:.4} mm) on layer {}\", \
                  \"items\": [\
                  {{\"description\": \"{} {}\", \"pos\": {{\"x\": {:.4}, \"y\": {:.4}}}, \"uuid\": \"{}\"}},\
                  {{\"description\": \"{} {}\", \"pos\": {{\"x\": {:.4}, \"y\": {:.4}}}, \"uuid\": \"{}\"}}\

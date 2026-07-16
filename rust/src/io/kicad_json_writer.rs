@@ -12,10 +12,18 @@ fn esc(s: &str) -> String {
 /// Serializes the board as KiCad board JSON. Coordinates are written in
 /// mm (the reader's default unit).
 pub fn export_kicad_json(board: &BasicBoard) -> String {
-    let res = board.resolution.max(1) as f64;
-    let mm = |v: f64| v / res;
+    // Board units → true millimetres. Dividing by the raw resolution was only
+    // correct for mm-based boards; a `um`-based DSN (the common case) emitted
+    // micrometre-magnitude numbers mislabeled "MM" (1000x off). Emit the
+    // matching units-per-mm as the resolution so the reader reconstructs the
+    // exact board-unit scale.
+    let units_per_mm = board.board_units_per_mm();
+    let mm = |v: f64| v / units_per_mm;
     let mut out = String::from("{\n  \"unit\": \"MM\",\n");
-    out.push_str(&format!("  \"resolution\": {},\n", board.resolution));
+    out.push_str(&format!(
+        "  \"resolution\": {},\n",
+        units_per_mm.round().max(1.0) as i64
+    ));
     // layers
     out.push_str("  \"layers\": [\n");
     let layer_count = board.layer_structure.layer_count();
@@ -28,28 +36,84 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
         ));
     }
     out.push_str("  ],\n");
-    // net classes (the default class summary)
-    let cl = board.rules.clearance_matrix.get_value(1, 1, 0, false) as f64;
-    let hw = board.rules.get_min_trace_half_width() as f64;
-    out.push_str(&format!(
-        "  \"netClasses\": [{{\"name\": \"Default\", \"clearance\": {:.6}, \"traceWidth\": {:.6}, \"viaDiameter\": 0.6, \"viaDrill\": 0.3, \"netNames\": []}}],\n",
-        mm(cl),
-        mm(2.0 * hw)
-    ));
-    // nets
-    out.push_str("  \"nets\": [\n");
+    // net classes: emit EVERY real class with its own clearance and trace
+    // width, plus the cross-class clearance rules, so custom DSN classes
+    // survive the round trip instead of collapsing into a single "Default".
+    let matrix = &board.rules.clearance_matrix;
+    let class_count = board.rules.net_classes.count();
     let net_count = board.rules.nets.max_net_no();
+    // net names grouped by their class index
+    let mut class_nets: Vec<Vec<String>> = vec![Vec::new(); class_count.max(1)];
     for n in 1..=net_count {
-        let name = board
+        if let Some(net) = board.rules.nets.get_by_no(n) {
+            if let Some(v) = class_nets.get_mut(net.get_class()) {
+                v.push(net.name.clone());
+            }
+        }
+    }
+    let class_json: Vec<String> = (0..class_count)
+        .map(|i| {
+            let class = board.rules.net_classes.get(i);
+            let tcc = class.get_trace_clearance_class();
+            let cl = matrix.get_value(tcc, tcc, 0, false) as f64;
+            let hw = class.get_trace_half_width(0) as f64;
+            let names: Vec<String> = class_nets[i]
+                .iter()
+                .map(|nm| format!("\"{}\"", esc(nm)))
+                .collect();
+            format!(
+                "{{\"name\": \"{}\", \"clearance\": {:.6}, \"traceWidth\": {:.6}, \"viaDiameter\": 0.6, \"viaDrill\": 0.3, \"netNames\": [{}]}}",
+                esc(class.get_name()),
+                mm(cl),
+                mm(2.0 * hw),
+                names.join(", ")
+            )
+        })
+        .collect();
+    out.push_str(&format!("  \"netClasses\": [{}],\n", class_json.join(", ")));
+    // cross-class clearance rules: the (max) spacing between two classes
+    let mut rule_json: Vec<String> = Vec::new();
+    for i in 0..class_count {
+        for j in (i + 1)..class_count {
+            let ci = board.rules.net_classes.get(i).get_trace_clearance_class();
+            let cj = board.rules.net_classes.get(j).get_trace_clearance_class();
+            let v = matrix.get_value(ci, cj, 0, false) as f64;
+            rule_json.push(format!(
+                "{{\"classA\": \"{}\", \"classB\": \"{}\", \"clearance\": {:.6}}}",
+                esc(board.rules.net_classes.get(i).get_name()),
+                esc(board.rules.net_classes.get(j).get_name()),
+                mm(v)
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "  \"clearanceRules\": [{}],\n",
+        rule_json.join(", ")
+    ));
+    // nets, each tagged with its real class name
+    out.push_str("  \"nets\": [\n");
+    for n in 1..=net_count {
+        let (name, class_name) = board
             .rules
             .nets
             .get_by_no(n)
-            .map(|x| x.name.clone())
+            .map(|x| {
+                (
+                    x.name.clone(),
+                    board
+                        .rules
+                        .net_classes
+                        .get(x.get_class())
+                        .get_name()
+                        .to_string(),
+                )
+            })
             .unwrap_or_default();
         let comma = if n < net_count { "," } else { "" };
         out.push_str(&format!(
-            "    {{\"id\": {n}, \"name\": \"{}\", \"className\": \"Default\", \"containsPlane\": false}}{comma}\n",
-            esc(&name)
+            "    {{\"id\": {n}, \"name\": \"{}\", \"className\": \"{}\", \"containsPlane\": false}}{comma}\n",
+            esc(&name),
+            esc(&class_name),
         ));
     }
     out.push_str("  ],\n");

@@ -270,11 +270,28 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                             .clearance_matrix
                             .get_no(&name)
                             .unwrap_or_else(BoardRules::default_clearance_class);
+                        // Java parity (Network.add_clearance_rule): the new
+                        // class's clearance to every existing class is the
+                        // MAXIMUM of its own value and the existing entry, so a
+                        // stricter class is never under-cleared next to a looser
+                        // one regardless of class-creation order. append_class
+                        // already copied the (progressively elevated) default
+                        // row, so max() preserves accumulated cross-class
+                        // spacing. Start at class 1 to leave "null" (0) at zero.
                         let n = rules.clearance_matrix.get_class_count();
-                        for j in 0..n {
-                            rules.clearance_matrix.set_value_on_all_layers(idx, j, c);
-                            rules.clearance_matrix.set_value_on_all_layers(j, idx, c);
+                        let layers = rules.clearance_matrix.get_layer_count();
+                        for j in 1..n {
+                            for layer in 0..layers {
+                                let curr = rules
+                                    .clearance_matrix
+                                    .get_value(idx, j, layer, false)
+                                    .max(c);
+                                rules.clearance_matrix.set_value(idx, j, layer, curr);
+                                rules.clearance_matrix.set_value(j, idx, layer, curr);
+                            }
                         }
+                        // the class's clearance to itself is exactly its own value
+                        rules.clearance_matrix.set_value_on_all_layers(idx, idx, c);
                         class_for_clearance.insert(c, idx);
                         idx
                     }
@@ -299,10 +316,23 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                     class.set_trace_half_width(hw);
                 }
                 class.set_trace_clearance_class(clearance_class_idx);
+                // Java (Network.add_clearance_rule): default_item_clearance_classes
+                // .set_all(class_no) — pins, vias and areas of a classed net use
+                // its clearance class too, not just traces. Leave plain nets at
+                // their per-item defaults (e.g. the smd class for smd pads).
+                if clearance_class_idx != BoardRules::default_clearance_class() {
+                    class
+                        .default_item_clearance_classes
+                        .set_all(clearance_class_idx);
+                }
             }
             if let Some(padstack_no) = via_padstack {
-                let via_info =
-                    crate::rules::ViaInfo::new(format!("via::{class_name}"), padstack_no, 1, false);
+                let via_info = crate::rules::ViaInfo::new(
+                    format!("via::{class_name}"),
+                    padstack_no,
+                    clearance_class_idx,
+                    false,
+                );
                 if let Some(via_info_id) = rules.via_infos.add(via_info) {
                     let mut via_rule = crate::rules::ViaRule::new(class_name);
                     via_rule.append_via(via_info_id);
@@ -369,7 +399,12 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
             crate::geometry::planar::PolygonShape::new(corners),
             Vec::new(),
         );
-        board.insert_area(area, layer, net_name, net_nos, 1, true);
+        // the plane uses its net's clearance class, not the hardcoded default,
+        // so a high-clearance net's copper pour keeps its spacing (finding #4)
+        let plane_cl = board
+            .rules
+            .item_clearance_class_or(net_nos.first().copied().unwrap_or(0), 1);
+        board.insert_area(area, layer, net_name, net_nos, plane_cl, true);
     }
 
     // keepout areas ((keepout ...) traces+vias, (via_keepout ...) vias
@@ -563,7 +598,7 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                     let center = IntPoint::new(scale(x + dx), scale(y + dy));
                     let pin_ref = format!("{refdes}-{}", pin.pin_name);
                     let net_nos = pin_nets.get(&pin_ref).map(|n| vec![*n]).unwrap_or_default();
-                    let (attach_allowed, clearance_class) = board
+                    let (attach_allowed, base_class) = board
                         .padstacks
                         .get_by_no(padstack_no)
                         .map(|p| {
@@ -573,6 +608,11 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                             (p.attach_allowed, if smd { 2 } else { 1 })
                         })
                         .unwrap_or((false, 1));
+                    // a pin on a high-clearance net uses that net's clearance
+                    // class, not the hardcoded smd/default (finding #4)
+                    let clearance_class = board
+                        .rules
+                        .item_clearance_class_or(net_nos.first().copied().unwrap_or(0), base_class);
                     let id = board.insert_via(
                         padstack_no,
                         center,

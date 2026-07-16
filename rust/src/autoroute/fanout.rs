@@ -71,6 +71,10 @@ pub fn fanout_pin(board: &mut BasicBoard, pin_id: ItemId, request: &BatchRequest
     if via_padstack == 0 {
         return false;
     }
+    // fanout copper belongs to the pin's net: use its clearance class, not the
+    // batch's base class, so a high-clearance net's escape keeps its spacing
+    // (finding #4)
+    let clearance_class = board.rules.get_trace_clearance_class(net_no);
     let maze_request = MazeRouteRequest {
         net_no,
         start_item: pin_id,
@@ -78,7 +82,7 @@ pub fn fanout_pin(board: &mut BasicBoard, pin_id: ItemId, request: &BatchRequest
         start_items: vec![pin_id],
         dest_items: Vec::new(),
         trace_half_width: request.trace_half_width,
-        clearance_class: request.clearance_class,
+        clearance_class,
         via_padstack,
         via_cost: request.via_cost,
         // fanout escapes are local: a small budget keeps hopeless pins
@@ -91,7 +95,7 @@ pub fn fanout_pin(board: &mut BasicBoard, pin_id: ItemId, request: &BatchRequest
     let mut engine = crate::autoroute::engine::AutorouteEngine::new_with_clearance(
         net_no,
         false,
-        request.clearance_class,
+        clearance_class,
         request.trace_half_width,
     );
     crate::board::basic_board::set_birth_tag(1);

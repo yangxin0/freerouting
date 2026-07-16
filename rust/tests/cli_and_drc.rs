@@ -25,15 +25,23 @@ fn cli_routes_a_board_and_writes_a_session() {
     let ses = out_dir.join("fr_cli_test_j2.ses");
     let _ = std::fs::remove_file(&ses);
 
-    let status = Command::new(env!("CARGO_BIN_EXE_freerouting"))
+    let output = Command::new(env!("CARGO_BIN_EXE_freerouting"))
         .args(["-de", &dsn, "-do", ses.to_str().unwrap(), "-tl", "30"])
-        .status()
+        .output()
         .expect("failed to run freerouting binary");
 
-    // J2 routes fully, so the exit code (computed after optimization) is 0
+    // J2 cannot be fully routed honestly: a couple of its connections would have
+    // to pass through a foreign component pin, which is illegal, so ~1-2 nets
+    // stay unconnected and the CLI reports incomplete (exit code 2). (Before the
+    // finding #1 fix the maze deleted those pins to fake 24/24.) The CLI must
+    // still run end to end and emit a valid session — it must NOT hard-fail
+    // (exit 1) or crash.
+    let code = output.status.code();
     assert!(
-        status.success(),
-        "CLI exited with {status:?}; expected success (all nets routed)"
+        matches!(code, Some(0) | Some(2)),
+        "CLI should route end to end (exit 0 = fully routed, or 2 = some nets \
+         unroutable); got {code:?}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
     let ses_text = std::fs::read_to_string(&ses).expect("session file not written");
     assert!(
@@ -49,16 +57,21 @@ fn cli_routes_a_board_and_writes_a_session() {
 
 /// Strict connectivity oracle approximating what a Java SES/DRC reload checks:
 /// two connection points are joined ONLY when a wire endpoint sits exactly on
-/// each. Union-find keyed by exact (x, y): a trace unions its two endpoints;
-/// pins/vias are points joined in when a trace endpoint lands on them. A pin
-/// whose centre no wire reaches ends up in its own component — a dangling track.
+/// each. Union-find keyed by exact (x, y, layer): a trace unions its two
+/// endpoints on its own layer; a via/pin unions the same (x, y) across every
+/// layer of its padstack span (only a via bridges layers — two traces meeting
+/// at the same (x, y) on different layers with no via are NOT joined). A pin
+/// whose centre no wire reaches on a valid layer ends up in its own component —
+/// a dangling track.
 fn every_real_pin_strictly_wired(
     board: &freerouting::board::basic_board::BasicBoard,
 ) -> Result<usize, String> {
     use freerouting::board::ItemKind;
     use std::collections::HashMap;
 
-    fn find(parent: &mut HashMap<(i32, i32), (i32, i32)>, x: (i32, i32)) -> (i32, i32) {
+    type Node = (i32, i32, usize);
+
+    fn find(parent: &mut HashMap<Node, Node>, x: Node) -> Node {
         let mut r = x;
         while let Some(&p) = parent.get(&r) {
             if p == r {
@@ -78,14 +91,39 @@ fn every_real_pin_strictly_wired(
         r
     }
 
+    fn union(parent: &mut HashMap<Node, Node>, a: Node, b: Node) {
+        parent.entry(a).or_insert(a);
+        parent.entry(b).or_insert(b);
+        let (ra, rb) = (find(parent, a), find(parent, b));
+        if ra != rb {
+            parent.insert(ra, rb);
+        }
+    }
+
+    // Union every layer of a drill item's padstack span at (x, y): this is what
+    // makes a via a layer bridge. Returns the representative node, or None if
+    // the padstack is unknown.
+    let span_nodes =
+        |parent: &mut HashMap<Node, Node>, padstack: usize, x: i32, y: i32| -> Option<Node> {
+            let ps = board.padstacks.get_by_no(padstack)?;
+            let (lo, hi) = (ps.from_layer(), ps.to_layer());
+            for l in lo..=hi {
+                parent.entry((x, y, l)).or_insert((x, y, l));
+            }
+            for l in lo..hi {
+                union(parent, (x, y, l), (x, y, l + 1));
+            }
+            Some((x, y, lo))
+        };
+
     let mut checked = 0usize;
     for net in 1..=board.rules.nets.max_net_no() {
-        // real pins = placed component drill items of this net
-        let pins: Vec<(i32, i32)> = board
+        // real pins = placed component drill items of this net, with padstack
+        let pins: Vec<(usize, i32, i32)> = board
             .items()
             .filter(|(_, it)| it.base.component_no != 0 && it.base.contains_net(net))
             .filter_map(|(_, it)| match &it.kind {
-                ItemKind::Via(v) => Some((v.center.x, v.center.y)),
+                ItemKind::Via(v) => Some((v.padstack, v.center.x, v.center.y)),
                 _ => None,
             })
             .collect();
@@ -98,10 +136,11 @@ fn every_real_pin_strictly_wired(
             continue;
         }
 
-        let mut parent: HashMap<(i32, i32), (i32, i32)> = HashMap::new();
-        for &p in &pins {
-            parent.entry(p).or_insert(p);
-        }
+        let mut parent: HashMap<Node, Node> = HashMap::new();
+        let pin_reps: Vec<Node> = pins
+            .iter()
+            .filter_map(|&(ps, x, y)| span_nodes(&mut parent, ps, x, y))
+            .collect();
         for (_, it) in board.items() {
             if !it.base.contains_net(net) {
                 continue;
@@ -110,28 +149,22 @@ fn every_real_pin_strictly_wired(
                 ItemKind::PolylineTrace(t) => {
                     let a = t.first_corner().to_float().round();
                     let b = t.last_corner().to_float().round();
-                    let (a, b) = ((a.x, a.y), (b.x, b.y));
-                    parent.entry(a).or_insert(a);
-                    parent.entry(b).or_insert(b);
-                    let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
-                    if ra != rb {
-                        parent.insert(ra, rb);
-                    }
+                    let l = t.layer;
+                    union(&mut parent, (a.x, a.y, l), (b.x, b.y, l));
                 }
                 ItemKind::Via(v) => {
-                    parent
-                        .entry((v.center.x, v.center.y))
-                        .or_insert((v.center.x, v.center.y));
+                    span_nodes(&mut parent, v.padstack, v.center.x, v.center.y);
                 }
                 _ => {}
             }
         }
-        let root0 = find(&mut parent, pins[0]);
-        for &p in &pins[1..] {
+        let root0 = find(&mut parent, pin_reps[0]);
+        for &p in &pin_reps[1..] {
             if find(&mut parent, p) != root0 {
                 return Err(format!(
-                    "net {net}: pin at {p:?} is not strictly wired to the net \
-                     (no wire endpoint on its connection point — a dangling track)"
+                    "net {net}: pin at {:?} is not strictly wired to the net \
+                     (no wire endpoint on its connection point — a dangling track)",
+                    (p.0, p.1)
                 ));
             }
         }
@@ -153,6 +186,7 @@ fn routed_nets_reach_pin_connection_points() {
     use freerouting::autoroute::{
         batch_route_passes_with_time_limit, combine_all_traces, pull_tight_all, BatchRequest,
     };
+    use freerouting::board::ItemKind;
     use freerouting::datastructures::TimeLimit;
     use freerouting::io::import_dsn;
 
@@ -164,6 +198,27 @@ fn routed_nets_reach_pin_connection_points() {
         let content = std::fs::read_to_string(format!("{root}/{fixture}"))
             .unwrap_or_else(|_| panic!("fixture {fixture} missing"));
         let mut board = import_dsn(&content).expect("import failed");
+
+        // Snapshot every component pin BEFORE routing. The router must never
+        // delete or move a pin (finding #1: maze rip-up could remove a pin that
+        // became an obstacle room). Enumerating pins only from the post-route
+        // board would let a deleted pin silently vanish before validation, so
+        // we capture identity up front and assert survival afterwards.
+        let original_pins: Vec<(freerouting::board::basic_board::ItemId, i32, i32, Vec<i32>)> =
+            board
+                .items()
+                .filter(|(_, it)| it.base.component_no != 0)
+                .filter_map(|(id, it)| match &it.kind {
+                    ItemKind::Via(v) => {
+                        Some((*id, v.center.x, v.center.y, it.base.net_nos.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+        assert!(
+            !original_pins.is_empty(),
+            "{fixture}: no component pins found before routing"
+        );
         let request = BatchRequest {
             trace_half_width: board.rules.get_min_trace_half_width().max(500),
             clearance_class: 1,
@@ -185,6 +240,24 @@ fn routed_nets_reach_pin_connection_points() {
         // the SAME post-processing the CLI does
         combine_all_traces(&mut board);
         pull_tight_all(&mut board, 3);
+
+        // Every pin that existed before routing must still exist afterwards,
+        // unmoved and with its nets intact. This is the direct regression guard
+        // for finding #1 (a foreign-net pin ripped up as a maze obstacle).
+        for (id, cx, cy, nets) in &original_pins {
+            match board.get_item(*id).map(|it| (&it.kind, &it.base.net_nos)) {
+                Some((ItemKind::Via(v), got_nets))
+                    if v.center.x == *cx && v.center.y == *cy && got_nets == nets => {}
+                Some(_) => panic!(
+                    "{fixture}: component pin (id {id}) at ({cx},{cy}) was moved or its net \
+                     changed during routing"
+                ),
+                None => panic!(
+                    "{fixture}: component pin (id {id}) at ({cx},{cy}) was deleted during routing \
+                     (maze rip-up removed a pin — finding #1)"
+                ),
+            }
+        }
 
         let checked =
             every_real_pin_strictly_wired(&board).unwrap_or_else(|e| panic!("{fixture}: {e}"));
@@ -294,13 +367,16 @@ fn full_board_drc_over_a_routed_board() {
     batch_route_passes_with_time_limit(&mut board, &request, 100, Some(&limit));
 
     // A full-board DRC must run to completion and produce a serializable
-    // KiCad report. J2 routes fully and cleanly, so the report must show no
-    // unconnected nets AND no clearance violations; each violation, if any,
-    // must also name two distinct real items.
+    // KiCad report. J2 cannot be fully routed honestly (a couple of connections
+    // would cross a foreign component pin — see the CLI test), so a small,
+    // bounded set of nets stays unconnected. What the board must NOT have is any
+    // clearance violation: the routed copper is clean, and each violation, if
+    // any, must name two distinct real items. (Before the finding #1 fix the
+    // maze deleted the blocking pins, faking full completion.)
     let report = check_board(&board);
     assert!(
-        report.unconnected.is_empty(),
-        "J2 should route fully: {} nets left unconnected",
+        report.unconnected.len() <= 2,
+        "J2 should route all but a couple of unroutable nets, but {} are unconnected",
         report.unconnected.len()
     );
     for v in &report.violations {

@@ -74,6 +74,40 @@ fn net_route_cost(board: &BasicBoard, net_no: i32) -> (usize, f64) {
     (vias, length)
 }
 
+/// Whole-board route metrics after a reroute, mirroring Java
+/// `ItemRouteResult` built from `BoardStatistics`: the GLOBAL incomplete-net
+/// count, via count and trace length — not just the target net's. A reroute
+/// that improves the target while worsening another (still-incomplete) net or
+/// adding vias/length elsewhere must be visible to acceptance, which a
+/// target-scoped result hides. `net_no` identifies the task for prioritized
+/// ordering; it is not part of the comparison key.
+fn global_route_result(board: &BasicBoard, net_no: i32) -> NetRouteResult {
+    let mut incomplete = 0usize;
+    for n in 1..=board.rules.nets.max_net_no() {
+        if !board.net_is_completely_connected(n) {
+            incomplete += 1;
+        }
+    }
+    let mut vias = 0usize;
+    let mut length = 0.0f64;
+    for (_, item) in board.items() {
+        if item.base.component_no != 0 {
+            continue;
+        }
+        match &item.kind {
+            ItemKind::Via(_) => vias += 1,
+            ItemKind::PolylineTrace(t) => length += t.get_length(),
+            _ => {}
+        }
+    }
+    NetRouteResult {
+        net_no,
+        incomplete_after: incomplete,
+        vias_after: vias,
+        len_after: length,
+    }
+}
+
 /// The completeness of every net (1-based; index 0 unused), so acceptance can
 /// verify that no previously-complete net was broken by the reroute. A bare
 /// count of incomplete nets is not enough: a reroute that completes the target
@@ -415,15 +449,15 @@ pub fn optimize_route_multithreaded_with_strategy(
                         // the same object since GLOBAL never updates it
                         (net_no, s.master.clone())
                     };
-                    let improved =
-                        optimize_nets_pass(&mut clone, request, &[net_no], time_limit) > 0;
-                    let (vias_after, len_after) = net_route_cost(&clone, net_no);
-                    let result = NetRouteResult {
-                        net_no,
-                        incomplete_after: usize::from(!clone.net_is_completely_connected(net_no)),
-                        vias_after,
-                        len_after,
-                    };
+                    // Compare the clone's WHOLE-BOARD metrics before and after
+                    // (Java `ItemRouteResult.improved`): accept only when the
+                    // reroute improves the global state, so a target-net gain
+                    // that worsens another net's completeness/vias/length is
+                    // rejected rather than silently adopted.
+                    let base = global_route_result(&clone, net_no);
+                    optimize_nets_pass(&mut clone, request, &[net_no], time_limit);
+                    let result = global_route_result(&clone, net_no);
+                    let improved = result.improved_over(&base);
                     let mut s = shared.lock().unwrap();
                     s.results.push(result);
                     if improved && s.best.as_ref().is_none_or(|(b, _)| result.improved_over(b)) {

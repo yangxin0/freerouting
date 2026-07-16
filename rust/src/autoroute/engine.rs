@@ -607,7 +607,7 @@ impl AutorouteEngine {
                     // "expand the item for ripup and pushing purposes")
                     if crate::debug::obstacle_rooms()
                         && self.allow_ripup
-                        && item.is_routable()
+                        && crate::autoroute::room_completion::is_rippable(item, self.net_no)
                         && nb.intersection.dimension() >= 1
                     {
                         obstacle_doors.push((item_id, si, shape.clone()));

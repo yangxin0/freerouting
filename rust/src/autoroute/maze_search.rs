@@ -1142,7 +1142,15 @@ pub fn maze_route_with_engine(
         // traversed
         for room in result.rooms.iter().flatten() {
             if let Some(item_id) = engine.obstacle_room_item(*room) {
-                to_rip.push(item_id);
+                // only rip what is actually rippable: obstacle rooms are
+                // now created only for rippable items (engine.rs), but
+                // guard here too so a component pin or fixed item can
+                // never be deleted, matching the corridor/via rip paths
+                if board.get_item(item_id).is_some_and(|item| {
+                    crate::autoroute::room_completion::is_rippable(item, request.net_no)
+                }) {
+                    to_rip.push(item_id);
+                }
             }
         }
         for window in result.corners.windows(2) {

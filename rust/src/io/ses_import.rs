@@ -20,12 +20,28 @@ pub fn import_ses(board: &mut BasicBoard, content: &str) -> Result<SesImportSumm
     let routes = root
         .child("routes")
         .ok_or_else(|| "no routes section".to_string())?;
-    let ses_resolution: f64 = routes
-        .child("resolution")
+    let resolution_node = routes.child("resolution");
+    let ses_resolution: f64 = resolution_node
         .and_then(|r| r.args().nth(1))
         .and_then(|v| v.parse().ok())
         .unwrap_or(board.resolution as f64);
-    let factor = board.resolution as f64 / ses_resolution.max(1.0);
+    // The session's `(resolution <unit> <value>)` unit need not match the
+    // board's; reconcile through a physical (mm) basis instead of assuming a
+    // bare resolution ratio, which is only correct when the units are equal.
+    let um_per_unit = |u: &str| -> f64 {
+        match u.to_ascii_lowercase().as_str() {
+            "mil" => 25.4,
+            "inch" | "in" => 25_400.0,
+            "mm" => 1000.0,
+            "cm" => 10_000.0,
+            _ => 1.0, // um (the Specctra default)
+        }
+    };
+    let ses_unit = resolution_node
+        .and_then(|r| r.args().next())
+        .unwrap_or("um");
+    let ses_units_per_mm = ses_resolution.max(1.0) / um_per_unit(ses_unit) * 1000.0;
+    let factor = board.board_units_per_mm() / ses_units_per_mm;
     let scale = |v: f64| -> i32 { (v * factor).round() as i32 };
     let network = routes
         .child("network_out")
