@@ -96,6 +96,12 @@ pub fn move_via(
             }
         }
     }
+    // Deduplicate: several traces can contact the via on the same layer with
+    // identical width/class, and one bridge per distinct (layer, width, class)
+    // suffices — inserting a coincident duplicate bridge is wasteful and can
+    // itself create a zero-area overlap.
+    bridge_contacts.sort_unstable();
+    bridge_contacts.dedup();
 
     board.generate_snapshot();
     board.remove_item(via_id);

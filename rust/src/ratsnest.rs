@@ -80,11 +80,15 @@ pub fn ratsnest(board: &BasicBoard) -> Vec<AirLine> {
         // The airlines form a minimum spanning tree over the connected
         // COMPONENTS, where the weight between two components is their closest
         // point-pair distance. Instead of materializing all O(P^2) point-pair
-        // edges (quadratic memory), reduce to the C^2 component-pair edges
-        // (C = number of disconnected pieces, usually tiny): scan point pairs
-        // once to find each component pair's closest points, storing only the
-        // C^2 result, then run Kruskal over those. Same airlines, O(P + C^2)
-        // memory instead of O(P^2).
+        // edges, store only the C^2 component-pair edges (C = number of
+        // disconnected pieces): scan point pairs once to find each component
+        // pair's closest points, then run Kruskal over those. This gives O(C^2)
+        // stored edges — a large win for the common case of a mostly-routed net
+        // (few components). NOTE it is NOT a general O(P) method: a fully
+        // unrouted net has C = P (every pin its own component), so both the
+        // stored edges and the point-pair scan remain O(P^2) in the worst case.
+        // A true O(P log P) ratsnest needs the Delaunay pruning Java uses, which
+        // is not ported.
         let c = components.len();
         let mut comp_edges: Vec<CompEdge> = Vec::new();
         for i in 0..c {

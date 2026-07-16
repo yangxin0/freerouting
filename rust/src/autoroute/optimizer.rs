@@ -72,15 +72,19 @@ fn net_route_cost(board: &BasicBoard, net_no: i32) -> (usize, f64) {
     (vias, length)
 }
 
-/// The number of nets on the board that are not completely connected
-/// (Java: `BoardStatistics.calculateIncompleteCount`). Used as the primary
-/// optimizer-acceptance gate so a reroute that pushes another net aside and
-/// fails to recover it is rejected board-wide, not just judged on the target
-/// net.
-fn count_board_incompletes(board: &BasicBoard) -> usize {
-    (1..=board.rules.nets.max_net_no())
-        .filter(|&n| !board.net_is_completely_connected(n))
-        .count()
+/// The completeness of every net (1-based; index 0 unused), so acceptance can
+/// verify that no previously-complete net was broken by the reroute. A bare
+/// count of incomplete nets is not enough: a reroute that completes the target
+/// while breaking one previously-complete victim leaves the count unchanged and
+/// would be wrongly accepted (the same is true of an incomplete-connection
+/// count for a symmetric one-for-one swap). Recording the actual set catches it.
+fn complete_net_set(board: &BasicBoard) -> Vec<bool> {
+    let max = board.rules.nets.max_net_no();
+    let mut v = vec![false; (max + 1) as usize];
+    for n in 1..=max {
+        v[n as usize] = board.net_is_completely_connected(n);
+    }
+    v
 }
 
 fn rip_net_route_items(board: &mut BasicBoard, net_no: i32) {
@@ -126,12 +130,12 @@ pub fn optimize_nets_pass(
     // consecutive non-improving items; the streak resets on improvement
     // (settings.optimizer.maxConsecutiveFailures, default 50)
     let mut consecutive_failures = 0usize;
-    // Board-wide incomplete-net count, the primary acceptance gate. Cached
-    // across net-steps: a rejected step restores the board via undo, so the
-    // count is unchanged and can be reused; only an accepted step (which
-    // mutates the board) refreshes it. This keeps the board-wide scan roughly
-    // once per acceptance rather than once per net.
-    let mut board_incomplete: Option<usize> = None;
+    // Board-wide completeness set, the primary acceptance gate. Cached across
+    // net-steps: a rejected step restores the board via undo, so the set is
+    // unchanged and can be reused; only an accepted step (which mutates the
+    // board) refreshes it. This keeps the board-wide scan roughly once per
+    // acceptance rather than once per net.
+    let mut complete_before: Option<Vec<bool>> = None;
     for net_no in net_nos {
         if time_limit.is_some_and(|t| t.limit_exceeded()) {
             break;
@@ -139,7 +143,9 @@ pub fn optimize_nets_pass(
         if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
             break;
         }
-        let incomplete_before = *board_incomplete.get_or_insert_with(|| count_board_incompletes(board));
+        if complete_before.is_none() {
+            complete_before = Some(complete_net_set(board));
+        }
         let was_complete = board.net_is_completely_connected(net_no);
         let (vias_before, len_before) = net_route_cost(board, net_no);
         let violations_before = net_violations(board, net_no);
@@ -182,24 +188,28 @@ pub fn optimize_nets_pass(
                 || vias_after < vias_before
                 || (vias_after == vias_before && len_after + min_gain < len_before));
         // Board-wide gate (Java `ItemRouteResult.improved`): never accept a
-        // reroute that increases the total number of incomplete nets, even if
-        // the target net itself improved. Only scanned when the local
-        // condition already holds, so rejects stay cheap.
-        let inc_after = if local_keep {
-            Some(count_board_incompletes(board))
-        } else {
-            None
-        };
-        let keep = local_keep && inc_after.unwrap() <= incomplete_before;
+        // reroute that breaks a previously-complete net, even if the target net
+        // itself improved. Checking the completeness SET (not just a count)
+        // catches the one-for-one swap where the target completes while a victim
+        // breaks. Only scanned when the local condition already holds, so
+        // rejects stay cheap; the scan early-exits on the first regression.
+        let before = complete_before.as_ref().unwrap();
+        let broke_a_net = local_keep
+            && (1..=board.rules.nets.max_net_no()).any(|m| {
+                m != net_no
+                    && before[m as usize]
+                    && !board.net_is_completely_connected(m)
+            });
+        let keep = local_keep && !broke_a_net;
         if keep {
             board.pop_snapshot();
-            // board changed; the freshly measured count is the new baseline
-            board_incomplete = inc_after;
+            // board changed; refresh the completeness baseline
+            complete_before = Some(complete_net_set(board));
             improved += 1;
             consecutive_failures = 0;
         } else {
             board.undo();
-            // board restored to its pre-step state; cached count still valid
+            // board restored to its pre-step state; cached set still valid
             consecutive_failures += 1;
         }
     }

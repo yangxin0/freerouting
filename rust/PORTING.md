@@ -39,9 +39,12 @@ should pick up the first unchecked item below.
 
 ## Audit remediation (2026-07-16)
 
-An independent parity audit against the Java sources raised 11 findings; each
-was re-verified against the code before acting. Seven were confirmed, four
-overstated (none wholly false). Fixes landed (with regression tests):
+Two rounds of independent parity audit against the Java sources. The status
+below reflects the SECOND round, which correctly caught that the first
+remediation over-claimed (a broken electrical-equivalence fix with a vacuous
+test, an inert per-net-clearance change for DSN, an over-stated ratsnest
+complexity). This section is the honest reconciled state — genuine fixes, plus
+an explicit list of what is NOT fixed. Fixes landed (with regression tests):
 
 - **DRC false negatives (confirmed)** — `drc.rs` now includes obstacles/keepouts
   in the outer iteration and sizes the candidate search by the layer's max
@@ -59,37 +62,65 @@ overstated (none wholly false). Fixes landed (with regression tests):
   contacting traces from the old to the new center (Java: `DrillItem.move_by`).
 - **Optimizer acceptance (confirmed)** — gated on board-wide incomplete count,
   not just the target net, so a reroute that breaks another net is rejected.
-- **Design rules discarded (confirmed)** — per-net trace clearance class now
-  flows to router and optimizer instead of a hardcoded class 1. (Per-layer
-  widths, active-layer mask, directional/plane-via costs, neckdown still TODO.)
-- **Split under via (confirmed)** — the router normalize pass splits same-net
-  traces passing under a newly inserted via across its spanned layers.
-- **Electrical equivalence / completion (confirmed)** — routed trace ends that
-  stopped inside a pad are now snapped to the pin connection point with a short
-  stub, so a "complete" net's wiring is genuinely electrically equivalent (an
-  off-centre SMD end previously reloaded as a dangling track). New test asserts
-  every pin of every complete net is reached at its connection point.
-- **Tests (confirmed gap)** — added CLI end-to-end, SES-import round-trip, and
-  full-board DRC integration tests; the real-board fixture test now hard-fails
-  when the fixture is absent instead of silently passing.
-- **Ratsnest quadratic memory (perf, confirmed)** — MST now spans components
-  via C² closest-pair edges (O(P) memory) instead of materializing all O(P²)
-  point-pair edges.
+- **Optimizer acceptance, tightened** — a second audit noted a bare
+  incomplete-net *count* still permits a one-for-one swap (target completes, a
+  victim breaks). The gate now checks the completeness *set*: a step is rejected
+  if any previously-complete net becomes incomplete.
+- **Via move dedup** — bridge stubs are deduplicated by (layer, width, class) so
+  coincident duplicates are not inserted. (The bridge is still a straight
+  segment; Java inserts a 45/90-degree corner when required — still TODO.)
+- **Split under via (confirmed, partial)** — the router normalize pass splits
+  same-net traces under a newly inserted via across its spanned layers, and now
+  loops so *every* matching trace at the point is split. NOTE this is only the
+  maze-insertion path; `insert_via` itself is still raw, so SES import and other
+  callers do not split — still TODO.
+- **Tests** — added CLI end-to-end, SES-import round-trip (now asserts the reload
+  reproduces ≥90% of routed connectivity, not just "≥1 net"), and full-board DRC
+  integration tests; the real-board fixture test hard-fails when the fixture is
+  absent. 291 Java test methods remain unported.
+- **Unit correctness, partial** — the SES unit label is preserved, and DRC and
+  scoring now convert coordinates to mm via a unit-aware `board_units_per_mm()`
+  (a `mil` fixture no longer reports lengths ~25x too large). The KiCad JSON
+  writer keeps its own separate board-units-per-mm convention and is NOT yet
+  unit-correct for DSN-imported boards — still TODO.
 
-Deliberately NOT changed, with rationale:
+NOT fixed / reverted, with rationale (honest status after the second audit):
 
-- **Maze relaxation occupy-on-pop (optimality)** — the Java-faithful settle-at-
-  pop variant was implemented and measured: it reintroduces the relaxation storm
-  the occupy-on-push design avoids (J2: 128 ms → 21 s, 168×). The small
-  optimality gain is not worth the catastrophic slowdown; occupy-on-push is
-  retained deliberately (see the note in `maze_search.rs`).
-- **Undo arena reclamation (perf)** — index-based `NodeId` version chains make
-  slot reuse high-risk for the critical undo/redo path; perf-only, modest gain.
-- **Multithreaded board clones** — parity with Java (`OptimizeRouteTask.deepCopy`
-  per task), not a regression; no change.
+- **Electrical equivalence at pin connection points (finding #2) — NOT FIXED.**
+  Routed traces still stop anywhere inside a target pad rather than at the pin
+  connection point, so a "complete" net's SES can reload with dangling tracks. A
+  first fix (a connecting stub) is deleted by cycle removal; a second (rebuilding
+  the trace to end at the centre) creates degenerate sub-grid segments that break
+  the polyline offset machinery. Both were reverted. A correct fix must terminate
+  the maze connection at the drill connection point during the search — a larger
+  router change, still open. The `routed_nets_reach_pin_connection_points` test
+  encodes the target property and is `#[ignore]`d until then.
+- **Per-net clearance class is inert for DSN inputs (finding #4).** The plumbing
+  (router + optimizer use `get_trace_clearance_class`) is correct, but DSN import
+  assigns clearance class 1 to *every* net class, so there is nothing to
+  differentiate. Making it effective needs per-class clearance import (creating
+  distinct matrix classes), part of the deferred rules-import work.
+- **Design-rule cost model** — per-layer widths, active-layer mask, directional
+  and plane-via costs, and neckdown still need `BatchRequest` + the maze cost
+  function extended.
+- **Maze relaxation (optimality)** — occupy-on-push is retained; the Java-faithful
+  occupy-on-pop was measured to reintroduce the relaxation storm (J2 128 ms →
+  21 s, 168×). This is a documented tradeoff, not an optimality *fix*: accepting
+  the first discovery is not proven cost-optimal.
+- **Ratsnest** — the MST now stores only C² component-pair edges (a win for
+  mostly-routed nets), but this is NOT general O(P): a fully unrouted net has
+  C = P, so it stays O(P²). A true O(P log P) ratsnest needs Delaunay pruning,
+  not ported.
+- **Undo arena reclamation** — perf-only; index-based version chains make slot
+  reuse risky for the critical undo/redo path.
+- **CLI defaults** — pass count and thread count aligned to Java; the 300 s
+  default timeout (vs Java 12 h), opt-in fanout (vs enabled), and optimize-by-
+  default (vs Java disabled) are deliberate deviations, not alignment.
+- **Multithreaded board clones** — parity with Java (`deepCopy` per task).
 
-Full test count after remediation: 223 (was 215). No fleet completion
-regression across J2, pic_programmer, wavefolder, display, 8088sbc, ecc83.
+Full test count: 222 passing + 1 `#[ignore]`d (the equivalence target). No fleet
+completion regression across J2, pic_programmer, wavefolder, display, 8088sbc,
+ecc83.
 
 ## OPEN ITEMS (reconciled 2026-07-15, iter 190)
 

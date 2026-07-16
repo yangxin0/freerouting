@@ -240,6 +240,25 @@ impl BasicBoard {
         self.insert_item(item)
     }
 
+    /// Board units per millimetre, derived from the imported `resolution`
+    /// (board units per physical `unit`) and `unit`. Coordinate→mm conversions
+    /// must use this rather than assuming micrometres: a `mil`-based design has
+    /// ~39.37 board units/mm at resolution 1, not `resolution * 1000`, so a bare
+    /// `resolution * 1000` reports lengths ~25.4x too large for such fixtures.
+    pub fn board_units_per_mm(&self) -> f64 {
+        // micrometres per one physical `unit`
+        let um_per_unit = match self.unit.to_ascii_lowercase().as_str() {
+            "mil" => 25.4,
+            "inch" | "in" => 25_400.0,
+            "mm" => 1000.0,
+            "cm" => 10_000.0,
+            _ => 1.0, // um (the Specctra default)
+        };
+        // resolution [units/physical_unit] / um_per_unit [um/physical_unit]
+        //   = units per um; times 1000 um/mm = units per mm
+        self.resolution.max(1) as f64 / um_per_unit * 1000.0
+    }
+
     /// Convenience: inserts a via with the given 1-based padstack number.
     pub fn insert_via(
         &mut self,

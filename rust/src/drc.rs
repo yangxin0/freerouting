@@ -151,7 +151,7 @@ impl DrcReport {
     /// Serializes the report in the KiCad DRC v1 JSON format, matching
     /// the Java `DrcReport` field for field.
     pub fn to_kicad_json(&self, board: &BasicBoard, source: &str) -> String {
-        let scale = 1.0 / (board.resolution.max(1) as f64 * 1000.0); // board units → mm
+        let scale = 1.0 / board.board_units_per_mm(); // board units → mm (unit-aware)
         let kind = |id: ItemId| -> &'static str {
             match board.get_item(id).map(|i| &i.kind) {
                 Some(ItemKind::Via(_)) => "via",

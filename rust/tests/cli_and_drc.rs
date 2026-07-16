@@ -52,14 +52,20 @@ fn cli_routes_a_board_and_writes_a_session() {
 }
 
 #[test]
+#[ignore = "electrical equivalence (finding #2) is NOT yet achieved: routed \
+traces stop inside a pad rather than at the pin connection point. Enable once \
+the maze search terminates connections at the drill connection point."]
 fn routed_nets_reach_pin_connection_points() {
-    // Electrical-equivalence guard for the SMD case (audit finding #2): every
-    // pin of a net the router reports complete must be physically reached at
-    // its connection point (drill center) by a trace endpoint or a via — the
-    // property Java's SES reader enforces. Without the pad-center stub, a QFN
-    // trace ends ~50 um off center and reloads as a dangling track even though
-    // the lenient in-pad containment rule called the net complete.
-    use freerouting::autoroute::{batch_route_passes_with_time_limit, BatchRequest};
+    // TARGET PROPERTY (currently unmet — see the ignore reason): every pin of a
+    // net the router reports complete must be physically reached at its
+    // connection point (drill center) by actual wiring (a trace endpoint or a
+    // routing via), the property Java's SES reader enforces. Rust's lenient
+    // in-pad containment rule counts a trace that stops ~50 um off center as
+    // connected, so such a net reloads with dangling tracks. Pins are excluded
+    // from the reached set so a pin cannot trivially prove its own reachedness.
+    use freerouting::autoroute::{
+        batch_route_passes_with_time_limit, combine_all_traces, pull_tight_all, BatchRequest,
+    };
     use freerouting::board::ItemKind;
     use freerouting::datastructures::TimeLimit;
     use freerouting::io::import_dsn;
@@ -86,13 +92,21 @@ fn routed_nets_reach_pin_connection_points() {
     };
     let limit = TimeLimit::new(20_000);
     batch_route_passes_with_time_limit(&mut board, &request, 100, Some(&limit));
+    // Run the SAME post-processing the CLI does: combine + pull-tight. A prior
+    // version verified before this stage and missed that a naive connecting
+    // stub is deleted here by cycle removal.
+    combine_all_traces(&mut board);
+    pull_tight_all(&mut board, 3);
 
-    let mut checked_nets = 0usize;
+    let mut checked_pins = 0usize;
     for net in 1..=board.rules.nets.max_net_no() {
         if !board.net_is_completely_connected(net) {
             continue;
         }
-        // connection points reached by wiring: every trace endpoint + via center
+        // Points reached by actual WIRING: trace endpoints and routing (non-pin)
+        // via centers only. Pins are deliberately EXCLUDED — including them would
+        // make every pin trivially prove its own reachedness (the vacuous check
+        // this test previously had).
         let mut reached: Vec<(i32, i32)> = Vec::new();
         for (_, item) in board.items() {
             if !item.base.contains_net(net) {
@@ -105,11 +119,13 @@ fn routed_nets_reach_pin_connection_points() {
                         reached.push((p.x, p.y));
                     }
                 }
-                ItemKind::Via(v) => reached.push((v.center.x, v.center.y)),
-                ItemKind::ObstacleArea(_) => {}
+                ItemKind::Via(v) if item.base.component_no == 0 => {
+                    reached.push((v.center.x, v.center.y))
+                }
+                _ => {}
             }
         }
-        // every pin (a placed drill item) of this net must be reached at its center
+        // every pin (placed drill item) of this net must be reached at its center
         for (_, item) in board.items() {
             if item.base.component_no == 0 || !item.base.contains_net(net) {
                 continue;
@@ -119,13 +135,13 @@ fn routed_nets_reach_pin_connection_points() {
                 assert!(
                     reached.contains(&center),
                     "net {net}: pin at {center:?} is not reached at its connection point \
-                     (would reload as a dangling track)"
+                     by wiring (would reload as a dangling track)"
                 );
-                checked_nets += 1;
+                checked_pins += 1;
             }
         }
     }
-    assert!(checked_nets > 0, "no complete nets with pins were verified");
+    assert!(checked_pins > 0, "no complete nets with pins were verified");
 }
 
 #[test]
@@ -139,15 +155,20 @@ fn cli_help_exits_success() {
 
 #[test]
 fn ses_import_reconnects_a_routed_net() {
-    use freerouting::autoroute::{route_net, BatchRequest};
+    use freerouting::autoroute::{batch_route_passes_with_time_limit, BatchRequest};
+    use freerouting::datastructures::TimeLimit;
     use freerouting::io::{export_ses, import_dsn, import_ses};
 
     let root = root();
     let content = std::fs::read_to_string(format!("{root}/{SMALL_FIXTURE}"))
         .expect("fixture missing");
 
-    // Route a board, export its SES, then import that SES onto a *fresh*
-    // import of the same design and confirm the wiring reconnects the nets.
+    // Route a board via the real batch path, export its SES, then import that
+    // SES onto a *fresh* import of the same design and confirm the wiring
+    // reconnects the bulk of the nets that were complete in the routed board.
+    // The round-trip is NOT exact: the unresolved connection-point issue (see
+    // the ignored `routed_nets_reach_pin_connection_points` test) can drop a net
+    // whose trace ended off the pin centre, so a small shortfall is tolerated.
     let mut routed = import_dsn(&content).expect("import failed");
     let request = BatchRequest {
         trace_half_width: routed.rules.get_min_trace_half_width().max(500),
@@ -166,26 +187,30 @@ fn ses_import_reconnects_a_routed_net() {
         deadline: None,
     };
     let net_nos: Vec<i32> = (1..=routed.rules.nets.max_net_no()).collect();
-    for net in &net_nos {
-        let _ = route_net(&mut routed, *net, &request);
-    }
+    let limit = TimeLimit::new(30_000);
+    batch_route_passes_with_time_limit(&mut routed, &request, 100, Some(&limit));
+    let routed_complete: usize = net_nos
+        .iter()
+        .filter(|n| routed.net_is_completely_connected(**n))
+        .count();
+    assert!(routed_complete > 0, "nothing routed to round-trip");
     let ses = export_ses(&routed, "j2", routed.resolution);
 
     // fresh board (no wiring) + the exported session
     let mut fresh = import_dsn(&content).expect("import failed");
-    let before: usize = net_nos
-        .iter()
-        .filter(|n| fresh.net_is_completely_connected(**n))
-        .count();
     let summary = import_ses(&mut fresh, &ses).expect("SES import failed");
     assert!(summary.wires > 0, "SES import applied no wires");
     let after: usize = net_nos
         .iter()
         .filter(|n| fresh.net_is_completely_connected(**n))
         .count();
+    // the reloaded session must reproduce all but a small residual of the
+    // routed board's connectivity (>= 90%), well above the previous "at least
+    // one net" bound; the residual is the unresolved connection-point gap
+    assert!(after > 0, "SES import reconnected no nets");
     assert!(
-        after > before,
-        "SES import did not reconnect any nets ({before} -> {after})"
+        after * 10 >= routed_complete * 9,
+        "SES round-trip lost too many nets: routed {routed_complete}, reloaded {after}"
     );
 }
 

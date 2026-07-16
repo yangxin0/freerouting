@@ -1573,62 +1573,24 @@ fn insert_connection(
         })
         .collect();
     for (point, layer) in via_splits {
-        board.split_traces_at(point, layer, request.net_no);
+        // split_traces_at cuts one matching trace per call; loop so every
+        // same-net trace passing under the via center is split (bounded by the
+        // trace count, so a false return terminates it).
+        while board.split_traces_at(point, layer, request.net_no) {}
     }
 
-    // Land a routed trace end that stopped inside a same-net pad exactly on
-    // that pad's connection point (its drill center) with a short stub. The
-    // maze search terminates a connection anywhere inside the target pad, so a
-    // trace can end 50 um off a small SMD pin while still being "inside" it.
-    // The lenient in-pad containment rule counts that as connected, but the
-    // exported SES is not electrically equivalent — reloaded, the off-centre
-    // end reads as a dangling track. The stub, a straight segment between two
-    // points of the convex pad, stays inside the (same-net) pad, so it adds no
-    // clearance cost while making the pin connection point genuinely reached.
-    let mut pad_stubs: Vec<(IntPoint, IntPoint, usize, i32)> = Vec::new();
-    for id in &new_items {
-        let Some(item) = board.get_item(*id) else { continue };
-        let crate::board::ItemKind::PolylineTrace(t) = &item.kind else { continue };
-        let layer = t.layer;
-        let hw = t.half_width;
-        for corner in [t.first_corner(), t.last_corner()] {
-            let cp = corner.to_float().round();
-            let query = TileShape::Box(IntBox::from_coords(cp.x - 1, cp.y - 1, cp.x + 1, cp.y + 1));
-            for oid in board.overlapping_items(&query, Some(layer)) {
-                if oid == *id {
-                    continue;
-                }
-                let Some(other) = board.get_item(oid) else { continue };
-                if !other.base.contains_net(request.net_no) {
-                    continue;
-                }
-                let crate::board::ItemKind::Via(ov) = &other.kind else { continue };
-                if ov.center == cp {
-                    continue; // already at the connection point
-                }
-                let inside_pad = other
-                    .tile_shapes(&board.padstacks)
-                    .iter()
-                    .any(|(s, l)| {
-                        *l == layer && s.contains(&crate::geometry::planar::Point::Int(cp))
-                    });
-                if inside_pad {
-                    pad_stubs.push((cp, ov.center, layer, hw));
-                    break;
-                }
-            }
-        }
-    }
-    pad_stubs.sort_by_key(|(a, b, l, _)| (a.x, a.y, b.x, b.y, *l));
-    pad_stubs.dedup_by_key(|(a, b, l, _)| (a.x, a.y, b.x, b.y, *l));
-    for (from, to, layer, hw) in pad_stubs {
-        if from != to {
-            let stub = Polyline::from_int_points(&[from, to]);
-            let stub_id =
-                board.insert_trace(stub, layer, hw, vec![request.net_no], request.clearance_class);
-            new_items.push(stub_id);
-        }
-    }
+    // NOTE: routed traces can stop anywhere INSIDE a target pad rather than at
+    // the pin's connection point (its drill center). Rust's lenient in-pad
+    // containment rule counts that as connected, but a reloaded SES treats an
+    // off-centre end as a dangling track, so the output is not electrically
+    // equivalent to Java's (which lands the trace at the connection point).
+    // This is NOT fixed here. Two post-processing attempts failed: a connecting
+    // stub is deleted by cycle removal (the pad contacts both its ends, so
+    // `trace_is_cycle` sees a redundant path), and rebuilding the trace with the
+    // centre as a terminal corner produces degenerate ~sub-grid segments that
+    // break the polyline offset machinery. A correct fix must terminate the maze
+    // connection at the drill connection point during the search itself; that is
+    // a larger router change and remains open.
     Some(new_items)
 }
 

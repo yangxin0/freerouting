@@ -69,8 +69,7 @@ impl BoardStatistics {
                 ItemKind::PolylineTrace(t) => {
                     stats.trace_count += 1;
                     stats.bends += t.corner_count().saturating_sub(2);
-                    stats.total_length_mm +=
-                        t.get_length() / (board.resolution.max(1) as f64 * 1000.0);
+                    stats.total_length_mm += t.get_length() / board.board_units_per_mm();
                 }
                 _ => {}
             }
