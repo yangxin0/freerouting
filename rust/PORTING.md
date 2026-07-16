@@ -252,19 +252,34 @@ RESOLVED after the third round:
   (Rust routes J2 in seconds vs Java's ~0.7 s) — a speed concern, not a
   correctness one.
 
+RESOLVED — router performance (was the last finding-#6 gap):
+
+- The ~25 s J2 routing time was a **pass-loop plateau spin**, not slow search:
+  after pass 0 completes 22/24, the escalating-penalty passes re-ran the same
+  deterministic search (identical tree stats) failing the same 2 nets for up to
+  9999 passes (~2.5 ms each ≈ 25 s), then the restart fallback finished them in
+  one shot. A **plateau guard** now breaks the pass loop after 8 consecutive
+  non-improving passes and hands off to the restart fallback (a stronger
+  completion path that also gets more wall-clock this way). J2: 25.3 s → 0.14 s
+  routing (24/24, 0 violations, score 999.94 — unchanged). Fleet spot-check:
+  interf_u 173/173 @0.21 s, wavefolder 31/31 @0.37 s, pic_programmer 111/111
+  @0.05 s. (A full fleet re-benchmark is still advisable before relying on it.)
+  Note: Issue145-smoothieboard panics with a capacity overflow BOTH before and
+  after this change — a separate, PRE-EXISTING crash, not a regression.
+
 KNOWN OPEN GAPS (not yet fixed) — do NOT claim these are done:
 
-1. **Router performance vs Java (from finding #6).** Functionally J2 routes
-   fully, but the multi-pass ripup loop is much slower than Java's push-and-
-   shove — seconds vs sub-second on a small board. A real optimization target
-   (door generation / shove efficiency in dense pin fields), not a bug.
-2. **Autoroute `layer_rule` (from finding #2, Part B) — router-core, not a
+1. **Autoroute `layer_rule` (from finding #2, Part B) — router-core, not a
    grammar port.** `(layer_rule L (active on/off) (preferred_direction …)
    (…trace_costs …))` needs a per-layer directional cost model and active-layer
    gating in the maze search. The Rust router has NEITHER (its cost is
    distance + via-cost + ripup only, and `active_routing_layer` has no
-   consumers). This is router-behavior work that overlaps item 1 (route quality
-   / cost model), not a bounded importer feature; deferred into that track.
+   consumers). Router-behavior work (a route-quality / cost-model feature), not
+   a bounded importer feature.
+2. **Issue145-smoothieboard capacity-overflow panic.** A 4-layer, 245-net board
+   panics (`raw_vec capacity overflow`) during routing — a huge `with_capacity`
+   somewhere in the router/import. Pre-existing (crashes before and after the
+   performance change); not in the tuned fleet list. Untriaged.
 
 ## OPEN ITEMS (reconciled 2026-07-15, iter 190)
 

@@ -614,6 +614,18 @@ pub fn batch_route_passes_with_time_limit(
         t.multiply(0.7);
         t
     });
+    // Plateau guard: track the best (fewest) failures seen and how many
+    // consecutive passes have failed to beat it. Once the pass loop stops
+    // completing new nets, its escalating-penalty passes just re-run the same
+    // deterministic search (J2: ~9999 identical 2.5 ms no-progress passes ≈
+    // 25 s); we stop and let the restart fallback finish instead. The limit is
+    // generous — each stalled pass also doubles the expansion budget, so after
+    // this many passes the budget is ~2^8x and penalty ~8x the base; a net that
+    // completion needs more escalation than that will not finish in the pass
+    // loop anyway (the restart fallback is the stronger path).
+    const PASS_STALL_LIMIT: usize = 8;
+    let mut best_failed = usize::MAX;
+    let mut stall = 0usize;
     for pass in 0..passes.max(1) {
         let pass_start = std::time::Instant::now();
         let pass_request = BatchRequest {
@@ -696,6 +708,22 @@ pub fn batch_route_passes_with_time_limit(
         // only after routing finishes.
         if failed_this_pass == 0 {
             break;
+        }
+        // Stop the pass loop once it has stalled (no fewer failures) for
+        // several consecutive passes and hand off to the restart fallback,
+        // which rips everything and routes the failures first — a stronger
+        // completion path. A pass that reduces the failure count resets the
+        // counter, so boards making gradual progress are unaffected; only a
+        // genuine plateau (like J2's) is cut short.
+        if failed_this_pass < best_failed {
+            best_failed = failed_this_pass;
+            stall = 0;
+        } else {
+            stall += 1;
+            if stall >= PASS_STALL_LIMIT {
+                total.failed_connections += failed_this_pass;
+                break;
+            }
         }
         if pass + 1 == passes {
             total.failed_connections += failed_this_pass;
