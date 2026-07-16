@@ -156,8 +156,9 @@ impl ShapeTraceEntries {
                     if a.is_conduction && contains_own_net {
                         continue;
                     }
-                    if a.is_conduction {
-                        // planes are not obstacles for foreign items
+                    if a.is_conduction && !a.is_obstacle {
+                        // planes are not obstacles for foreign items —
+                        // unless flagged (Java ConductionArea.is_obstacle)
                         continue;
                     }
                     self.found_obstacle = Some(item_id);

@@ -475,7 +475,7 @@ impl BasicBoard {
                     // they receive clearance cutouts in fabrication (Java:
                     // ConductionArea is no obstacle for foreign items)
                     if let ItemKind::ObstacleArea(a) = &item.kind {
-                        if a.is_conduction {
+                        if a.is_conduction && !a.is_obstacle {
                             return false;
                         }
                     }
@@ -1185,6 +1185,30 @@ mod tests {
 
     fn query_box(llx: i32, lly: i32, urx: i32, ury: i32) -> TileShape {
         TileShape::Box(IntBox::from_coords(llx, lly, urx, ury))
+    }
+
+    #[test]
+    fn obstacle_conduction_area_blocks_foreign_nets() {
+        use crate::geometry::planar::{PolygonShape, PolylineArea};
+        let mut board = test_board();
+        let area = PolylineArea::new(
+            PolygonShape::from_int_points(&[
+                IntPoint::new(0, 0),
+                IntPoint::new(5000, 0),
+                IntPoint::new(5000, 5000),
+                IntPoint::new(0, 5000),
+            ]),
+            Vec::new(),
+        );
+        let id = board.insert_area(area, 0, "plane", vec![1], 1, true);
+        let probe = query_box(2000, 2000, 3000, 3000);
+        // a plain conduction area never blocks (fabrication cutouts)
+        assert!(!board.is_blocked(&probe, 0, 2));
+        // flagged an obstacle (Java ConductionArea.is_obstacle), it blocks
+        // foreign nets but not its own
+        board.set_area_is_obstacle(id, true);
+        assert!(board.is_blocked(&probe, 0, 2));
+        assert!(!board.is_blocked(&probe, 0, 1));
     }
 
     #[test]

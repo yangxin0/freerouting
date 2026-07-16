@@ -87,7 +87,7 @@ fn shove_insert(
         }
         match &item.kind {
             ItemKind::ObstacleArea(a) => {
-                if !a.is_conduction
+                if (!a.is_conduction || a.is_obstacle)
                     && item
                         .tile_shapes(&board.padstacks)
                         .iter()

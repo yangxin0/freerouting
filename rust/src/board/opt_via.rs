@@ -166,7 +166,7 @@ pub fn opt_via_location(board: &mut BasicBoard, via_id: ItemId, max_recursion: u
                             continue;
                         }
                         if let ItemKind::ObstacleArea(a) = &other.kind {
-                            if a.is_conduction {
+                            if a.is_conduction && !a.is_obstacle {
                                 continue;
                             }
                         }

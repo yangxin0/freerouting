@@ -230,7 +230,7 @@ fn calculate_page_drills(
             }
         }
         if let crate::board::ItemKind::ObstacleArea(a) = &item.kind {
-            if a.is_conduction {
+            if a.is_conduction && !a.is_obstacle {
                 continue;
             }
         }

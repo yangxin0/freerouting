@@ -684,7 +684,7 @@ fn via_site_clearance(
             .get_same_net_clearance(crate::rules::ItemClass::Via, other_class)
             .map(|v| v as f64);
     } else if let crate::board::ItemKind::ObstacleArea(a) = &other.kind {
-        if a.is_conduction {
+        if a.is_conduction && !a.is_obstacle {
             return None;
         }
     }
@@ -985,7 +985,7 @@ pub fn maze_route_with_engine(
                                 continue;
                             }
                             if let crate::board::ItemKind::ObstacleArea(ar) = &item.kind {
-                                if ar.is_conduction {
+                                if ar.is_conduction && !ar.is_obstacle {
                                     continue;
                                 }
                             }
@@ -1081,7 +1081,7 @@ pub fn maze_route_with_engine(
                     continue;
                 }
                 if let crate::board::ItemKind::ObstacleArea(ar) = &item.kind {
-                    if ar.is_conduction {
+                    if ar.is_conduction && !ar.is_obstacle {
                         continue;
                     }
                 }
@@ -1481,7 +1481,7 @@ fn trace_run_is_clear(
                 continue;
             }
             if let crate::board::ItemKind::ObstacleArea(a) = &other.kind {
-                if a.is_conduction || a.via_only {
+                if (a.is_conduction && !a.is_obstacle) || a.via_only {
                     continue;
                 }
             }
@@ -1607,7 +1607,7 @@ fn insert_connection(
                                 continue;
                             }
                             if let crate::board::ItemKind::ObstacleArea(a) = &item.kind {
-                                if a.is_conduction {
+                                if a.is_conduction && !a.is_obstacle {
                                     continue;
                                 }
                             }

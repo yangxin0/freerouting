@@ -30,7 +30,7 @@ fn net_violations(board: &BasicBoard, net_no: i32) -> usize {
                     continue;
                 }
                 if let ItemKind::ObstacleArea(a) = &other.kind {
-                    if a.is_conduction {
+                    if a.is_conduction && !a.is_obstacle {
                         continue;
                     }
                     if a.via_only && !matches!(item.kind, ItemKind::Via(_)) {

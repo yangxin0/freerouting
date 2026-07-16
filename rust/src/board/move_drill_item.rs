@@ -70,7 +70,7 @@ pub fn move_via(
         };
         if !matches!(c.kind, ItemKind::PolylineTrace(_)) {
             if let ItemKind::ObstacleArea(a) = &c.kind {
-                if a.is_conduction {
+                if a.is_conduction && !a.is_obstacle {
                     continue;
                 }
             }
@@ -139,7 +139,7 @@ pub fn move_via(
             .any(|id| {
                 board.get_item(id).is_some_and(|it| {
                     !it.base.net_nos.iter().any(|n| net_nos.contains(n))
-                        && !matches!(&it.kind, ItemKind::ObstacleArea(a) if a.is_conduction)
+                        && !matches!(&it.kind, ItemKind::ObstacleArea(a) if a.is_conduction && !a.is_obstacle)
                 })
             });
         if blocked {

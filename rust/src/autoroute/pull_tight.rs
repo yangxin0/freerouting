@@ -217,7 +217,7 @@ fn polyline_keeps_clearance(
                 continue;
             }
             if let ItemKind::ObstacleArea(a) = &other.kind {
-                if a.is_conduction || a.via_only {
+                if (a.is_conduction && !a.is_obstacle) || a.via_only {
                     continue;
                 }
             }
@@ -267,7 +267,7 @@ pub fn audit_foreign_clearance(board: &BasicBoard, id: ItemId, tag: &str) {
                 continue;
             }
             if let ItemKind::ObstacleArea(a) = &other.kind {
-                if a.is_conduction || a.via_only {
+                if (a.is_conduction && !a.is_obstacle) || a.via_only {
                     continue;
                 }
             }

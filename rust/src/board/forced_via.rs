@@ -77,7 +77,7 @@ pub fn insert_forced_via(
             .any(|id| {
                 board.get_item(id).is_some_and(|it| {
                     !it.base.net_nos.iter().any(|n| net_nos.contains(n))
-                        && !matches!(&it.kind, crate::board::ItemKind::ObstacleArea(a) if a.is_conduction)
+                        && !matches!(&it.kind, crate::board::ItemKind::ObstacleArea(a) if a.is_conduction && !a.is_obstacle)
                 })
             });
         if blocked {
