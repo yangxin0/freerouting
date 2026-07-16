@@ -31,9 +31,11 @@ impl Default for ScoringSettings {
 /// The board statistics feeding the score (Java: `BoardStatistics`).
 #[derive(Debug, Default)]
 pub struct BoardStatistics {
-    /// The number of incomplete nets.
+    /// The number of incomplete connections (ratsnest airlines, Java
+    /// `getIncompleteCount`).
     pub incomplete_count: usize,
-    /// The number of nets with at least one connection to make.
+    /// The total connections the board needs: Σ per net of
+    /// (endpoint items − 1) (Java `max_connections`).
     pub maximum_count: usize,
     pub clearance_violations: usize,
     /// Trace corners beyond the two endpoints, summed over all traces.
@@ -48,18 +50,26 @@ pub struct BoardStatistics {
 impl BoardStatistics {
     pub fn collect(board: &BasicBoard) -> Self {
         let mut stats = BoardStatistics::default();
+        // Java DesignRulesChecker: max_connections = Σ per net of
+        // (endpoint items − 1), endpoints being pins and conduction
+        // areas; incompleteCount = the remaining airline count (the same
+        // metric the optimizer's acceptance uses), NOT a net count.
         for net_no in 1..=board.rules.nets.max_net_no() {
-            let connectable = board
+            let endpoints = board
                 .items()
-                .filter(|(_, it)| it.base.contains_net(net_no) && it.is_connectable())
+                .filter(|(_, it)| {
+                    it.base.contains_net(net_no)
+                        && it.is_connectable()
+                        && match &it.kind {
+                            ItemKind::Via(_) => it.base.component_no > 0,
+                            ItemKind::ObstacleArea(a) => a.is_conduction,
+                            ItemKind::PolylineTrace(_) => false,
+                        }
+                })
                 .count();
-            if connectable >= 2 {
-                stats.maximum_count += 1;
-                if !board.net_is_completely_connected(net_no) {
-                    stats.incomplete_count += 1;
-                }
-            }
+            stats.maximum_count += endpoints.saturating_sub(1);
         }
+        stats.incomplete_count = crate::ratsnest::ratsnest(board).len();
         for (_, item) in board.items() {
             if item.base.component_no != 0 || item.base.net_count() == 0 {
                 continue;

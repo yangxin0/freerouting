@@ -514,6 +514,10 @@ pub fn optimize_route_multithreaded_with_strategy(
                 None => 0,
             },
         };
+        // via sweep like the single-thread pass (optimize_route runs
+        // optimize_route_pass + optimize_vias); vias only move on the
+        // adopted master, so this stays outside the worker tasks
+        let improved_this_pass = improved_this_pass + optimize_vias(board, time_limit);
         total += improved_this_pass;
         pass_no += 1;
         if improved_this_pass == 0 {
