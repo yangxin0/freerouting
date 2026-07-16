@@ -130,12 +130,21 @@ Electrical equivalence (finding #2) — FIXED for plane-free boards, verified:
   a plane-aware oracle is future work. No fleet completion or violation
   regression.
 
+Per-net clearance classes (finding #4) — FIXED for DSN:
+- DSN import no longer hardcodes clearance class 1 for every net class. Each
+  distinct net-class clearance value becomes its own dynamic clearance-matrix
+  class (`append_class`), and the net class is assigned it; classes whose
+  clearance equals the board default reuse class 1, so single-class boards are
+  unchanged. `(clear ...)` is handled as the `(clearance ...)` alias. Pre-routed
+  DSN wiring and SES-imported wires/vias now propagate their net's clearance
+  class instead of the default. Verified by a self-contained test (a board with
+  a larger "hv" class gets a distinct class carrying its spacing, and its
+  wiring inherits it) and on real multi-clearance fixtures (Issue015 gains 2
+  dynamic classes). No fleet regression. Still using a per-class scalar value
+  applied uniformly — Java's finer item-type-pair matrix (smd/pin/via/wire
+  cross terms) beyond the existing smd_smd/default_smd handling is not ported.
+
 Open, with rationale:
-- **Per-net clearance class is inert for DSN inputs (finding #4).** The plumbing
-  (router + optimizer use `get_trace_clearance_class`) is correct, but DSN import
-  assigns clearance class 1 to *every* net class, so there is nothing to
-  differentiate. Making it effective needs per-class clearance import (creating
-  distinct matrix classes), part of the deferred rules-import work.
 - **Design-rule cost model** — per-layer widths, active-layer mask, directional
   and plane-via costs, and neckdown still need `BatchRequest` + the maze cost
   function extended.

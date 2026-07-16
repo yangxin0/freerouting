@@ -109,10 +109,10 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     let layer_no = |name: &str| -> Option<usize> { layer_structure.get_no(name) };
     let layer_count = layer_structure.layer_count();
 
-    // default rules
+    // default rules (`(clear ...)` is a Specctra alias for `(clearance ...)`)
     let default_clearance = structure
         .child("rule")
-        .and_then(|r| r.child("clearance"))
+        .and_then(|r| r.child("clearance").or_else(|| r.child("clear")))
         .and_then(|c| c.arg_f64())
         .map(&scale)
         .unwrap_or(200);
@@ -128,7 +128,11 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
         ClearanceMatrix::new(layer_structure.clone(), &["null", "default", "smd"]);
     clearance_matrix.set_default_value(default_clearance);
     if let Some(rule) = structure.child("rule") {
-        for clearance_node in rule.children("clearance") {
+        // both `(clearance ...)` and its alias `(clear ...)`
+        let typed = rule
+            .children("clearance")
+            .chain(rule.children("clear"));
+        for clearance_node in typed {
             let Some(value) = clearance_node.arg_f64().map(&scale) else {
                 continue;
             };
@@ -224,6 +228,19 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
 
     // network classes: per-class trace width, clearance and via
     // ((class NAME net... (circuit (use_via V)) (rule (width W) ...)))
+    //
+    // Each distinct net-class clearance value becomes its own dynamic clearance
+    // matrix class, so a net keeps its class's spacing instead of the hardcoded
+    // default. Classes whose clearance equals the board default reuse class 1,
+    // so single-class boards are unchanged. `(clear ...)` is a Specctra alias
+    // for `(clearance ...)`.
+    let clearance_child = |rule: &SExpr| -> Option<f64> {
+        rule.child("clearance")
+            .or_else(|| rule.child("clear"))
+            .and_then(|c| c.arg_f64())
+    };
+    let mut class_for_clearance: HashMap<i32, usize> = HashMap::new();
+    class_for_clearance.insert(default_clearance, BoardRules::default_clearance_class());
     for network in pcb.children("network") {
         for class_node in network.children("class") {
             let mut class_args = class_node.args();
@@ -237,6 +254,33 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 .and_then(|w| w.arg_f64())
                 .map(&scale)
                 .map(|w| (w / 2).max(1));
+            // the net class's own trace clearance (scaled board units)
+            let class_clearance: Option<i32> =
+                class_node.child("rule").and_then(&clearance_child).map(&scale);
+            let clearance_class_idx = match class_clearance {
+                Some(c) => {
+                    if let Some(&idx) = class_for_clearance.get(&c) {
+                        idx
+                    } else {
+                        // create a dynamic matrix class holding this spacing to
+                        // every class (including itself)
+                        let name = format!("cl_{c}");
+                        rules.clearance_matrix.append_class(&name);
+                        let idx = rules
+                            .clearance_matrix
+                            .get_no(&name)
+                            .unwrap_or_else(BoardRules::default_clearance_class);
+                        let n = rules.clearance_matrix.get_class_count();
+                        for j in 0..n {
+                            rules.clearance_matrix.set_value_on_all_layers(idx, j, c);
+                            rules.clearance_matrix.set_value_on_all_layers(j, idx, c);
+                        }
+                        class_for_clearance.insert(c, idx);
+                        idx
+                    }
+                }
+                None => BoardRules::default_clearance_class(),
+            };
             let via_padstack = class_node
                 .child("circuit")
                 .and_then(|c| c.child("use_via"))
@@ -254,7 +298,7 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 if let Some(hw) = half_width {
                     class.set_trace_half_width(hw);
                 }
-                class.set_trace_clearance_class(1);
+                class.set_trace_clearance_class(clearance_class_idx);
             }
             if let Some(padstack_no) = via_padstack {
                 let via_info = crate::rules::ViaInfo::new(
@@ -595,7 +639,12 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
             if polyline.is_empty() {
                 continue;
             }
-            let id = board.insert_trace(polyline, layer, half_width, net_nos, 1);
+            // pre-routed wiring keeps its net's clearance class, not the default
+            let clearance_class = net_nos
+                .first()
+                .map(|&n| board.rules.get_trace_clearance_class(n))
+                .unwrap_or_else(BoardRules::default_clearance_class);
+            let id = board.insert_trace(polyline, layer, half_width, net_nos, clearance_class);
             if protected {
                 board.set_fixed_state(id, crate::board::FixedState::UserFixed);
             }
@@ -628,11 +677,15 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 .child("type")
                 .and_then(|t| t.arg())
                 .is_some_and(|t| t.eq_ignore_ascii_case("protect") || t.eq_ignore_ascii_case("fix"));
+            let clearance_class = net_nos
+                .first()
+                .map(|&n| board.rules.get_trace_clearance_class(n))
+                .unwrap_or_else(BoardRules::default_clearance_class);
             let id = board.insert_via(
                 padstack_no,
                 IntPoint::new(scale(x), scale(y)),
                 net_nos,
-                1,
+                clearance_class,
                 false,
             );
             if protected {
@@ -822,6 +875,57 @@ fn read_pad_shape(node: &SExpr, scale: &dyn Fn(f64) -> i32) -> Option<(TileShape
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn per_net_class_clearance_becomes_a_distinct_class() {
+        // two net classes: "sig" at the board default clearance, "hv" larger.
+        let dsn = r#"(pcb "cc.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (rule (width 200) (clearance 200))
+  )
+  (placement)
+  (library)
+  (network
+    (net "SIG1")
+    (net "HV1")
+    (class sig "SIG1" (rule (width 200) (clearance 200)))
+    (class hv "HV1" (rule (width 400) (clear 800)))
+  )
+  (wiring
+    (wire (path F.Cu 400 10000 10000 20000 20000) (net "HV1") (type route))
+  )
+)"#;
+        let board = import_dsn(dsn).expect("import");
+        let sig = board.rules.nets.get_by_name("SIG1")[0].net_number;
+        let hv = board.rules.nets.get_by_name("HV1")[0].net_number;
+        let sig_cc = board.rules.get_trace_clearance_class(sig);
+        let hv_cc = board.rules.get_trace_clearance_class(hv);
+        // the larger-clearance net class must get its OWN clearance class
+        assert_ne!(sig_cc, hv_cc, "hv net class must not reuse the default class");
+        // and that class must carry the hv spacing (800 um * resolution 10)
+        assert_eq!(
+            board.rules.clearance_matrix.get_value(hv_cc, hv_cc, 0, false),
+            8000,
+            "hv clearance class value"
+        );
+        // the sig net (== board default) reuses the default class 1
+        assert_eq!(sig_cc, BoardRules::default_clearance_class());
+        // the pre-routed HV1 wire inherits the hv clearance class, not the default
+        let wire_cc = board
+            .items()
+            .find_map(|(_, it)| match &it.kind {
+                crate::board::ItemKind::PolylineTrace(_) if it.base.contains_net(hv) => {
+                    Some(it.base.clearance_class)
+                }
+                _ => None,
+            })
+            .expect("pre-routed HV1 wire");
+        assert_eq!(wire_cc, hv_cc, "wiring must propagate the net's clearance class");
+    }
 
     #[test]
     fn imports_keepout_areas() {

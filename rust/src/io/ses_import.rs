@@ -48,6 +48,12 @@ pub fn import_ses(board: &mut BasicBoard, content: &str) -> Result<SesImportSumm
             .first()
             .map(|n| vec![n.net_number])
             .unwrap_or_default();
+        // propagate the net's own trace clearance class instead of hardcoding
+        // the default, so a reloaded session keeps the design's spacing
+        let clearance_class = net_nos
+            .first()
+            .map(|&n| board.rules.get_trace_clearance_class(n))
+            .unwrap_or_else(crate::rules::BoardRules::default_clearance_class);
         for wire in net_node.children("wire") {
             let Some(path) = wire.child("path") else { continue };
             let Some(layer) = path.arg().and_then(|n| board.layer_structure.get_no(n))
@@ -67,7 +73,7 @@ pub fn import_ses(board: &mut BasicBoard, content: &str) -> Result<SesImportSumm
             if polyline.is_empty() {
                 continue;
             }
-            board.insert_trace(polyline, layer, half_width, net_nos.clone(), 1);
+            board.insert_trace(polyline, layer, half_width, net_nos.clone(), clearance_class);
             summary.wires += 1;
         }
         for via in net_node.children("via") {
@@ -83,7 +89,7 @@ pub fn import_ses(board: &mut BasicBoard, content: &str) -> Result<SesImportSumm
                 padstack_no,
                 IntPoint::new(scale(x), scale(y)),
                 net_nos.clone(),
-                1,
+                clearance_class,
                 false,
             );
             summary.vias += 1;
