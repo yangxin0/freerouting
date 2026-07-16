@@ -1501,6 +1501,19 @@ fn trace_run_is_clear(
                     && os.intersection(&seg.offset(cl)).dimension() >= 2
                     && crate::drc::violates(seg.euclidean_distance_to(os), cl)
             }) {
+                if crate::debug::maze() {
+                    let d = other
+                        .tile_shapes(&board.padstacks)
+                        .iter()
+                        .filter(|(_, ol)| *ol == layer)
+                        .map(|(os, _)| seg.euclidean_distance_to(os))
+                        .fold(f64::INFINITY, f64::min);
+                    eprintln!(
+                        "RUN CONFLICT net {} layer {layer} vs item {other_id} \
+                         (nets {:?}): d {d:.1} < cl {cl}",
+                        request.net_no, other.base.net_nos
+                    );
+                }
                 return false;
             }
         }

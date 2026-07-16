@@ -281,13 +281,113 @@ KNOWN OPEN GAPS (not yet fixed) — do NOT claim these are done:
    gating in the maze search. The Rust router has NEITHER (its cost is
    distance + via-cost + ripup only, and `active_routing_layer` has no
    consumers). Router-behavior work (a route-quality / cost-model feature), not
-   a bounded importer feature.
-2. **Capacity-overflow panic on 5 fixture boards.** Issue145-smoothieboard,
-   Issue508-DAC2020_bm06, Issue508-DAC2020_bm11, Issue730-DAC2020_bm11 and
-   Issue732-RoyalBlue54L-Feather panic (`raw_vec capacity overflow`) during
-   routing — a huge `with_capacity` somewhere in the router/import. Pre-existing
-   (smoothieboard verified to crash before and after the performance change);
-   surfaced by the 91-board fleet sweep of 2026-07-16. Untriaged.
+   a bounded importer feature. Same category: net-class `use_layer` (active
+   routing layers) and per-layer trace widths are parsed nowhere/partially and
+   have no router consumers.
+2. ~~**Capacity-overflow panic on 5 fixture boards.**~~ FIXED in the
+   fourth round (see below): a degenerate polyline (fold-back corner run)
+   underflowed `arr.len() - 1` in `offset_shapes`. All five boards
+   (Issue145-smoothieboard, Issue508-DAC2020_bm06/bm11, Issue730-DAC2020_bm11,
+   Issue732-RoyalBlue54L-Feather) verified to route without panics.
+
+## Fourth-round remediation (2026-07-16) — verification findings
+
+An independent verification of HEAD 42e79887 rejected the "every finding
+fixed" claim with 16 concrete findings. All of them were reproduced first,
+then fixed (except two assessed/documented items at the end). Every fix has
+a regression test where the shape of the code permits one; `cargo test`
+passes 239 tests, fmt/clippy clean.
+
+- **Capacity-overflow crash (5 boards).** `Polyline::from_int_points`
+  collapses fold-back corner runs (`[a, b, a]`) to an EMPTY polyline;
+  `offset_shapes` then computed `arr.len() - 1 = usize::MAX`. Guarded in
+  `offset_shapes_between`; the maze flush skips degenerate runs (nothing to
+  insert). Repro `Issue145 -mp 1 -tl 5` went from exit 101 to routing.
+- **`(polyline_path ...)` wiring imports** (Issue187's 2,026 wires,
+  previously zero traces): each 4-number group is a LINE through two points,
+  built via `Polyline::from_lines` (Java `PolylinePath`).
+- **DSN re-export balanced.** The raw-source surgery removed the preceding
+  section's close paren and dropped everything after the wiring section;
+  `strip_wiring` now removes exactly the balanced `(wiring ...)` span,
+  honoring the parser's lone-quote atom rule (`(string_quote ")`). Issue026
+  re-exports, re-imports, wiring intact.
+- **Same-net drill DRC narrowed to Java's rule** (attach-allowed via on a
+  drillable SMD pin is the ONLY exemption). This forced the full
+  `attach_allowed` chain to exist: padstack `(attach)` defaults ON like Java;
+  `(control (via_at_smd ...))` parsed; via infos/wiring vias derive it like
+  Java; routed vias carry it from their via rule with Java's pure-SMD-net
+  relaxation. The router's via-site legality (drill pages per Java
+  `Item.is_drillable`, `via_free`, `via_site_is_clear`) now shares ONE rule
+  (`via_site_clearance`) so the search never picks a site the insert gate
+  rejects — J2's GND previously failed exactly that way after the DRC change.
+- **One clearance predicate everywhere.** `drc::violates` (relative epsilon)
+  replaced the fixed one-unit `cl - 1.0` slack in trace/via gates, opt_via
+  and the optimizer, with the DRC's `(other, this)` matrix argument order.
+  Batch repair audits with the authoritative DRC report and commits only
+  when completion holds AND violations strictly fall.
+- **CLI exit requires DRC-clean** (exit 2 = unconnected, 3 = connected but
+  violating).
+- **`is_obstacle` conduction areas** block foreign nets in every router path
+  (rooms, drills, via gates, shove, pull-tight, is_blocked), not just DRC.
+- **Fixed state preserved**: trace split/combine keep the source state (Java
+  `Trace.split`/`combine`), pull tight skips shove-fixed traces (Java
+  `PullTightAlgo`), SES-imported routing is USER_FIXED (Java `SesReader`).
+- **Imported vias register mid-trace contacts** (`split_traces_at_via` on the
+  DSN/SES/KiCad import paths); `move_via` bridges from each contacting
+  trace's ACTUAL endpoint (Java bridges center-to-center because its contacts
+  are center-exact; ours may sit anywhere in the pad).
+- **Pull tight endpoint regression (found while fixing the above):**
+  `pull_tight_trace` rebuilt every trace from ROUNDED corner approximations;
+  rational endpoints (polyline_path wiring) shifted sub-unit off their pads —
+  Issue187 lost 4 nets (GND, VCC, ~HALT, FP-D2) to post-processing. A rebuild
+  that moves an exact endpoint (or removed nothing) keeps the original
+  geometry. Issue187 now survives import→combine→pull-tight at 529/529.
+- **DSN import fidelity**: wildcard (`signal`/`all`/`pcb`) padstack shapes
+  land on their layers; ALL `(rule ...)` and `(boundary ...)` nodes read
+  (untyped clearance preferred as default; boundary `clearance_class` and
+  polygon boundaries honored); Eagle-dialect `(keepout (circ ...))` footprint
+  keepouts import with their (nested or trailing-sibling) clearance class —
+  Issue143's connector keepouts, which Java itself drops with an error.
+- **KiCad JSON writer**: through pads name every layer of their span (the
+  reader derives the span from the named layers), vias carry real
+  diameter/start/end layers, conduction areas (+`isObstacle`), `containsPlane`
+  and a bounding-box outline are emitted.
+- **Optimizer parity**: `BoardStatistics` counts incomplete CONNECTIONS and
+  Java's `max_connections` (endpoints−1 per net), matching the acceptance
+  metric; the multithreaded optimizer runs the `optimize_vias` sweep per pass
+  like the single-threaded path.
+- **Silent fixture skips removed**: real-fixture tests `expect()` their file
+  (fixtures are tracked in git; a missing one is a broken checkout).
+
+ASSESSED, DOCUMENTED AS DESIGNED (not code changes):
+
+- **Electrical equivalence / off-center termination.** Java's contact rule
+  requires a trace endpoint to EQUAL the drill center; Rust accepts any
+  endpoint inside the pad. Physically (and for KiCad, the SES consumer)
+  overlapping copper in a pad IS connected, and Java-strict equality would
+  report imported KiCad wiring as open (imported wires legitimately end
+  off-center: 115 of 1318 trace ends on interf_u, 128 of 4052 on Issue187).
+  Router-created off-center terminations are nearly eliminated by
+  `pin_exit_corner` + endpoint-preserving pull-tight (J2: 1 of 102 ends).
+  Residual exposure: Java freerouting reloading a Rust SES may see those few
+  ends as opens. Revisit only with a center-snapping insert correction.
+- **Imported-wiring violations** (Issue093: 130, Issue187: 670) are
+  Java-faithful: the clearance matrix rounds odd rules up to even
+  (2541 → 2542) exactly like Java's `ClearanceMatrix`, so KiCad wiring at
+  exactly the file minimum measures one unit short in BOTH implementations.
+  The repair pass may spend leftover `-tl` budget attempting (and rolling
+  back) a rip-reroute of such nets; the exit code honestly reports 3.
+
+Fleet A/B (this round vs 42e79887, from scratch `--strip-wiring`, tl=60):
+J2 0→0 unrouted (22→19 vias), wavefolder 0→0 (15→5 vias), ecc83 0→0,
+rpi_splitter 0→0, NormalPuzzle 0→0, pic_programmer 110/111→110/111
+(identical failing net; its exit corridor genuinely lacks the 280.2 µm
+class clearance), 8088sbc 102/104→102/104, interf_u 163/173→166/173
+(+3 nets), display 29/30→28/30 (−1). No systematic regression; the "score
+unrouted" number is NOT comparable across the boundary because scoring now
+counts airlines, not nets. The five capacity-overflow boards route without
+panics (10 s smoke: smoothieboard 102/245, bm06 21/38, bm11 18/35,
+Issue730-bm11 18/35, RoyalBlue54L 54/95 — budget-bound, not crash-bound).
 
 ## OPEN ITEMS (reconciled 2026-07-15, iter 190)
 
