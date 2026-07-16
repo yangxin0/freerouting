@@ -13,10 +13,13 @@ should pick up the first unchecked item below.
 > netless copper / matrix order / hole-clearance labels / unit-independent
 > tolerance; KiCad/rules/SES unit handling) and a second round fixed the
 > KiCad duplicate-default round-trip and the optimizer's local-DRC/metric
-> parity. But several findings remain OPEN — see the itemized "Second-round
-> audit" section for the honest list (J2 routing-quality gap, image keepouts,
-> named-rule grammar, same-net/conduction DRC, single-thread optimizer path).
-> Do not read the historical sections as current truth.
+> parity. A third and fourth round then closed the rest of the audit's
+> functional findings: image keepouts, net-class SMD clearance, DRC same-net /
+> conduction, the single-thread optimizer, J2 routing completeness (now 24/24),
+> and the named-clearance-class grammar. What remains OPEN is narrower — see the
+> "Second-round audit" section: router PERFORMANCE vs Java (not correctness),
+> and two non-clearance features (named via-rule registry, autoroute
+> `layer_rule`). Do not read the historical sections as current truth.
 
 ## Status (as of iteration 118)
 
@@ -167,7 +170,7 @@ Open, with rationale:
   default (vs Java disabled) are deliberate deviations, not alignment.
 - **Multithreaded board clones** — parity with Java (`deepCopy` per task).
 
-Full test count: 228 passing, 0 ignored (`j2_routes_fully_like_java` now passes:
+Full test count: 229 passing, 0 ignored (`j2_routes_fully_like_java` passes:
 J2 routes 24/24). `cargo fmt --check` and `cargo clippy -D warnings` both pass.
 No fleet completion regression across J2, pic_programmer, wavefolder, display,
 8088sbc, ecc83.
@@ -204,6 +207,21 @@ remaining items:
   the tight smd class for plain nets. Pins/planes resolve from
   `default_item_clearance_classes`. Small grammar wins: `smd-smd` hyphen
   spelling and `smd_to_turn_gap` are now handled.
+- **Named-clearance grammar (#2, Part B).** The general typed-pair system is
+  ported (Java `Structure.set_clearance_rule`/`append_clearance_class`):
+  `(clear V (type A_B))` resolves item-class (pin/via/smd/area) and arbitrary
+  named classes, creating them on demand (copying the default row), with
+  `wire`→default, item classes wired into the default net class, and the
+  `create_default_clearance_classes` behavior on any `wire_*` pair. Also:
+  net-class `(clearance_class NAME)` references, per-pin `(pin N
+  (clearance_class NAME))` overrides in placement, and keepout
+  `(clearance_class NAME)`. `_same_net` multi-underscore pairs are skipped
+  (as in Java). Verified against the Issue187 fixture (imports clean) plus a
+  synthetic unit test. NOT included (separate, non-clearance features):
+  `(via_rule NAME)` net-class references + standalone via-rule declarations
+  (via SELECTION), and structure `layer_rule` (autoroute preferred-direction
+  and per-layer trace costs). Image-keepout `(clearance_class NAME)` is also
+  still defaulted (structure keepouts are handled).
 - **DRC same-net / conduction parity (#5).** Same-net drill pairs are checked
   as obstacles (Java `Via`/`Pin.is_obstacle`), exempting the connection case
   (an overlapping via-on-pad); conduction areas flagged `isObstacle` in KiCad
@@ -234,12 +252,14 @@ KNOWN OPEN GAPS (not yet fixed) — do NOT claim these are done:
    fully, but the multi-pass ripup loop is much slower than Java's push-and-
    shove — seconds vs sub-second on a small board. A real optimization target
    (door generation / shove efficiency in dense pin fields), not a bug.
-2. **Named-rule clearance grammar (finding #2, Part B).** The general
-   named-clearance-class system — `(clearance_class NAME)`/`(via_rule NAME)`
-   net-class references, per-pin `(clearance_class …)` overrides in
-   placement, class-scoped `layer_rule`, and arbitrary `NAME1_NAME2` /
-   `class_class` clearance pairs — is a large feature (a named class + via-rule
-   registry) and remains unported. Part A above is the natural foundation.
+2. **Named via-rule registry and autoroute `layer_rule` (from finding #2,
+   Part B).** The clearance grammar is now ported (see RESOLVED above), but two
+   adjacent, non-clearance pieces remain: `(via_rule NAME)` net-class
+   references + standalone `(via_rule NAME (via …))` declarations (via
+   selection — Rust still builds via rules only from `(circuit (use_via …))`),
+   and structure/net-class `layer_rule` (autoroute preferred direction and
+   per-layer trace costs, plus per-layer clearance). These are their own
+   features, not clearance-class work.
 
 ## OPEN ITEMS (reconciled 2026-07-15, iter 190)
 

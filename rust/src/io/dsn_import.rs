@@ -32,6 +32,45 @@ fn err(message: impl Into<String>) -> ImportError {
     ImportError(message.into())
 }
 
+/// Resolves a DSN clearance-class name to a clearance-matrix class index,
+/// creating the class on demand (Java `Structure.append_clearance_class` /
+/// `Network.get_clearance_class`). `wire` and `default` map to the default
+/// class; a newly created class copies the default row (`append_class`), and
+/// the standard item names via/pin/smd/area additionally point the default net
+/// class's per-item clearance classes at the new class.
+fn resolve_clearance_class(rules: &mut BoardRules, name: &str) -> usize {
+    let lname = name.to_ascii_lowercase();
+    match lname.as_str() {
+        "wire" | "default" => return BoardRules::default_clearance_class(),
+        "null" => return BoardRules::clearance_class_none(),
+        _ => {}
+    }
+    if let Some(idx) = rules.clearance_matrix.get_no(name) {
+        return idx;
+    }
+    rules.clearance_matrix.append_class(name);
+    let idx = rules
+        .clearance_matrix
+        .get_no(name)
+        .unwrap_or_else(BoardRules::default_clearance_class);
+    let item = match lname.as_str() {
+        "via" => Some(crate::rules::ItemClass::Via),
+        "pin" => Some(crate::rules::ItemClass::Pin),
+        "smd" => Some(crate::rules::ItemClass::Smd),
+        "area" => Some(crate::rules::ItemClass::Area),
+        _ => None,
+    };
+    if let Some(ic) = item {
+        let default_nc = rules.get_default_net_class();
+        rules
+            .net_classes
+            .get_mut(default_nc)
+            .default_item_clearance_classes
+            .set(ic, idx);
+    }
+    idx
+}
+
 struct ImagePin {
     padstack_name: String,
     pin_name: String,
@@ -143,55 +182,74 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
         .and_then(|w| w.arg_f64())
         .map(&scale)
         .unwrap_or(250);
-    // clearance classes: "null" (0), "default" (1), "smd" (2); typed
-    // clearance rules like (clearance 50 (type smd_smd)) refine pairs
-    let mut clearance_matrix =
+    // clearance classes: base "null" (0), "default" (1), "smd" (2). Typed
+    // clearance rules `(clear V (type A_B))` then refine or create per-item and
+    // named clearance classes once the rules exist.
+    let clearance_matrix =
         ClearanceMatrix::new(layer_structure.clone(), &["null", "default", "smd"]);
-    clearance_matrix.set_default_value(default_clearance);
-    // `(clearance V (type smd_to_turn_gap))` sets the pin-edge-to-turn distance;
-    // captured here and applied after the rules are built.
-    let mut pin_edge_to_turn_dist: Option<f64> = None;
+    let mut rules = BoardRules::new(layer_structure.clone(), clearance_matrix);
+    rules.clearance_matrix.set_default_value(default_clearance);
+    let default_nc = rules.get_default_net_class();
+    // The default net class keeps SMD pads on the tight smd class (2), so plain
+    // (unclassed) nets' smd pads stay at the smd clearance. Classed nets that
+    // carry a clearance rule override this via set_all below. append_net_class
+    // inherits these, so this must run before any class is appended.
+    rules
+        .net_classes
+        .get_mut(default_nc)
+        .default_item_clearance_classes
+        .set(crate::rules::ItemClass::Smd, 2);
+
+    // typed clearance rules `(clear V (type A_B))` (Java Structure.set_clearance_rule):
+    // A and B resolve to clearance-matrix classes — "wire"/"default" map to the
+    // default class, the item classes via/pin/smd/area also point the default
+    // net class's item clearance classes at their class, any other name is
+    // created on demand. `smd_to_turn_gap` sets the pin-edge-to-turn distance;
+    // pairs with more than one '_' (e.g. *_same_net) are left unhandled, as in
+    // Java. Hyphen spellings (`smd-smd`) are normalized to underscore.
     if let Some(rule) = structure.child("rule") {
-        // both `(clearance ...)` and its alias `(clear ...)`
-        let typed = rule.children("clearance").chain(rule.children("clear"));
-        for clearance_node in typed {
+        // if any wire pair appears, pre-create the four default item classes
+        // (Java create_default_clearance_classes)
+        let has_wire_pair = rule
+            .children("clearance")
+            .chain(rule.children("clear"))
+            .filter_map(|c| c.child("type").and_then(|t| t.arg()))
+            .any(|k| {
+                let k = k.to_ascii_lowercase();
+                k.starts_with("wire_") || k.ends_with("_wire")
+            });
+        if has_wire_pair {
+            for name in ["via", "smd", "pin", "area"] {
+                resolve_clearance_class(&mut rules, name);
+            }
+        }
+        for clearance_node in rule.children("clearance").chain(rule.children("clear")) {
             let Some(value) = clearance_node.arg_f64().map(&scale) else {
                 continue;
             };
             let Some(kind) = clearance_node.child("type").and_then(|t| t.arg()) else {
                 continue; // the untyped default, already applied
             };
-            // KiCad emits hyphen spellings (`smd-smd`); normalize to underscore.
             let kind = kind.to_ascii_lowercase().replace('-', "_");
             if kind == "smd_to_turn_gap" {
-                pin_edge_to_turn_dist = Some(value as f64);
+                rules.set_pin_edge_to_turn_dist(value as f64);
                 continue;
             }
-            let pair = match kind.as_str() {
-                "smd_smd" => Some((2, 2)),
-                "default_smd" | "smd_default" => Some((1, 2)),
-                _ => None,
+            let Some((a, b)) = kind.split_once('_') else {
+                continue; // a single-token type has no pair to set
             };
-            if let Some((i, j)) = pair {
-                clearance_matrix.set_value_on_all_layers(i, j, value);
-                clearance_matrix.set_value_on_all_layers(j, i, value);
+            if b.contains('_') {
+                continue; // more than one '_' (same_net variants) — not ported
             }
+            let ci = resolve_clearance_class(&mut rules, a);
+            let cj = resolve_clearance_class(&mut rules, b);
+            rules
+                .clearance_matrix
+                .set_value_on_all_layers(ci, cj, value);
+            rules
+                .clearance_matrix
+                .set_value_on_all_layers(cj, ci, value);
         }
-    }
-    let mut rules = BoardRules::new(layer_structure.clone(), clearance_matrix);
-    let default_nc = rules.get_default_net_class();
-    // The default net class keeps SMD pads on the tight smd class (2), so plain
-    // (unclassed) nets' smd pads stay at the smd clearance. Classed nets that
-    // carry a clearance rule override this via set_all below (Java: the default
-    // net class's Smd item class is the smd clearance class; a classed net's is
-    // its own). append_net_class inherits these, so this must run first.
-    rules
-        .net_classes
-        .get_mut(default_nc)
-        .default_item_clearance_classes
-        .set(crate::rules::ItemClass::Smd, 2);
-    if let Some(dist) = pin_edge_to_turn_dist {
-        rules.set_pin_edge_to_turn_dist(dist);
     }
     rules.set_default_trace_half_widths((default_width / 2).max(1));
 
@@ -374,7 +432,14 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                         idx
                     }
                 }
-                None => BoardRules::default_clearance_class(),
+                // no inline clearance rule: honor a `(clearance_class NAME)`
+                // reference (Java insert_net_class) — the trace clearance class
+                // becomes the named class; item classes stay at their defaults
+                // (no set_all), unlike an inline clearance rule.
+                None => match class_node.child("clearance_class").and_then(|c| c.arg()) {
+                    Some(name) => resolve_clearance_class(&mut rules, name),
+                    None => BoardRules::default_clearance_class(),
+                },
             };
             let via_padstack = class_node
                 .child("circuit")
@@ -519,9 +584,16 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 Vec::new(),
             );
             let name = node.arg().unwrap_or(kind);
+            // a keepout may name its clearance class (Java uses the keepout's
+            // clearance class); default when absent.
+            let keepout_cl = node
+                .child("clearance_class")
+                .and_then(|c| c.arg())
+                .map(|n| resolve_clearance_class(&mut board.rules, n))
+                .unwrap_or_else(BoardRules::default_clearance_class);
             for layer in layers {
                 let mut item = crate::board::Item::new_obstacle_area(
-                    crate::board::ItemBase::new(0, Vec::new(), 1),
+                    crate::board::ItemBase::new(0, Vec::new(), keepout_cl),
                     area.clone(),
                     layer,
                     name,
@@ -611,6 +683,17 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                         0
                     }
                 };
+                // per-pin clearance-class overrides in the placement
+                // (Java Network.insert_component: `(pin N (clearance_class NAME))`)
+                let mut pin_overrides: HashMap<&str, &str> = HashMap::new();
+                for pin_node in place.children("pin") {
+                    if let (Some(pin_name), Some(cc)) = (
+                        pin_node.arg(),
+                        pin_node.child("clearance_class").and_then(|c| c.arg()),
+                    ) {
+                        pin_overrides.insert(pin_name, cc);
+                    }
+                }
                 for pin in image_pins {
                     let Some(&padstack_no) = padstack_nos.get(&pin.padstack_name) else {
                         continue;
@@ -688,20 +771,27 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                         // single-layer padstacks are SMD pads
                         .map(|p| (p.attach_allowed, p.from_layer() == p.to_layer()))
                         .unwrap_or((false, false));
-                    // resolve the pin's clearance class from its net class's
-                    // per-item-type defaults (Java Network.insert_component:
-                    // smd pad -> Smd item class, through-pin -> Pin), so a
-                    // classed net's smd pad uses the class clearance while a
-                    // plain net's smd pad stays on the tight smd class (#2)
-                    let item_class = if smd {
-                        crate::rules::ItemClass::Smd
-                    } else {
-                        crate::rules::ItemClass::Pin
+                    // resolve the pin's clearance class. A per-pin
+                    // `(clearance_class NAME)` override in the placement wins
+                    // (Java Network.insert_component: pin_info.clearance_class);
+                    // otherwise use the net class's per-item-type default
+                    // (smd pad -> Smd, through-pin -> Pin), so a classed net's
+                    // smd pad uses the class clearance while a plain net's smd
+                    // pad stays on the tight smd class (#2).
+                    let clearance_class = match pin_overrides.get(pin.pin_name.as_str()) {
+                        Some(cc) => resolve_clearance_class(&mut board.rules, cc),
+                        None => {
+                            let item_class = if smd {
+                                crate::rules::ItemClass::Smd
+                            } else {
+                                crate::rules::ItemClass::Pin
+                            };
+                            board.rules.item_clearance_class_for(
+                                net_nos.first().copied().unwrap_or(0),
+                                item_class,
+                            )
+                        }
                     };
-                    let clearance_class = board.rules.item_clearance_class_for(
-                        net_nos.first().copied().unwrap_or(0),
-                        item_class,
-                    );
                     let id = board.insert_via(
                         padstack_no,
                         center,
@@ -1245,6 +1335,72 @@ mod tests {
             2000,
             "classed net's smd pad uses the class clearance"
         );
+    }
+
+    #[test]
+    fn named_and_item_clearance_classes() {
+        // Part B: typed item-class pairs (pin_via, via_via), wire->default,
+        // arbitrary named classes (power), a net-class `(clearance_class NAME)`
+        // reference, and a per-pin `(clearance_class NAME)` override.
+        let dsn = r#"(pcb "b.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb 0 0 200000 200000))
+    (rule
+      (clearance 200)
+      (clearance 300 (type pin_via))
+      (clearance 400 (type via_via))
+      (clearance 500 (type wire_via))
+      (clearance 600 (type power_default))
+    )
+  )
+  (placement
+    (component "FP"
+      (place C1 50000 50000 front 0 (pin 1 (clearance_class power)))
+    )
+  )
+  (library
+    (image "FP" (pin "Pad" 1 0 0))
+    (padstack "Pad" (shape (rect F.Cu -500 -500 500 500)) (attach off))
+  )
+  (network
+    (net "N1" (pins C1-1))
+    (class hv "N1" (clearance_class power) (rule (width 250)))
+  )
+)"#;
+        let board = import_dsn(dsn).expect("import");
+        let m = &board.rules.clearance_matrix;
+        let via = m.get_no("via").expect("via class created");
+        let pin = m
+            .get_no("pin")
+            .expect("pin class created (wire pair triggers it)");
+        let power = m.get_no("power").expect("named power class created");
+        // item-class pairs
+        assert_eq!(m.get_value(pin, via, 0, false), 3000, "pin_via");
+        assert_eq!(m.get_value(via, via, 0, false), 4000, "via_via");
+        // wire maps to the default class (1)
+        assert_eq!(
+            m.get_value(1, via, 0, false),
+            5000,
+            "wire_via -> default_via"
+        );
+        // arbitrary named class paired with default
+        assert_eq!(m.get_value(power, 1, 0, false), 6000, "power_default");
+        // net class hv references the named `power` class for its traces
+        let n1 = board.rules.nets.get_by_name("N1")[0].net_number;
+        assert_eq!(board.rules.get_trace_clearance_class(n1), power);
+        // the per-pin override puts pin C1-1 on the `power` class
+        use crate::board::ItemKind;
+        let pin_cc = board
+            .items()
+            .find_map(|(_, it)| match &it.kind {
+                ItemKind::Via(_) if it.base.component_no != 0 => Some(it.base.clearance_class),
+                _ => None,
+            })
+            .expect("pad");
+        assert_eq!(pin_cc, power, "per-pin (clearance_class power) override");
     }
 
     #[test]
