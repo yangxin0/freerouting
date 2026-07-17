@@ -148,6 +148,15 @@ fn parse_expr(bytes: &[u8], pos: &mut usize) -> Result<SExpr, ParseError> {
                     items.push(parse_quoted(bytes, pos, q)?);
                 }
             }
+            // Composite clearance types glue quoted names with a bare
+            // separator: `(type "A B"_"C D")` (Java writes `_`, scans
+            // with `-`). The separator must be its own token or the
+            // following quote would be swallowed into an atom, fragmenting
+            // the quoted name at its spaces (Issue029's class names).
+            s @ (b'_' | b'-') if bytes.get(*pos + 1) == Some(&b'"') => {
+                items.push(SExpr::Atom((s as char).to_string()));
+                *pos += 1;
+            }
             _ => {
                 items.push(parse_atom(bytes, pos));
             }
@@ -176,10 +185,14 @@ fn parse_quoted(bytes: &[u8], pos: &mut usize, quote: u8) -> Result<SExpr, Parse
 
 fn parse_atom(bytes: &[u8], pos: &mut usize) -> SExpr {
     let start = *pos;
+    // an atom also ends at a double quote: composite clearance types glue
+    // a bare name to a quoted one (`default_"1A EXTERNAL 1oz"`), and
+    // swallowing the quote fragmented the quoted name at its spaces
     while *pos < bytes.len()
         && !bytes[*pos].is_ascii_whitespace()
         && bytes[*pos] != b'('
         && bytes[*pos] != b')'
+        && bytes[*pos] != b'"'
     {
         *pos += 1;
     }

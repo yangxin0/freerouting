@@ -157,7 +157,16 @@ pub(crate) fn item_is_clear(board: &BasicBoard, id: ItemId) -> bool {
             let Some(other) = board.get_item(oid) else {
                 continue;
             };
-            let Some(cl) = required_clearance(board, item, other, *l) else {
+            // evaluate the pair in the ORDER the final DRC will: its outer
+            // item is the lower id, and the matrix lookup is
+            // (higher, lower) — for an asymmetric matrix a fixed
+            // (item, other) order could accept what check_board rejects
+            let required = if oid < id {
+                required_clearance(board, other, item, *l)
+            } else {
+                required_clearance(board, item, other, *l)
+            };
+            let Some(cl) = required else {
                 continue;
             };
             let check = s.offset(cl);

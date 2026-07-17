@@ -670,6 +670,58 @@ ASSESSED (model limits, unchanged):
   CONNECTED_TO_PLANE early-out) is structural in this port because
   conduction areas are connectable net items in the connectivity model.
 
+## Eighth-round remediation (2026-07-17) — verification findings
+
+An independent verification of HEAD 59239a47 produced 9 findings (6 P1,
+3 P2). All fixed. 265 tests, fmt/clippy clean; fixture baselines
+unchanged (J2 24/24 at 999.98, Issue093 @130, Issue413/143 clean,
+Issue721 @139; Issue029 A/B-verified byte-identical routing pre/post at
+tl=30: 146/163, score 769.62).
+
+FIXED:
+
+- **Classes resolve by NAME** (Java `Network.insert_net_class`): only
+  the class actually named "default" is the default descriptor. The
+  former any-memberless-class-is-default rule folded Issue029's 11
+  classes into 5, with default inheriting the LAST empty class's
+  clearance/via settings. Test: all 11 Issue029 classes survive.
+- **Composite clearance types parse whole.** Three real-world gluings —
+  `"A B"_"C D"`, `default_"A B"`, `"A B"_bare` — tokenize correctly:
+  the s-expression reader emits a bare `_`/`-` before a quote as its own
+  token and ends atoms at a double quote; the typed-clearance applier
+  handles the 3-token and both stripped 2-token forms. Underscored
+  names inside quotes (MIN_EXTERN_188A) stay whole; no fragment classes
+  appear; `.rules` write→read→write is line-stable (was 281→251).
+- **`.rules` global clearance**: `(clear ...)` alias accepted, and the
+  untyped value applies to EVERY non-null class pair
+  (`set_default_value`, Java `Structure.set_clearance_rule`) instead of
+  only cell (1,1); typed rules refine it afterwards, in Java's order.
+- **`.rules` top-level padstacks import** through the extracted
+  `read_padstack_scope` (shared with the DSN library reader) when the
+  design lacks them, so dependent via declarations bind; via
+  declarations that cannot bind no longer inflate the applied count.
+- **Outline prefers the SIGNAL boundary** (Java-generated designs put
+  the pcb bounding rectangle first, the real outline after it) and
+  stores the boundary's resolved clearance-class value instead of
+  blindly the default. Issue413 exports its signal polygon extents.
+- **Zone clearance classes round-trip**: the writer emits the class
+  VALUE next to its name; a matrix-only class (absent from the reader's
+  net-class-derived columns) is recreated on reload with that value
+  against every class — Issue143-style boundary zones keep their class.
+- **Plane routing dest set**: for a pour-carrying net the destination
+  set is EVERY other component (Java `route_dest_set = unconnected
+  set`), so the pour is always among the targets regardless of which
+  pair was closest; the pair is oriented pad→pour, replacing the
+  round-7 swap that pointed the wrong way.
+- **Optimizer DRC pre-check matches the final DRC's matrix order**:
+  `item_is_clear` evaluates each pair as (lower-id, higher-id) exactly
+  like `check_board`'s outer/inner order, so an asymmetric matrix can
+  no longer make the acceptance gate and the final DRC disagree.
+- **JSON `\u` escapes**: UTF-16 surrogate pairs combine into one scalar
+  (each half decoded separately corrupted emoji into two '?'); lone
+  surrogates and unknown escapes are rejected as malformed instead of
+  being passed through.
+
 ## OPEN ITEMS (reconciled 2026-07-15, iter 190)
 
 The early-phase checklists above are ticked with pointers; these are

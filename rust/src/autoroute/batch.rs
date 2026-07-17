@@ -197,35 +197,32 @@ pub fn route_net_with_store(
         let Some((start, dest)) = best else {
             break;
         };
-        // Java plane routing (BatchAutorouter.autoroute_item): for a net
-        // carrying a copper pour, the search STARTS from the plane-connected
-        // side (route_start_set = the connected set) and grows toward the
-        // unconnected items — orient the pair so the pour-side component is
-        // the start when exactly one side already reaches the plane
+        // Java plane routing (BatchAutorouter.autoroute_item): an item of a
+        // plane net routes from its OWN component toward EVERYTHING not yet
+        // connected to it (route_start_set = connected set, route_dest_set =
+        // unconnected set) — the pour is therefore ALWAYS among the targets,
+        // whichever pair happened to be closest. Orient the chosen pair so
+        // the non-pour side is the start, and widen the dest set below.
         let contains_plane = board
             .rules
             .nets
             .get_by_no(net_no)
             .is_some_and(|n| n.contains_plane());
-        let (start, dest) = if contains_plane {
-            let side_has_plane = |id: ItemId| {
-                components
-                    .iter()
-                    .find(|c| c.contains(&id))
-                    .is_some_and(|c| {
-                        c.iter().any(|&i| {
-                            matches!(
-                                board.get_item(i).map(|it| &it.kind),
-                                Some(crate::board::ItemKind::ObstacleArea(a)) if a.is_conduction
-                            )
-                        })
+        let side_has_plane = |id: ItemId| {
+            components
+                .iter()
+                .find(|c| c.contains(&id))
+                .is_some_and(|c| {
+                    c.iter().any(|&i| {
+                        matches!(
+                            board.get_item(i).map(|it| &it.kind),
+                            Some(crate::board::ItemKind::ObstacleArea(a)) if a.is_conduction
+                        )
                     })
-            };
-            if !side_has_plane(start) && side_has_plane(dest) {
-                (dest, start)
-            } else {
-                (start, dest)
-            }
+                })
+        };
+        let (start, dest) = if contains_plane && side_has_plane(start) && !side_has_plane(dest) {
+            (dest, start)
         } else {
             (start, dest)
         };
@@ -239,16 +236,27 @@ pub fn route_net_with_store(
             .find(|c| c.contains(&start))
             .cloned()
             .unwrap_or_default();
-        let dest_component = components
-            .iter()
-            .find(|c| c.contains(&dest))
-            .map(|c| {
-                c.iter()
-                    .copied()
-                    .filter(|id| board.get_item(*id).is_some_and(|it| it.is_connectable()))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let dest_component = if contains_plane {
+            // plane nets: every OTHER component is a target (the pour
+            // included), like Java's unconnected set
+            components
+                .iter()
+                .filter(|c| !c.contains(&start))
+                .flat_map(|c| c.iter().copied())
+                .filter(|id| board.get_item(*id).is_some_and(|it| it.is_connectable()))
+                .collect::<Vec<_>>()
+        } else {
+            components
+                .iter()
+                .find(|c| c.contains(&dest))
+                .map(|c| {
+                    c.iter()
+                        .copied()
+                        .filter(|id| board.get_item(*id).is_some_and(|it| it.is_connectable()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
         if crate::debug::maze() {
             eprintln!(
                 "ROUTE net {net_no}: connect item {start:?} -> item {dest:?} \

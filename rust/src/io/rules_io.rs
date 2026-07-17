@@ -253,24 +253,55 @@ pub fn read_rules(board: &mut BasicBoard, content: &str) -> Result<usize, String
             board.rules.set_default_trace_half_widths(scale(w) / 2);
             applied += 1;
         }
-        // the UNTYPED clearance is the global default
+        // the UNTYPED clearance is the global default: Java
+        // (Structure.set_clearance_rule with no type pairs) applies it to
+        // EVERY non-null class pair, and `(clear ...)` is the standard
+        // alias — updating only cell (1,1) left every other pair stale
         if let Some(c) = rule
             .children("clearance")
+            .chain(rule.children("clear"))
             .find(|c| c.child("type").is_none())
             .and_then(|n| n.arg())
             .and_then(|v| v.parse::<f64>().ok())
         {
-            let layers = board.rules.clearance_matrix.get_layer_count();
-            for layer in 0..layers {
-                board
-                    .rules
-                    .clearance_matrix
-                    .set_value(1, 1, layer, scale(c));
-            }
+            board.rules.clearance_matrix.set_default_value(scale(c));
             applied += 1;
         }
         // typed clearances: class pairs, smd_to_turn_gap, *_same_net
+        // (applied AFTER the untyped default so they refine it, like the
+        // in-order Java reader)
         applied += apply_typed_clearances(&mut board.rules, rule, &scale);
+    }
+    // top-level (padstack ...) scopes: names already in the design
+    // resolve to it; a padstack the design LACKS is imported from the
+    // sidecar (skipping it silently dropped every dependent via
+    // declaration)
+    {
+        let BasicBoard {
+            ref mut padstacks,
+            ref layer_structure,
+            ..
+        } = *board;
+        for ps_node in root.children("padstack") {
+            let Some(name) = ps_node.arg() else {
+                continue;
+            };
+            let exists = (1..=padstacks.count())
+                .any(|no| padstacks.get_by_no(no).is_some_and(|p| p.name == name));
+            if exists {
+                continue;
+            }
+            if crate::io::dsn_import::read_padstack_scope(
+                padstacks,
+                layer_structure,
+                &scale,
+                ps_node,
+            )
+            .is_some()
+            {
+                applied += 1;
+            }
+        }
     }
     // split the board borrows: the appliers mutate rules while reading
     // the padstack library and layer structure
@@ -298,8 +329,11 @@ pub fn read_rules(board: &mut BasicBoard, content: &str) -> Result<usize, String
         default_clearance,
     };
     for via_node in root.children("via") {
-        apply_via_declaration(rules, &ctx, via_node);
-        applied += 1;
+        // only count declarations that actually bind (unknown padstacks
+        // must not inflate the applied count)
+        if apply_via_declaration(rules, &ctx, via_node) {
+            applied += 1;
+        }
     }
     for rule_node in root.children("via_rule") {
         apply_via_rule_declaration(rules, &mut via_rule_ids, rule_node);
@@ -523,6 +557,117 @@ mod tests {
         assert_eq!(
             board2.rules.get_trace_angle_restriction(),
             AngleRestriction::NinetyDegree
+        );
+    }
+
+    #[test]
+    fn issue029_rules_classes_padstacks_and_composite_types_apply() {
+        // the review repros: 11 classes must stay 11 (empty NAMED classes
+        // must not fold into default), the sidecar's 6 padstacks must
+        // import, and quoted composite type pairs ("A B"_"C D") must
+        // resolve as two names, not fragment at their spaces
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let dsn = std::fs::read_to_string(format!("{root}/fixtures/Issue029-hw48na.dsn"))
+            .expect("fixture missing from checkout");
+        let rules_text = std::fs::read_to_string(format!("{root}/fixtures/Issue029-hw48na.rules"))
+            .expect("fixture missing from checkout");
+        let mut board = import_dsn(&dsn).expect("import");
+        read_rules(&mut board, &rules_text).expect("read rules");
+        // every named class exists (the file declares 11 incl. default)
+        for name in [
+            "kicad_default",
+            "1A EXTERNAL 1oz",
+            "2.5A EXTERNAL",
+            "3,5A EXT HIGH VOLTAGE",
+            "3.5A EXTERNAL 1oz",
+            "5A EXTERNAL 1oz",
+            "CUSTOM",
+            "CUSTOM 0.6",
+            "MIN_EXTERN_188A",
+            "MIN_EXTERN_241A",
+        ] {
+            assert!(
+                board.rules.net_classes.get_by_name(name).is_some(),
+                "class {name:?} must survive (empty classes folded into default before)"
+            );
+        }
+        assert_eq!(
+            board.rules.net_classes.get(0).get_name(),
+            "default",
+            "the default class keeps its identity"
+        );
+        // the sidecar's padstacks import (the design lacks some of them)
+        for ps in [
+            "Via[0-1]_1000:400_um",
+            "Via[0-1]_1092.2:685.8_um",
+            "Via[0-1]_1541.78:1186.18_um",
+            "Via[0-1]_600:300_um",
+        ] {
+            assert!(
+                (1..=board.padstacks.count())
+                    .any(|no| board.padstacks.get_by_no(no).is_some_and(|p| p.name == ps)),
+                "padstack {ps:?} must resolve or import from the sidecar"
+            );
+        }
+        // a quoted composite pair applies at its value: (clear 190.6
+        // (type "1A EXTERNAL 1oz"_"2.5A EXTERNAL")) at resolution 10
+        let a = board
+            .rules
+            .clearance_matrix
+            .get_no("1A EXTERNAL 1oz")
+            .expect("composite class A");
+        let b = board
+            .rules
+            .clearance_matrix
+            .get_no("2.5A EXTERNAL")
+            .expect("composite class B");
+        assert_eq!(
+            board.rules.clearance_matrix.get_value(a, b, 0, false),
+            1906,
+            "the composite pair's clearance must apply un-fragmented"
+        );
+        // MIN_EXTERN names contain underscores: they must not split
+        assert!(
+            board
+                .rules
+                .clearance_matrix
+                .get_no("MIN_EXTERN_188A")
+                .is_some(),
+            "underscored names inside quotes must stay whole"
+        );
+        assert!(
+            board.rules.clearance_matrix.get_no("min").is_none(),
+            "no fragment classes may appear"
+        );
+
+        // write → re-read must be stable (the malformed output shrank on
+        // every pass before)
+        let out1 = write_rules(&board, "issue029");
+        let mut board2 = import_dsn(&dsn).expect("import");
+        read_rules(&mut board2, &out1).expect("re-read own output");
+        let out2 = write_rules(&board2, "issue029");
+        assert_eq!(
+            out1.lines().count(),
+            out2.lines().count(),
+            "write→read→write must be stable"
+        );
+    }
+
+    #[test]
+    fn global_clear_alias_applies_to_every_class_pair() {
+        // Java's untyped clearance applies to EVERY non-null pair and
+        // `clear` is the standard alias — only cell (1,1) was updated
+        let mut board = import_dsn(MINI).expect("import");
+        // give the board a second real class so the every-pair claim is
+        // observable
+        board.rules.clearance_matrix.append_class("extra");
+        let extra = board.rules.clearance_matrix.get_no("extra").unwrap();
+        read_rules(&mut board, "(rules PCB mini (rule (clear 999.0)))").expect("read");
+        assert_eq!(board.rules.clearance_matrix.get_value(1, 1, 0, false), 9990);
+        assert_eq!(
+            board.rules.clearance_matrix.get_value(extra, 1, 0, false),
+            9990,
+            "the untyped clearance must reach every class pair"
         );
     }
 

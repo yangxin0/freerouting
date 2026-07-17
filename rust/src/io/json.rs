@@ -166,18 +166,50 @@ impl<'a> Parser<'a> {
                         Some(b'b') => out.push('\u{0008}'),
                         Some(b'f') => out.push('\u{000c}'),
                         Some(b'u') => {
-                            // \uXXXX
-                            let hex = self
-                                .bytes
-                                .get(self.pos + 1..self.pos + 5)
-                                .and_then(|h| std::str::from_utf8(h).ok())
-                                .and_then(|h| u32::from_str_radix(h, 16).ok())
-                                .and_then(char::from_u32)
-                                .unwrap_or('?');
-                            out.push(hex);
+                            // \uXXXX, with UTF-16 surrogate PAIRS combined
+                            // (decoding each half separately corrupted
+                            // e.g. 😀 into two '?')
+                            let read_hex = |bytes: &[u8], pos: usize| -> Option<u32> {
+                                bytes
+                                    .get(pos..pos + 4)
+                                    .and_then(|h| std::str::from_utf8(h).ok())
+                                    .and_then(|h| u32::from_str_radix(h, 16).ok())
+                            };
+                            let Some(unit) = read_hex(self.bytes, self.pos + 1) else {
+                                return Err(format!("bad \\u escape at byte {}", self.pos));
+                            };
                             self.pos += 4;
+                            let scalar = if (0xd800..0xdc00).contains(&unit) {
+                                // high surrogate: the low half must follow
+                                if self.bytes.get(self.pos + 1) != Some(&b'\\')
+                                    || self.bytes.get(self.pos + 2) != Some(&b'u')
+                                {
+                                    return Err("lone high surrogate in \\u escape".into());
+                                }
+                                let Some(low) = read_hex(self.bytes, self.pos + 3) else {
+                                    return Err(format!("bad \\u escape at byte {}", self.pos));
+                                };
+                                if !(0xdc00..0xe000).contains(&low) {
+                                    return Err("invalid low surrogate in \\u escape".into());
+                                }
+                                self.pos += 6;
+                                0x10000 + ((unit - 0xd800) << 10) + (low - 0xdc00)
+                            } else if (0xdc00..0xe000).contains(&unit) {
+                                return Err("lone low surrogate in \\u escape".into());
+                            } else {
+                                unit
+                            };
+                            match char::from_u32(scalar) {
+                                Some(c) => out.push(c),
+                                None => return Err("invalid \\u scalar".into()),
+                            }
                         }
-                        Some(c) => out.push(c as char),
+                        // only the RFC 8259 escapes are valid; anything
+                        // else is a malformed document, not an identity
+                        Some(c @ (b'"' | b'\\' | b'/')) => out.push(c as char),
+                        Some(c) => {
+                            return Err(format!("unknown escape '\\{}'", c as char));
+                        }
                         None => return Err("unterminated escape".into()),
                     }
                     self.pos += 1;
@@ -267,5 +299,31 @@ mod tests {
         assert_eq!(v.str_or("unit", ""), "MM");
         assert_eq!(v.num("n"), -150.0);
         assert_eq!(v.arr("list").len(), 3);
+    }
+
+    #[test]
+    fn string_escapes_follow_rfc_8259() {
+        // all simple escapes decode; \uXXXX surrogate PAIRS combine into
+        // one scalar (each half decoded separately became '?'); unknown
+        // escapes and lone surrogates are rejected, not passed through
+        let v = parse_json(r#"{"s": "a\r\b\f\n\t\"\\\/z"}"#).unwrap();
+        assert_eq!(
+            v.str_or("s", ""),
+            "a\r\u{8}\u{c}\n\t\"\\/z",
+            "simple escapes"
+        );
+        let v = parse_json("{\"s\": \"\\uD83D\\uDE00\"}").unwrap();
+        assert_eq!(v.str_or("s", ""), "😀", "surrogate pair combines");
+        let v = parse_json("{\"s\": \"\\u0041\"}").unwrap();
+        assert_eq!(v.str_or("s", ""), "A");
+        assert!(parse_json(r#"{"s": "\q"}"#).is_err(), "unknown escape");
+        assert!(
+            parse_json(r#"{"s": "\uD83D x"}"#).is_err(),
+            "lone high surrogate"
+        );
+        assert!(
+            parse_json(r#"{"s": "\uDE00"}"#).is_err(),
+            "lone low surrogate"
+        );
     }
 }

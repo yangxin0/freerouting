@@ -85,6 +85,52 @@ fn resolve_clearance_class(rules: &mut BoardRules, name: &str) -> usize {
     idx
 }
 
+/// Parses one `(padstack NAME (shape ...) ... [(attach off)])` scope into
+/// `padstacks`, returning the new padstack number (Java
+/// `Library.read_padstack_scope`). Shared by the DSN importer and the
+/// standard `.rules` reader — a rules sidecar may declare via padstacks
+/// the design library lacks.
+pub(crate) fn read_padstack_scope(
+    padstacks: &mut Padstacks,
+    layer_structure: &LayerStructure,
+    scale: &dyn Fn(f64) -> i32,
+    padstack_node: &SExpr,
+) -> Option<usize> {
+    let name = padstack_node.arg()?;
+    let layer_count = layer_structure.layer_count();
+    let mut shapes: Vec<Option<TileShape>> = vec![None; layer_count];
+    for shape_node in padstack_node.children("shape") {
+        let Some(inner) = shape_node.as_list().and_then(|l| l.get(1)) else {
+            continue;
+        };
+        let Some((shape, layer_name)) = read_pad_shape(inner, scale) else {
+            continue;
+        };
+        if let Some(l) = layer_structure.get_no(&layer_name) {
+            shapes[l] = Some(shape);
+        } else if layer_name.eq_ignore_ascii_case("signal") {
+            // wildcard: the shape exists on every signal layer
+            // (Java LayerStructure SIGNAL_LAYER handling)
+            for (l, present) in shapes.iter_mut().enumerate() {
+                if layer_structure.arr[l].is_signal {
+                    *present = Some(shape.clone());
+                }
+            }
+        } else if layer_name.eq_ignore_ascii_case("all") || layer_name.eq_ignore_ascii_case("pcb") {
+            for present in shapes.iter_mut() {
+                *present = Some(shape.clone());
+            }
+        }
+    }
+    // Java read_padstack_scope: attach defaults ON when the `(attach ...)`
+    // scope is omitted; only an explicit `off` forbids attaching to SMD pads.
+    let attach = padstack_node
+        .child("attach")
+        .and_then(|a| a.arg())
+        .is_none_or(|v| !v.eq_ignore_ascii_case("off"));
+    Some(padstacks.add(name, shapes, attach, false))
+}
+
 /// Shared context for applying network-scope rule nodes — `(via ...)`,
 /// `(via_rule ...)` and `(class ...)` — used by the DSN importer and by
 /// the standard `.rules` reader, which carries the same grammar (Java
@@ -97,18 +143,19 @@ pub(crate) struct NetworkScopeCtx<'a> {
 }
 
 /// Applies one `(via NAME PADSTACK [CLEARANCE_CLASS] [attach])`
-/// declaration (Java `Network.read_via_info`).
+/// declaration (Java `Network.read_via_info`). Returns false when the
+/// referenced padstack is unknown (the declaration cannot bind).
 pub(crate) fn apply_via_declaration(
     rules: &mut BoardRules,
     ctx: &NetworkScopeCtx,
     via_node: &SExpr,
-) {
+) -> bool {
     let mut a = via_node.args();
     let (Some(name), Some(padstack_name)) = (a.next(), a.next()) else {
-        return;
+        return false;
     };
     let Some(&padstack_no) = ctx.padstack_nos.get(padstack_name) else {
-        return;
+        return false;
     };
     let rest: Vec<&str> = a.collect();
     let attach = rest.iter().any(|t| t.eq_ignore_ascii_case("attach"));
@@ -129,6 +176,7 @@ pub(crate) fn apply_via_declaration(
             .via_infos
             .add(crate::rules::ViaInfo::new(name, padstack_no, cl, attach));
     }
+    true
 }
 
 /// Applies one `(via_rule NAME VIA...)` declaration (Java
@@ -203,10 +251,19 @@ pub(crate) fn apply_typed_clearances(
             .map(|t| t.to_ascii_lowercase().replace('-', "_"))
             .collect();
         let mut pairs: Vec<(String, String)> = Vec::new();
-        if tokens.len() == 2 {
-            // one pair split across two tokens (Java's quoted-pair form)
+        if tokens.len() == 3 && tokens[1] == "_" {
+            // `(type "A B"_"C D")`: quoted names glued by a bare separator
+            // (its own token, see the parser) — the pair is exactly the two
+            // quoted names, underscores INSIDE them preserved
+            // (MIN_EXTERN_188A must not split at its first underscore)
+            pairs.push((tokens[0].clone(), tokens[2].clone()));
+        } else if tokens.len() == 2 {
+            // one pair split across two tokens: `"A" "B"`, `"A"_bare`
+            // (leading separator on the second) or `bare_"B"` (trailing
+            // separator on the first)
+            let a = tokens[0].strip_suffix('_').unwrap_or(&tokens[0]);
             let b = tokens[1].strip_prefix('_').unwrap_or(&tokens[1]);
-            pairs.push((tokens[0].clone(), b.to_string()));
+            pairs.push((a.to_string(), b.to_string()));
         } else {
             for kind in &tokens {
                 if kind == "smd_to_turn_gap" {
@@ -273,9 +330,17 @@ pub(crate) fn apply_class_scope(
         return;
     };
     let member_nets: Vec<&str> = class_args.collect();
-    // a class listing no nets describes the default rules (original DSN
-    // semantics, and the `.rules` writer emits the default class that way)
-    let is_default_descriptor = member_nets.is_empty();
+    // classes resolve BY NAME (Java Network.insert_net_class): only the
+    // class actually named "default" describes the default rules. The
+    // former any-empty-class-is-default rule let every memberless named
+    // class overwrite the default class — Issue029's 11 classes folded
+    // into 5, with default inheriting the LAST empty class's settings.
+    let default_idx = rules.get_default_net_class();
+    let class_idx = rules
+        .net_classes
+        .get_by_name(class_name)
+        .unwrap_or_else(|| rules.append_net_class(class_name));
+    let is_default_descriptor = class_idx == default_idx;
     let half_width = class_node
         .child("rule")
         .and_then(|r| r.child("width"))
@@ -346,17 +411,6 @@ pub(crate) fn apply_class_scope(
         .and_then(|c| c.child("use_via"))
         .and_then(|u| u.arg())
         .and_then(|name| ctx.padstack_nos.get(name).copied());
-    // the class listing no nets describes the default rules; a named
-    // class updates its existing class or is appended inheriting the
-    // default net class's item classes (so an smd pad on a rule-less
-    // class stays on the smd class).
-    let class_idx = if is_default_descriptor {
-        rules.get_default_net_class()
-    } else if let Some(existing) = rules.net_classes.get_by_name(class_name) {
-        existing
-    } else {
-        rules.append_net_class(class_name)
-    };
     {
         let class = rules.net_classes.get_mut(class_idx);
         if let Some(hw) = half_width {
@@ -716,43 +770,11 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     let mut images: HashMap<String, Image> = HashMap::new();
     for library in pcb.children("library") {
         for padstack_node in library.children("padstack") {
-            let name = padstack_node
-                .arg()
-                .ok_or_else(|| err("padstack without name"))?;
-            let mut shapes: Vec<Option<TileShape>> = vec![None; layer_count];
-            for shape_node in padstack_node.children("shape") {
-                let Some(inner) = shape_node.as_list().and_then(|l| l.get(1)) else {
-                    continue;
-                };
-                let Some((shape, layer_name)) = read_pad_shape(inner, &scale) else {
-                    continue;
-                };
-                if let Some(l) = layer_no(&layer_name) {
-                    shapes[l] = Some(shape);
-                } else if layer_name.eq_ignore_ascii_case("signal") {
-                    // wildcard: the shape exists on every signal layer
-                    // (Java LayerStructure SIGNAL_LAYER handling)
-                    for (l, present) in shapes.iter_mut().enumerate() {
-                        if layer_structure.arr[l].is_signal {
-                            *present = Some(shape.clone());
-                        }
-                    }
-                } else if layer_name.eq_ignore_ascii_case("all")
-                    || layer_name.eq_ignore_ascii_case("pcb")
-                {
-                    for present in shapes.iter_mut() {
-                        *present = Some(shape.clone());
-                    }
-                }
-            }
-            // Java read_padstack_scope: attach defaults ON when the
-            // `(attach ...)` scope is omitted; only an explicit `off`
-            // forbids attaching to SMD pads.
-            let attach = padstack_node
-                .child("attach")
-                .and_then(|a| a.arg())
-                .is_none_or(|v| !v.eq_ignore_ascii_case("off"));
-            let no = padstacks.add(name, shapes, attach, false);
+            let Some(no) =
+                read_padstack_scope(&mut padstacks, &layer_structure, &scale, padstack_node)
+            else {
+                return Err(err("padstack without name"));
+            };
             padstack_nos.insert(padstacks.get_by_no(no).unwrap().name.clone(), no);
         }
         for image_node in library.children("image") {
@@ -1011,29 +1033,49 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     // EVERY (boundary ...) node is read — a design may declare separate
     // pcb- and signal-boundaries — and a boundary may name its clearance
     // class ((clearance_class ...)); polygons read like paths.
+    //
+    // The PRESERVED outline prefers the SIGNAL boundary: Java-generated
+    // designs put the pcb bounding rectangle first and the actual outline
+    // polygon (layer token "signal") after it, so first-wins exported the
+    // bounding rectangle. The stored clearance is the boundary's resolved
+    // class value, not blindly the default.
+    let mut outline_from_signal = false;
     for boundary in structure.children("boundary") {
         let boundary_cl = boundary
             .child("clearance_class")
             .and_then(|c| c.arg())
             .map(|n| resolve_clearance_class(&mut board.rules, n))
             .unwrap_or_else(BoardRules::default_clearance_class);
+        let boundary_cl_value = board
+            .rules
+            .clearance_matrix
+            .get_value(boundary_cl, BoardRules::default_clearance_class(), 0, false)
+            .max(0);
+        let keep_outline = |board: &mut BasicBoard,
+                            corners: &[IntPoint],
+                            layer_token: &str,
+                            from_signal: &mut bool| {
+            let is_signal = layer_token.eq_ignore_ascii_case("signal");
+            if corners.len() >= 3 && (board.outline.is_none() || (is_signal && !*from_signal)) {
+                board.outline = Some((corners.to_vec(), boundary_cl_value));
+                *from_signal = is_signal;
+            }
+        };
         if let Some(path) = boundary.child("path").or_else(|| boundary.child("polygon")) {
+            let layer_token = path.arg().unwrap_or("").to_string();
             let coords: Vec<f64> = path.args().skip(2).filter_map(|a| a.parse().ok()).collect();
             let corners: Vec<IntPoint> = coords
                 .chunks_exact(2)
                 .map(|c| IntPoint::new(scale(c[0]), scale(c[1])))
                 .collect();
-            // the FIRST boundary is the board outline: preserve it for
-            // lossless export (strips alone cannot reproduce the polygon)
-            if board.outline.is_none() && corners.len() >= 3 {
-                board.outline = Some((corners.clone(), default_clearance));
-            }
+            keep_outline(&mut board, &corners, &layer_token, &mut outline_from_signal);
             insert_boundary_keepouts(&mut board, &corners, default_clearance / 2, boundary_cl);
         } else if let Some(rect) = boundary.child("rect") {
             // (boundary (rect <layer> x1 y1 x2 y2)): a rectangular outline.
             // Previously only `path` boundaries produced keepouts, so
             // rect-outline boards were unconfined and routes could escape the
             // board. Java reads `rect` as a first-class boundary shape.
+            let layer_token = rect.arg().unwrap_or("").to_string();
             let coords: Vec<f64> = rect.args().skip(1).filter_map(|a| a.parse().ok()).collect();
             if coords.len() >= 4 {
                 let (xmin, xmax) = (coords[0].min(coords[2]), coords[0].max(coords[2]));
@@ -1044,9 +1086,7 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                     IntPoint::new(scale(xmax), scale(ymax)),
                     IntPoint::new(scale(xmin), scale(ymax)),
                 ];
-                if board.outline.is_none() {
-                    board.outline = Some((corners.clone(), default_clearance));
-                }
+                keep_outline(&mut board, &corners, &layer_token, &mut outline_from_signal);
                 insert_boundary_keepouts(&mut board, &corners, default_clearance / 2, boundary_cl);
             }
         }
@@ -1578,6 +1618,26 @@ fn read_pad_shape(node: &SExpr, scale: &dyn Fn(f64) -> i32) -> Option<(TileShape
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outline_prefers_the_signal_boundary() {
+        // Issue413 declares the pcb bounding RECTANGLE first and the real
+        // signal outline polygon second; first-wins exported the rectangle
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let dsn = std::fs::read_to_string(format!("{root}/fixtures/Issue413-test.dsn"))
+            .expect("fixture missing from checkout");
+        let board = import_dsn(&dsn).expect("import");
+        let (outline, _) = board.outline.clone().expect("outline preserved");
+        // the signal outline spans exactly 0..600000 (x600000 file units,
+        // scaled x10); the pcb bounding rect is 200 units larger all around
+        let min_x = outline.iter().map(|p| p.x).min().unwrap();
+        let max_x = outline.iter().map(|p| p.x).max().unwrap();
+        assert_eq!(
+            (min_x, max_x),
+            (0, 6_000_000),
+            "the SIGNAL boundary must be preserved, not the pcb rectangle"
+        );
+    }
 
     #[test]
     fn uppercase_wiring_is_stripped_and_not_duplicated_on_export() {

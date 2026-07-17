@@ -337,18 +337,24 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
         if corners.len() < 3 {
             continue;
         }
-        // the zone's clearance class BY NAME, so a custom keepout class
-        // does not reload as the default
+        // the zone's clearance class BY NAME plus its VALUE (mm): the
+        // reader's matrix only contains net-class-derived classes, so a
+        // matrix-only class (e.g. a boundary keepout's) must be
+        // re-creatable from the zone itself or it reloads as default
         let cl_name = matrix
             .get_name(item.base.clearance_class)
             .unwrap_or("default");
+        let cl_value = matrix
+            .get_value(item.base.clearance_class, 1, a.layer, false)
+            .max(0) as f64;
         zones.push(format!(
-            "    {{\"netName\": \"{}\", \"layerIndex\": {}, \"isObstacle\": {}, \"viaOnly\": {}, \"clearanceClass\": \"{}\", \"polygon\": [{}]}}",
+            "    {{\"netName\": \"{}\", \"layerIndex\": {}, \"isObstacle\": {}, \"viaOnly\": {}, \"clearanceClass\": \"{}\", \"clearanceValue\": {:.6}, \"polygon\": [{}]}}",
             esc(&net_name),
             a.layer,
             a.is_obstacle,
             a.via_only,
             esc(cl_name),
+            mm(cl_value),
             corners.join(", ")
         ));
     }
@@ -565,6 +571,63 @@ mod tests {
             keepouts.iter().filter(|v| **v).count(),
             1,
             "the via-only flag must survive"
+        );
+    }
+
+    #[test]
+    fn custom_zone_clearance_class_survives_round_trip() {
+        // a keepout on a MATRIX-ONLY class (not among the net classes):
+        // the reader used to fail the name lookup and fall back to default
+        use crate::geometry::planar::{IntPoint, PolygonShape, PolylineArea};
+        let mut board = import_dsn(MINI_DSN).expect("import");
+        board.rules.clearance_matrix.append_class("strict_ko");
+        let strict = board.rules.clearance_matrix.get_no("strict_ko").unwrap();
+        let n = board.rules.clearance_matrix.get_class_count();
+        for j in 1..n {
+            board
+                .rules
+                .clearance_matrix
+                .set_value_on_all_layers(strict, j, 7000);
+            board
+                .rules
+                .clearance_matrix
+                .set_value_on_all_layers(j, strict, 7000);
+        }
+        let area = PolylineArea::new(
+            PolygonShape::from_int_points(&[
+                IntPoint::new(10000, 10000),
+                IntPoint::new(20000, 10000),
+                IntPoint::new(20000, 20000),
+                IntPoint::new(10000, 20000),
+            ]),
+            Vec::new(),
+        );
+        board.insert_area(area, 0, "ko", Vec::new(), strict, false);
+        let json = export_kicad_json(&board);
+        let board2 = import_kicad_json(&json).expect("re-import");
+        let ko2_cl = board2
+            .items()
+            .find_map(|(_, it)| match &it.kind {
+                ItemKind::ObstacleArea(a) if !a.is_conduction && a.name != "boundary" => {
+                    Some(it.base.clearance_class)
+                }
+                _ => None,
+            })
+            .expect("keepout reloaded");
+        let strict2 = board2
+            .rules
+            .clearance_matrix
+            .get_no("strict_ko")
+            .expect("the matrix-only class must be recreated on reload");
+        assert_eq!(ko2_cl, strict2, "the keepout keeps its class");
+        // the class VALUE survives (mm-rounded within a board unit)
+        let v = board2
+            .rules
+            .clearance_matrix
+            .get_value(strict2, 1, 0, false);
+        assert!(
+            (v - 7000).abs() <= 1,
+            "the class clearance value must survive the round trip (got {v})"
         );
     }
 

@@ -385,14 +385,40 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
         }
         let name = zone.str_or("netName", "");
         let net = net_no_by_name(&board.rules, &name);
-        // an explicit clearance class (by matrix name) wins; the net's
-        // class is the fallback — custom keepout classes used to reload
-        // as the default
-        let zone_cl = zone
-            .get("clearanceClass")
-            .and_then(|v| v.as_str())
-            .and_then(|n| board.rules.clearance_matrix.get_no(n))
-            .unwrap_or_else(|| board.rules.get_trace_clearance_class(net.unwrap_or(0)));
+        // an explicit clearance class (by matrix name) wins; a class the
+        // matrix lacks (matrix-only classes are not among the net-class
+        // columns) is CREATED from the zone's own clearanceValue — the
+        // failed lookup used to silently fall back to default (Issue143's
+        // boundary zones)
+        let zone_cl = match zone.get("clearanceClass").and_then(|v| v.as_str()) {
+            Some(cl_name) => match board.rules.clearance_matrix.get_no(cl_name) {
+                Some(idx) => idx,
+                None => {
+                    board.rules.clearance_matrix.append_class(cl_name);
+                    let idx = board
+                        .rules
+                        .clearance_matrix
+                        .get_no(cl_name)
+                        .unwrap_or_else(BoardRules::default_clearance_class);
+                    let v = to_int(zone.num("clearanceValue"));
+                    if v > 0 && idx > 1 {
+                        let count = board.rules.clearance_matrix.get_class_count();
+                        for j in 1..count {
+                            board
+                                .rules
+                                .clearance_matrix
+                                .set_value_on_all_layers(idx, j, v);
+                            board
+                                .rules
+                                .clearance_matrix
+                                .set_value_on_all_layers(j, idx, v);
+                        }
+                    }
+                    idx
+                }
+            },
+            None => board.rules.get_trace_clearance_class(net.unwrap_or(0)),
+        };
         let area = PolylineArea::new(PolygonShape::new(corners), Vec::new());
         let id = board.insert_area(
             area,
