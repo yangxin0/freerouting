@@ -122,10 +122,16 @@ fn complete_net_set(board: &BasicBoard) -> Vec<bool> {
 }
 
 fn rip_net_route_items(board: &mut BasicBoard, net_no: i32) {
+    // never seed the optimizer with ShoveFixed copper (Java
+    // BatchOptimizer checks is_shove_fixed): ripping it here would
+    // recreate a protected route as plain Unfixed items at best
     let ids: Vec<ItemId> = board
         .items()
         .filter(|(_, it)| {
-            it.base.component_no == 0 && it.base.contains_net(net_no) && it.is_routable()
+            it.base.component_no == 0
+                && it.base.contains_net(net_no)
+                && it.is_routable()
+                && !it.base.is_shove_fixed()
         })
         .map(|(id, _)| *id)
         .collect();

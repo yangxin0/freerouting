@@ -135,10 +135,9 @@ fn job_json(job: &RoutingJob) -> String {
         job.id,
         job.state.as_str(),
         job.score.map_or("null".to_string(), |s| format!("{s:.2}")),
-        job.error.as_ref().map_or("null".to_string(), |e| format!(
-            "\"{}\"",
-            e.replace('"', "'")
-        )),
+        job.error
+            .as_ref()
+            .map_or("null".to_string(), |e| json_string(e)),
     )
 }
 
@@ -255,11 +254,17 @@ fn route(
             let Ok(id) = id.parse::<u64>() else {
                 return not_found;
             };
-            let map = jobs.lock().unwrap();
-            let Some(job) = map.get(&id) else {
+            let mut map = jobs.lock().unwrap();
+            let Some(job) = map.get_mut(&id) else {
                 return not_found;
             };
             job.cancel.store(true, Ordering::SeqCst);
+            // a job with no worker (never started) has nobody to observe
+            // the flag: transition it to CANCELLED directly, or it would
+            // stay QUEUED/READY_TO_START forever
+            if matches!(job.state, JobState::Queued | JobState::ReadyToStart) {
+                job.state = JobState::Cancelled;
+            }
             ("200 OK", "application/json", job_json(job))
         }
         ("GET", ["v1", "jobs", id]) => {
@@ -368,7 +373,8 @@ fn json_string(s: &str) -> String {
 fn mcp_result(id: &crate::io::json::Json, result: &str) -> String {
     let id_s = match id {
         crate::io::json::Json::Num(n) => format!("{n}"),
-        crate::io::json::Json::Str(s) => format!("\"{s}\""),
+        // a valid string id may contain quotes/backslashes: escape it
+        crate::io::json::Json::Str(s) => json_string(s),
         _ => "null".to_string(),
     };
     format!("{{\"jsonrpc\": \"2.0\", \"id\": {id_s}, \"result\": {result}}}")
@@ -377,11 +383,12 @@ fn mcp_result(id: &crate::io::json::Json, result: &str) -> String {
 fn mcp_error(id: crate::io::json::Json, code: i32, message: &str) -> String {
     let id_s = match id {
         crate::io::json::Json::Num(n) => format!("{n}"),
-        crate::io::json::Json::Str(s) => format!("\"{s}\""),
+        crate::io::json::Json::Str(s) => json_string(&s),
         _ => "null".to_string(),
     };
     format!(
-        "{{\"jsonrpc\": \"2.0\", \"id\": {id_s}, \"error\": {{\"code\": {code}, \"message\": \"{message}\"}}}}"
+        "{{\"jsonrpc\": \"2.0\", \"id\": {id_s}, \"error\": {{\"code\": {code}, \"message\": {}}}}}",
+        json_string(message)
     )
 }
 

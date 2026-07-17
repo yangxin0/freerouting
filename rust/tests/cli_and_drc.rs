@@ -429,11 +429,13 @@ fn full_board_drc_over_a_routed_board() {
     assert!(json.contains("schemas.kicad.org/drc.v1.json"));
 
     // Off-center termination regression bound (the assessed electrical-
-    // equivalence gap): after the CLI's own post-processing, at most a
-    // couple of route-trace endpoints may land inside a same-net drill pad
-    // OFF its connection point (J2 measures 1 of ~100 ends; pin_exit_corner
-    // and endpoint-preserving pull-tight keep it there). A regression in
-    // those mechanisms shows up as a jump in this count.
+    // equivalence gap): after the CLI's own post-processing, a route-trace
+    // endpoint inside a same-net drill pad OFF its connection point risks
+    // reading as an open on a strict Java reload — UNLESS the trace's
+    // other end IS the drill center (a center-anchored stub: the center
+    // connection exists, the off-center end is a harmless dangling tail).
+    // pin_exit_corner and endpoint-preserving pull-tight keep the risky
+    // class at zero on J2; a regression shows up as a jump here.
     freerouting::autoroute::combine_all_traces(&mut board);
     freerouting::autoroute::pull_tight_all(&mut board, 3);
     let mut off_center = 0usize;
@@ -445,9 +447,11 @@ fn full_board_drc_over_a_routed_board() {
         if item.base.component_no != 0 {
             continue;
         }
-        for corner in [t.first_corner(), t.last_corner()] {
+        let ends = [t.first_corner(), t.last_corner()];
+        for (i, corner) in ends.iter().enumerate() {
             total_ends += 1;
             let cp = corner.to_float().round();
+            let other_end = ends[1 - i].to_float().round();
             for (_, other) in board.items() {
                 let freerouting::board::ItemKind::Via(v) = &other.kind else {
                     continue;
@@ -458,7 +462,7 @@ fn full_board_drc_over_a_routed_board() {
                 let in_pad = other.tile_shapes(&board.padstacks).iter().any(|(s, l)| {
                     *l == t.layer && s.contains(&freerouting::geometry::planar::Point::Int(cp))
                 });
-                if in_pad {
+                if in_pad && other_end != v.center {
                     off_center += 1;
                     break;
                 }
@@ -468,7 +472,8 @@ fn full_board_drc_over_a_routed_board() {
     assert!(total_ends > 0, "routed board has trace ends to audit");
     assert!(
         off_center <= 2,
-        "off-center pad terminations regressed: {off_center} of {total_ends} trace ends"
+        "off-center pad terminations regressed: {off_center} of {total_ends} trace ends \
+         risk reading as opens on a strict (Java) reload"
     );
 }
 

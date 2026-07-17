@@ -401,7 +401,16 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
         if net.is_some() && zone.get("isObstacle") == Some(&Json::Bool(true)) {
             board.set_area_is_obstacle(id, true);
         }
-        board.set_fixed_state(id, FixedState::UserFixed);
+        // a netless zone is a keepout: honor the via-only flag and fix it
+        // like the DSN importer's keepouts
+        if net.is_none() {
+            if zone.get("viaOnly") == Some(&Json::Bool(true)) {
+                board.set_area_via_only(id, true);
+            }
+            board.set_fixed_state(id, FixedState::SystemFixed);
+        } else {
+            board.set_fixed_state(id, FixedState::UserFixed);
+        }
     }
 
     // pre-routed traces and vias, user-fixed like Java
@@ -460,11 +469,19 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
             .map(|p| point(Some(p)))
             .collect();
         if corners.len() >= 3 {
-            let default_clearance = board.rules.clearance_matrix.get_value(1, 1, 0, false);
+            // the document's own outline clearance decides the strip width;
+            // the board default is only the fallback (ignoring the supplied
+            // value silently changed Issue649's 0.5 mm to 0.2)
+            let supplied = outline.num("clearance");
+            let strip = if supplied > 0.0 {
+                to_int(supplied)
+            } else {
+                board.rules.clearance_matrix.get_value(1, 1, 0, false)
+            };
             crate::io::dsn_import::insert_boundary_keepouts(
                 &mut board,
                 &corners,
-                (default_clearance / 2).max(1),
+                (strip / 2).max(1),
                 crate::rules::BoardRules::default_clearance_class(),
             );
         }

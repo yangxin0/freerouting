@@ -93,6 +93,7 @@ pub fn move_via(
     // always center-exact; here a contact endpoint may sit anywhere inside
     // the pad, so the bridge departs from the ACTUAL trace endpoint.
     let mut bridge_contacts: Vec<(IntPoint, usize, i32, usize)> = Vec::new(); // (endpoint, layer, half_width, clearance_class)
+    let mut contact_traces: Vec<(ItemId, i32)> = Vec::new(); // (trace, shared net)
     for contact in board.get_normal_contacts(via_id) {
         if let Some(c) = board.get_item(contact) {
             if let ItemKind::PolylineTrace(t) = &c.kind {
@@ -106,6 +107,9 @@ pub fn move_via(
                     last.round()
                 };
                 bridge_contacts.push((endpoint, t.layer, t.half_width, c.base.clearance_class));
+                if let Some(&net) = c.base.net_nos.iter().find(|n| net_nos.contains(n)) {
+                    contact_traces.push((contact, net));
+                }
             }
         }
     }
@@ -207,6 +211,20 @@ pub fn move_via(
         .iter()
         .all(|&id| crate::drc::item_is_clear(board, id))
     {
+        board.undo();
+        return false;
+    }
+    // connectivity gate: every previously-contacting trace must still
+    // REACH the moved via. The bridge departs from the ROUNDED endpoint,
+    // but trace contacts require exact endpoint equality — a rational
+    // endpoint (polyline_path wiring, pull-tight output) rounds to a
+    // nearby point and the bridge then misses the trace electrically
+    // while staying DRC-clean. A trace id that no longer exists was
+    // split at the new center; its pieces end at the via by construction.
+    let connected = contact_traces.iter().all(|&(tid, net)| {
+        board.get_item(tid).is_none() || board.get_connected_set(tid, net).contains(&new_via)
+    });
+    if !connected {
         board.undo();
         return false;
     }
@@ -362,6 +380,38 @@ mod tests {
             reaches_via,
             "moved via must stay connected to its trace via the bridge"
         );
+    }
+
+    #[test]
+    fn move_is_refused_when_a_rational_endpoint_would_disconnect() {
+        use crate::geometry::planar::Line;
+        let mut board = test_board();
+        let via = board.insert_via(1, IntPoint::new(0, 0), vec![2], 1, false);
+        // A trace whose via-end corner is RATIONAL: line0 (y = x/3) meets
+        // line1 (through (6000,0) and (5823,1)) at exactly (100, 100/3) —
+        // inside the ±400 pad but not at its center. The bridge would
+        // depart from the ROUNDED (100, 33) and miss the trace endpoint,
+        // leaving the trace electrically dangling with zero DRC violations.
+        let polyline = Polyline::from_lines(vec![
+            Line::new(IntPoint::new(0, 0), IntPoint::new(3, 1)),
+            Line::new(IntPoint::new(6000, 0), IntPoint::new(5823, 1)),
+            Line::new(IntPoint::new(5000, 0), IntPoint::new(7000, 0)),
+        ]);
+        let trace = board.insert_trace(polyline, 0, 100, vec![2], 1);
+        assert!(
+            board.get_normal_contacts(via).contains(&trace),
+            "the rational endpoint inside the pad must register as contact"
+        );
+        let moved = move_via(&mut board, via, IntPoint::new(0, -3000), 2);
+        assert!(
+            !moved,
+            "a move whose bridge cannot reach the rational trace endpoint must be refused"
+        );
+        assert!(
+            board.get_item(via).is_some(),
+            "the refused move leaves the board unchanged"
+        );
+        assert!(board.net_is_completely_connected(2));
     }
 
     #[test]

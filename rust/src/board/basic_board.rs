@@ -994,6 +994,24 @@ impl BasicBoard {
         self.log_metadata_change(id);
     }
 
+    /// Marks an obstacle area as constraining via placement only (DSN
+    /// `(via_keepout ...)`, Java `ViaObstacleArea`). Undoable.
+    pub fn set_area_via_only(&mut self, id: ItemId, via_only: bool) {
+        let changes = self.get_item(id).is_some_and(
+            |i| matches!(&i.kind, ItemKind::ObstacleArea(a) if a.via_only != via_only),
+        );
+        if !changes {
+            return;
+        }
+        self.item_list.save_for_undo(&id);
+        if let Some(item) = self.item_list.get_mut(&id) {
+            if let ItemKind::ObstacleArea(a) = &mut item.kind {
+                a.via_only = via_only;
+            }
+        }
+        self.log_metadata_change(id);
+    }
+
     /// Splits a trace of `net_no` on `layer` whose center line passes
     /// through `point` (not at an endpoint) into two traces meeting there,
     /// so that contacts at the junction register

@@ -157,8 +157,10 @@ pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
 /// parser); an unbalanced span leaves the document untouched. The keyword
 /// match is case-insensitive like the parser (`%ignorecase` in Java's
 /// scanner): a case-sensitive find left `(WIRING ...)` in the retained
-/// source, and the exporter then emitted the copper twice.
-fn strip_wiring(content: &str) -> String {
+/// source, and the exporter then emitted the copper twice. Public: the
+/// CLI's `--strip-wiring` uses the same logic instead of its own
+/// (formerly exact, case-sensitive) substring truncation.
+pub fn strip_wiring(content: &str) -> String {
     let mut out = String::with_capacity(content.len());
     // ASCII lowercasing is byte-length preserving, so positions found in
     // `lower` index `content` directly
@@ -1626,6 +1628,25 @@ mod tests {
         assert_eq!(
             wire_cc, special,
             "the wire must carry its explicit clearance class"
+        );
+        // and the override must survive an export→import round trip: the
+        // exporter writes (clearance_class ...) back (dropping it collapsed
+        // the wire to the net's default class)
+        let out = crate::io::dsn_export::export_dsn(&board).expect("export");
+        let board2 = import_dsn(&out).expect("re-import");
+        let special2 = board2
+            .rules
+            .clearance_matrix
+            .get_no("special")
+            .expect("class recreated on re-import");
+        let wire_cc2 = board2
+            .items()
+            .find(|(_, it)| matches!(it.kind, crate::board::ItemKind::PolylineTrace(_)))
+            .map(|(_, it)| it.base.clearance_class)
+            .expect("wire re-imported");
+        assert_eq!(
+            wire_cc2, special2,
+            "the explicit clearance class must survive the DSN round trip"
         );
     }
 

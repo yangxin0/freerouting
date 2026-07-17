@@ -246,8 +246,14 @@ fn find_connection_inner(
     let mut via_ok: crate::datastructures::FxHashMap<(i32, i32), bool> =
         crate::datastructures::FxHashMap::default();
 
-    // create and seed the start rooms on every layer of the start item
+    // create and seed the start rooms on every ACTIVE layer of the start
+    // item — the net-class use_layer gate applies to planar routing too,
+    // not only to drills: two pads on a disabled layer must not route
+    // entirely on that layer (Java AutorouteControl.layer_active)
     for (start_shape, layer) in &start_shapes {
+        if !board.rules.is_active_routing_layer(request.net_no, *layer) {
+            continue;
+        }
         let start_center = start_shape.centre_of_gravity();
         let mut start_rooms = engine.create_start_rooms(board, start_shape.clone(), *layer);
         if start_rooms.is_empty() {
@@ -341,6 +347,9 @@ fn find_connection_inner(
         };
         let dest_shapes: Vec<(TileShape, usize)> = dest.tile_shapes(&board.padstacks).to_vec();
         for (dest_shape, layer) in dest_shapes {
+            if !board.rules.is_active_routing_layer(request.net_no, layer) {
+                continue;
+            }
             engine.create_start_rooms(board, dest_shape, layer);
         }
     }
@@ -913,7 +922,24 @@ pub fn maze_route_with_ripup(
         request.clearance_class,
         request.trace_half_width,
     );
-    maze_route_with_engine(board, &mut engine, request)
+    if !allow_ripup {
+        return maze_route_with_engine(board, &mut engine, request);
+    }
+    // with ripup, victims are shoved/removed BEFORE the fallible insertion:
+    // make each connection atomic here so a failed insert never leaves
+    // rips behind (this path builds a fresh engine per call, so the
+    // pop_snapshot epoch bump invalidates no reusable room caches)
+    board.generate_snapshot();
+    match maze_route_with_engine(board, &mut engine, request) {
+        Some(connection) => {
+            board.pop_snapshot();
+            Some(connection)
+        }
+        None => {
+            board.undo();
+            None
+        }
+    }
 }
 
 /// Like [`maze_route_with_ripup`], but reusing a caller-owned engine: the
@@ -1412,7 +1438,11 @@ fn restrict_corners(
     for k in 0..result.corners.len() {
         let (b, lb) = result.corners[k];
         if let Some(&(a, la)) = corners.last().filter(|_| k > 0) {
-            if la == lb && !segment_is_compliant(a, b, restriction) {
+            // The travel a→b always runs on layer `la` — when b is a drill
+            // node (lb != la) the segment is the APPROACH to the via,
+            // emitted on the old layer by the insert. Restricting only
+            // same-layer pairs let noncompliant approach segments through.
+            if !segment_is_compliant(a, b, restriction) {
                 // choose horizontal_first so the extra corner stays in
                 // the segment's room (try true, then false, like Java)
                 let room = result.rooms[k - 1].or(result.rooms[k]);
@@ -1432,7 +1462,10 @@ fn restrict_corners(
                 }
                 let rounded = extra.round().to_float();
                 if rounded != a && rounded != b {
-                    corners.push((rounded, lb));
+                    // the extra corner belongs to the approach segment's
+                    // layer `la`, so the run stays on the old layer until
+                    // the drill point itself
+                    corners.push((rounded, la));
                     rooms.push(result.rooms[k - 1]);
                 }
             }
@@ -1942,6 +1975,46 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn drill_approach_segments_honor_the_angle_restriction() {
+        // the travel to a drill node runs on the OLD layer; restricting
+        // only same-layer corner pairs let noncompliant approaches through
+        let engine = AutorouteEngine::new_with_clearance(1, false, 1, 100);
+        let result = MazeSearchResult {
+            corners: vec![
+                (FloatPoint::new(0.0, 0.0), 0),
+                // drill node: layer changes 0 -> 1, approach (0,0)->(100,37)
+                // is neither axis-parallel nor diagonal
+                (FloatPoint::new(100.0, 37.0), 1),
+                (FloatPoint::new(100.0, 500.0), 1),
+            ],
+            rooms: vec![None, None, None],
+        };
+        let restricted = restrict_corners(
+            &engine,
+            &result,
+            crate::board::AngleRestriction::FortyfiveDegree,
+        );
+        for w in restricted.corners.windows(2) {
+            let ((a, la), (b, _)) = (w[0], w[1]);
+            assert!(
+                segment_is_compliant(a, b, crate::board::AngleRestriction::FortyfiveDegree),
+                "segment {a:?} -> {b:?} on layer {la} violates the restriction"
+            );
+        }
+        // the inserted corner belongs to the approach segment's OLD layer
+        let extra = restricted
+            .corners
+            .iter()
+            .find(|(p, _)| {
+                *p != FloatPoint::new(0.0, 0.0)
+                    && p.y != 500.0
+                    && p.round() != IntPoint::new(100, 37)
+            })
+            .expect("an extra corner must be inserted for the approach");
+        assert_eq!(extra.1, 0, "the extra corner runs on the old layer");
     }
 
     #[test]

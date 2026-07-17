@@ -513,6 +513,87 @@ ASSESSED, DOCUMENTED AS DESIGNED:
   batch-routed items are UNFIXED in both implementations. The flag is
   parsed, persisted and round-tripped.
 
+## Sixth-round remediation (2026-07-17) — verification findings
+
+An independent verification of HEAD 1667fdeb produced 12 findings (6 P1,
+6 P2). All fixed except the two assessed items at the end. 258 tests,
+fmt/clippy clean; fixture sanity unchanged (J2 24/24 clean at 999.98,
+Issue093 173/173 @130, Issue187 529/529 @670, Issue413/143 clean,
+Issue721 30/30 @139 — J2's via count shifted 19→18 because the drill-
+approach restriction fix legitimately changes route geometry).
+
+FIXED:
+
+- **move_via connectivity gate.** The bridge departs from the ROUNDED
+  trace endpoint while trace contacts require exact equality, so a
+  rational endpoint (polyline_path wiring, pull-tight output) could be
+  left electrically dangling with zero DRC violations. The move now
+  requires every previously-contacting trace to still REACH the new via
+  (`get_connected_set` per recorded contact; ids replaced by the
+  pass-through split are exempt — their pieces end at the via by
+  construction). Regression test constructs an exactly-rational corner
+  (100, 100/3) from line intersections.
+- **Angle restriction at drill transitions.** `restrict_corners`
+  normalized only same-layer corner pairs; the approach segment to a
+  drill node runs on the OLD layer and bypassed it. The compliance check
+  now applies to every consecutive pair, and the inserted extra corner is
+  annotated with the approach's layer so the run stays on the old layer
+  until the drill point.
+- **use_layer for planar routing.** Start rooms and destination room
+  pre-creation now skip inactive net-class layers (the drill gate alone
+  let two pads on a disabled layer route entirely on that layer).
+- **Optimizer/restart/repair never rip ShoveFixed** route items (Java
+  BatchOptimizer skips them as seeds); the FR_LOCK_RESTART experiment
+  releases locks to the PRIOR fixed state instead of Unfixed. Test: a
+  protected dogleg survives an optimizer pass.
+- **KiCad JSON keepouts + outline clearance.** The writer now emits
+  netless keepouts (with a `viaOnly` flag; boundary strips excluded —
+  they ARE the serialized outline) and the real default clearance in the
+  outline; the reader consumes both (keepouts SystemFixed like the DSN
+  importer, via-only honored, supplied outline clearance drives the strip
+  width instead of a hardcoded 0.2).
+- **DSN export preserves wiring-level clearance overrides**: every wire
+  and via now writes `(clearance_class "NAME")`; matrix class names are
+  recreated deterministically on re-import, so an explicit override no
+  longer collapses to the net's default class (round-trip test).
+- **Public one-shot ripup wrapper is atomic**: `maze_route_with_ripup`
+  wraps the rip+insert in a snapshot (this path builds a fresh engine
+  per call, so the pop-epoch costs no reusable room caches); inside the
+  batch, atomicity continues to live in `route_net_with_ripup`'s
+  transaction.
+- **CLI --strip-wiring** uses the importer's balanced, case-insensitive
+  `strip_wiring` (now `pub`) instead of an exact substring truncation.
+- **API**: cancelling a QUEUED/READY_TO_START job transitions it to
+  CANCELLED directly (no worker exists to observe the flag); job errors
+  and MCP string ids/messages go through the shared JSON escaper.
+- **`.rules` per-layer widths and empty masks**: layer-dependent widths
+  persist as per-class `(layer_rule L (rule (width ...)))` and re-read
+  onto their layers; an empty active mask emits `(circuit (use_layer))`
+  and the reader treats PRESENCE of use_layer as the restriction, so
+  no-layer classes no longer reload as all-active.
+- **contains_plane production consumer**: `request_for_net` routes
+  plane-carrying nets at one tenth the via cost (Java
+  `BatchAutorouter.autoroute_item` uses `get_plane_via_costs()`,
+  default 5 vs 50), encouraging short stubs into the pour. Java's other
+  plane behaviors (skip items already connected to a pour; reversed
+  start/dest sets) are covered structurally: conduction areas are
+  connectable net items in this port's connectivity model.
+
+ASSESSED:
+
+- **Off-center in-pad trace ends, reclassified.** The J2 regression bound
+  now distinguishes the two classes: an off-center end whose trace's
+  OTHER end is the pad's drill center is a center-anchored stub — a
+  harmless dangling tail on a strict Java reload (the center connection
+  exists); only an off-center end WITHOUT a center anchor risks reading
+  as an open. J2 measures 4 stubs and ZERO risky ends after the route
+  shift; the test bounds the risky class at ≤ 2. The stubs themselves are
+  kept: cycle removal deliberately protects the sole wire reaching a
+  pin's connection point.
+- **Non-atomic shove residue on the plain (no-ripup) insert path**
+  remains as designed (legal, connected, geometry-only displacement) —
+  see the fifth round.
+
 ## OPEN ITEMS (reconciled 2026-07-15, iter 190)
 
 The early-phase checklists above are ticked with pointers; these are

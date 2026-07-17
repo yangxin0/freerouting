@@ -420,6 +420,16 @@ pub(crate) fn request_for_net(
     // request hardcoded class 1, so nets with a tighter or looser clearance
     // rule were routed and DRC-checked against the wrong spacing.
     let class_clearance = board.rules.get_trace_clearance_class(net_no);
+    // Java plane-net routing (BatchAutorouter.autoroute_item): a net
+    // carrying a copper pour uses get_plane_via_costs() — default 5 vs 50,
+    // one tenth — so the router prefers a short stub dropping into the
+    // plane over long surface traces. This is the contains_plane flag's
+    // production consumer.
+    let contains_plane = board
+        .rules
+        .nets
+        .get_by_no(net_no)
+        .is_some_and(|n| n.contains_plane());
     BatchRequest {
         trace_half_width: if class_half_width > 0 {
             class_half_width
@@ -436,6 +446,11 @@ pub(crate) fn request_for_net(
             .via_padstack_for_net(net_no)
             .unwrap_or(base.via_padstack),
         via_attach_allowed: via_attach_allowed_for_net(board, net_no, base.via_padstack),
+        via_cost: if contains_plane {
+            base.via_cost / 10.0
+        } else {
+            base.via_cost
+        },
         ..*base
     }
 }
@@ -544,6 +559,7 @@ fn repair_violations(
             .filter(|(_, it)| {
                 it.base.component_no == 0
                     && it.is_routable()
+                    && !it.base.is_shove_fixed()
                     && it.base.net_nos.iter().any(|n| nets.contains(n))
             })
             .map(|(id, _)| *id)
@@ -796,10 +812,16 @@ pub fn batch_route_passes_with_time_limit(
         incomplete.rotate_left(rot);
         let complete_before = net_nos.len() - incomplete.len();
         board.generate_snapshot();
+        // ShoveFixed route items survive the restart (Java's optimizer
+        // never seeds with them; deleting them here would recreate the
+        // protected copper Unfixed)
         let to_remove: Vec<ItemId> = board
             .items()
             .filter(|(_, it)| {
-                it.base.component_no == 0 && it.base.net_count() > 0 && it.is_routable()
+                it.base.component_no == 0
+                    && it.base.net_count() > 0
+                    && it.is_routable()
+                    && !it.base.is_shove_fixed()
             })
             .map(|(id, _)| *id)
             .collect();
@@ -826,7 +848,7 @@ pub fn batch_route_passes_with_time_limit(
         // power nets — they route fine first but signals erode their
         // corridors during the rest of the round.
         let lock_restart = std::env::var_os("FR_LOCK_RESTART").is_some();
-        let mut locked: Vec<ItemId> = Vec::new();
+        let mut locked: Vec<(ItemId, crate::board::FixedState)> = Vec::new();
         for &net_no in &order {
             if restart_limit.is_some_and(|t| t.limit_exceeded()) {
                 break;
@@ -839,19 +861,21 @@ pub fn batch_route_passes_with_time_limit(
                 && incomplete.contains(&net_no)
                 && board.net_is_completely_connected(net_no)
             {
-                let ids: Vec<ItemId> = board
+                let ids: Vec<(ItemId, crate::board::FixedState)> = board
                     .items()
                     .filter(|(_, it)| it.base.contains_net(net_no) && it.is_routable())
-                    .map(|(id, _)| *id)
+                    .map(|(id, it)| (*id, it.base.fixed_state))
                     .collect();
-                for id in ids {
+                for (id, prior) in ids {
                     board.set_fixed_state(id, crate::board::FixedState::UserFixed);
-                    locked.push(id);
+                    locked.push((id, prior));
                 }
             }
         }
-        for id in locked {
-            board.set_fixed_state(id, crate::board::FixedState::Unfixed);
+        // release to the PRIOR state, not Unfixed — the lock must not strip
+        // ShoveFixed protection from items it temporarily pinned
+        for (id, prior) in locked {
+            board.set_fixed_state(id, prior);
         }
         let complete_after = net_nos
             .iter()
@@ -954,6 +978,46 @@ mod tests {
             ripup_penalty: 0.0,
             deadline: None,
         }
+    }
+
+    #[test]
+    fn optimizer_never_rips_shove_fixed_routes() {
+        use crate::geometry::planar::Polyline;
+        let mut board = test_board(1);
+        let a = board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        board.set_component_no(a, 1);
+        let b = board.insert_via(1, IntPoint::new(20000, 10000), vec![1], 1, false);
+        board.set_component_no(b, 2);
+        // a deliberately dog-legged but PROTECTED route: ShoveFixed items
+        // are not optimizer seeds (Java BatchOptimizer skips them), so the
+        // detour must survive even though a shorter route exists
+        let via = board.insert_via(1, IntPoint::new(0, 10000), vec![1], 1, false);
+        let t1 = board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(0, 0), IntPoint::new(0, 10000)]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        let t2 = board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(0, 10000), IntPoint::new(20000, 10000)]),
+            1,
+            100,
+            vec![1],
+            1,
+        );
+        for id in [via, t1, t2] {
+            board.set_fixed_state(id, crate::board::FixedState::ShoveFixed);
+        }
+        assert!(board.net_is_completely_connected(1));
+        crate::autoroute::optimizer::optimize_route_pass(&mut board, &request(), None);
+        for id in [via, t1, t2] {
+            assert!(
+                board.get_item(id).is_some(),
+                "ShoveFixed route items must survive the optimizer"
+            );
+        }
+        assert!(board.net_is_completely_connected(1));
     }
 
     #[test]

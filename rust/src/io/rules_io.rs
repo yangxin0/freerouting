@@ -45,13 +45,28 @@ pub fn write_rules(board: &BasicBoard, design_name: &str) -> String {
             out.push_str(&format!(" (clearance {})", scale_out(class_cl)));
         }
         out.push_str(")\n");
-        // restricted active routing layers ((circuit (use_layer ...)))
+        // per-layer widths: a layer whose width differs from the class
+        // maximum gets its own (layer_rule L (rule (width ...))), so a
+        // layer-dependent class no longer collapses to one width
         let layer_count = board.layer_structure.layer_count();
+        for l in 0..layer_count {
+            let lw = class.get_trace_half_width(l);
+            if lw > 0 && lw != hw {
+                out.push_str(&format!(
+                    "    (layer_rule \"{}\" (rule (width {})))\n",
+                    board.layer_structure.arr[l].name,
+                    scale_out(2 * lw)
+                ));
+            }
+        }
+        // restricted active routing layers ((circuit (use_layer ...))).
+        // An EMPTY active mask is still emitted (with no layer names), so
+        // it does not silently reload as all-layers-active.
         let active: Vec<&str> = (0..layer_count)
             .filter(|&l| class.is_active_routing_layer(l))
             .map(|l| board.layer_structure.arr[l].name.as_str())
             .collect();
-        if active.len() < layer_count && !active.is_empty() {
+        if active.len() < layer_count {
             out.push_str("    (circuit (use_layer");
             for name in &active {
                 out.push_str(&format!(" \"{name}\""));
@@ -125,42 +140,67 @@ pub fn read_rules(board: &mut BasicBoard, content: &str) -> Result<usize, String
         let Some(class_idx) = board.rules.net_classes.get_by_name(class_name) else {
             continue;
         };
-        let Some(rule) = class_node.child("rule") else {
-            continue;
-        };
-        if let Some(w) = rule
-            .child("width")
-            .and_then(|n| n.arg())
-            .and_then(|v| v.parse::<f64>().ok())
-        {
-            board
-                .rules
-                .net_classes
-                .get_mut(class_idx)
-                .set_trace_half_width((scale(w) / 2).max(1));
-            applied += 1;
-        }
-        // the default class's clearance is carried by the global rule above;
-        // apply per-class clearance only to the non-default classes so the
-        // shared default clearance class is not perturbed.
-        if class_idx != 0 {
-            if let Some(c) = rule
-                .child("clearance")
+        // the (rule ...) node is optional: use_layer/shove_fixed/use_via
+        // and layer_rule below must apply even without one
+        if let Some(rule) = class_node.child("rule") {
+            if let Some(w) = rule
+                .child("width")
                 .and_then(|n| n.arg())
                 .and_then(|v| v.parse::<f64>().ok())
             {
-                board.rules.ensure_net_class_clearance(class_idx, scale(c));
+                board
+                    .rules
+                    .net_classes
+                    .get_mut(class_idx)
+                    .set_trace_half_width((scale(w) / 2).max(1));
+                applied += 1;
+            }
+            // the default class's clearance is carried by the global rule
+            // above; apply per-class clearance only to the non-default
+            // classes so the shared default clearance class is not perturbed.
+            if class_idx != 0 {
+                if let Some(c) = rule
+                    .child("clearance")
+                    .and_then(|n| n.arg())
+                    .and_then(|v| v.parse::<f64>().ok())
+                {
+                    board.rules.ensure_net_class_clearance(class_idx, scale(c));
+                    applied += 1;
+                }
+            }
+        }
+        // per-layer width overrides ((layer_rule L (rule (width W))))
+        for lr in class_node.children("layer_rule") {
+            let Some(layer) = lr.arg().and_then(|n| board.layer_structure.get_no(n)) else {
+                continue;
+            };
+            if let Some(w) = lr
+                .child("rule")
+                .and_then(|r| r.child("width"))
+                .and_then(|n| n.arg())
+                .and_then(|v| v.parse::<f64>().ok())
+            {
+                board
+                    .rules
+                    .net_classes
+                    .get_mut(class_idx)
+                    .set_trace_half_width_on_layer(layer, (scale(w) / 2).max(1));
                 applied += 1;
             }
         }
-        // restricted active routing layers, like the DSN class scope
-        let use_layers: Vec<usize> = class_node
+        // restricted active routing layers, like the DSN class scope — the
+        // PRESENCE of (use_layer ...) restricts, so an empty list (no layer
+        // active) round-trips instead of reloading as all-active
+        let has_use_layer = class_node
             .children("circuit")
-            .flat_map(|c| c.children("use_layer"))
-            .flat_map(|u| u.args())
-            .filter_map(|n| board.layer_structure.get_no(n))
-            .collect();
-        if !use_layers.is_empty() {
+            .any(|c| c.child("use_layer").is_some());
+        if has_use_layer {
+            let use_layers: Vec<usize> = class_node
+                .children("circuit")
+                .flat_map(|c| c.children("use_layer"))
+                .flat_map(|u| u.args())
+                .filter_map(|n| board.layer_structure.get_no(n))
+                .collect();
             let class = board.rules.net_classes.get_mut(class_idx);
             class.set_all_layers_active(false);
             for l in use_layers {
@@ -273,6 +313,8 @@ mod tests {
             let class = board.rules.net_classes.get_mut(idx);
             class.set_active_routing_layer(1, false);
             class.set_shove_fixed(true);
+            // a layer-dependent width: F.Cu wider than the class rule
+            class.set_trace_half_width_on_layer(0, 2500);
         }
         let text = write_rules(&board, "mini2");
         assert!(text.contains("use_layer"), "restricted layers persisted");
@@ -289,6 +331,39 @@ mod tests {
         assert!(
             class2.is_shove_fixed(),
             "shove_fixed must survive the .rules round trip"
+        );
+        // the per-layer width difference survives instead of collapsing to
+        // one class-wide width
+        assert_eq!(
+            class2.get_trace_half_width(0),
+            2500,
+            "the wider F.Cu width must survive"
+        );
+        assert_ne!(
+            class2.get_trace_half_width(0),
+            class2.get_trace_half_width(1),
+            "per-layer widths must not collapse"
+        );
+
+        // an EMPTY active mask must round-trip too (it used to reload as
+        // all-layers-active because the empty use_layer was omitted)
+        let mut board3 = import_dsn(TWO_LAYER).expect("import");
+        let idx3 = board3.rules.net_classes.get_by_name("special").unwrap();
+        board3
+            .rules
+            .net_classes
+            .get_mut(idx3)
+            .set_all_layers_active(false);
+        let text3 = write_rules(&board3, "mini2");
+        let mut board4 = import_dsn(TWO_LAYER).expect("import");
+        read_rules(&mut board4, &text3).expect("read");
+        let class4 = board4
+            .rules
+            .net_classes
+            .get(board4.rules.net_classes.get_by_name("special").unwrap());
+        assert!(
+            !class4.is_active_routing_layer(0) && !class4.is_active_routing_layer(1),
+            "an empty active mask must survive the round trip"
         );
     }
 

@@ -23,6 +23,17 @@ pub fn export_dsn(board: &BasicBoard) -> Option<String> {
         crate::board::FixedState::UserFixed => "protect",
         crate::board::FixedState::Unfixed => "route",
     };
+    // an explicit (clearance_class ...) preserves a wiring-level override
+    // through the round trip; matrix class names are recreated
+    // deterministically by the importer, so the name resolves on reload
+    let cl_attr = |cl_class: usize| -> String {
+        board
+            .rules
+            .clearance_matrix
+            .get_name(cl_class)
+            .map(|n| format!("\n      (clearance_class \"{n}\")"))
+            .unwrap_or_default()
+    };
     for (_, item) in board.items() {
         if item.base.net_count() == 0 {
             continue;
@@ -50,8 +61,9 @@ pub fn export_dsn(board: &BasicBoard) -> Option<String> {
                     ));
                 }
                 wiring.push_str(&format!(
-                    "\n      )\n      (net \"{net_name}\")\n      (type {})\n    )\n",
-                    type_token(item.base.fixed_state)
+                    "\n      )\n      (net \"{net_name}\")\n      (type {}){}\n    )\n",
+                    type_token(item.base.fixed_state),
+                    cl_attr(item.base.clearance_class)
                 ));
             }
             ItemKind::Via(v) => {
@@ -62,11 +74,12 @@ pub fn export_dsn(board: &BasicBoard) -> Option<String> {
                     continue;
                 };
                 wiring.push_str(&format!(
-                    "    (via \"{}\" {} {}\n      (net \"{net_name}\")\n      (type {})\n    )\n",
+                    "    (via \"{}\" {} {}\n      (net \"{net_name}\")\n      (type {}){}\n    )\n",
                     padstack.name,
                     descale(v.center.x as f64),
                     descale(v.center.y as f64),
-                    type_token(item.base.fixed_state)
+                    type_token(item.base.fixed_state),
+                    cl_attr(item.base.clearance_class)
                 ));
             }
             ItemKind::ObstacleArea(_) => {}

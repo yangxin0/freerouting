@@ -235,8 +235,13 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
         .collect::<Vec<_>>()
         .join(", ")
     };
+    // the outline clearance is the board's real default clearance, not a
+    // hardcoded 0.2 mm (Issue649 keeps its 0.5); the reader consumes it as
+    // the boundary strip width
+    let default_clearance = matrix.get_value(1, 1, 0, false) as f64;
     out.push_str(&format!(
-        "  \"outline\": {{\"corners\": [{outline_corners}], \"clearance\": 0.2}},\n"
+        "  \"outline\": {{\"corners\": [{outline_corners}], \"clearance\": {:.6}}},\n",
+        mm(default_clearance)
     ));
     // routed traces and vias
     let mut traces = Vec::new();
@@ -299,13 +304,16 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
     }
     out.push_str(&format!("  \"traces\": [\n{}\n  ],\n", traces.join(",\n")));
     out.push_str(&format!("  \"vias\": [\n{}\n  ],\n", vias.join(",\n")));
-    // conduction areas (copper pours), with their obstacle flag
+    // conduction areas (copper pours) with their obstacle flag, AND
+    // netless keepouts (physical routing constraints the round trip must
+    // not drop — Issue027 carries 16 keepout scopes). The boundary strips
+    // are excluded: they ARE the serialized outline.
     let mut zones = Vec::new();
     for (_, item) in board.items() {
         let ItemKind::ObstacleArea(a) = &item.kind else {
             continue;
         };
-        if !a.is_conduction {
+        if !a.is_conduction && a.name == "boundary" {
             continue;
         }
         let net_name = item
@@ -325,10 +333,11 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
             continue;
         }
         zones.push(format!(
-            "    {{\"netName\": \"{}\", \"layerIndex\": {}, \"isObstacle\": {}, \"polygon\": [{}]}}",
+            "    {{\"netName\": \"{}\", \"layerIndex\": {}, \"isObstacle\": {}, \"viaOnly\": {}, \"polygon\": [{}]}}",
             esc(&net_name),
             a.layer,
             a.is_obstacle,
+            a.via_only,
             corners.join(", ")
         ));
     }
@@ -439,6 +448,60 @@ mod tests {
             })
             .expect("conduction area");
         assert!(zone2.is_obstacle, "obstacle flag must survive");
+    }
+
+    #[test]
+    fn keepouts_and_outline_clearance_survive_round_trip() {
+        use crate::geometry::planar::{IntPoint, PolygonShape, PolylineArea};
+        let mut board = import_dsn(MINI_DSN).expect("import");
+        // widen the default clearance so the outline clearance is distinctive
+        board
+            .rules
+            .clearance_matrix
+            .set_value_on_all_layers(1, 1, 5000); // 0.5 mm at 10 units/um
+        let keepout_area = |x0: i32| {
+            PolylineArea::new(
+                PolygonShape::from_int_points(&[
+                    IntPoint::new(x0, 0),
+                    IntPoint::new(x0 + 8000, 0),
+                    IntPoint::new(x0 + 8000, 8000),
+                    IntPoint::new(x0, 8000),
+                ]),
+                Vec::new(),
+            )
+        };
+        // a netless keepout and a via-only keepout (physical constraints
+        // the round trip previously dropped entirely)
+        let ko = board.insert_area(keepout_area(10000), 0, "ko", Vec::new(), 1, false);
+        let vko = board.insert_area(keepout_area(30000), 0, "vko", Vec::new(), 1, false);
+        board.set_area_via_only(vko, true);
+        let _ = ko;
+
+        let json = export_kicad_json(&board);
+        assert!(
+            json.contains("\"clearance\": 0.500000"),
+            "the outline carries the real default clearance, not 0.2"
+        );
+        let board2 = import_kicad_json(&json).expect("re-import");
+        let keepouts: Vec<_> = board2
+            .items()
+            .filter_map(|(_, it)| match &it.kind {
+                ItemKind::ObstacleArea(a) if !a.is_conduction && a.name != "boundary" => {
+                    Some(a.via_only)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            keepouts.len(),
+            2,
+            "both keepouts must survive the round trip"
+        );
+        assert_eq!(
+            keepouts.iter().filter(|v| **v).count(),
+            1,
+            "the via-only flag must survive"
+        );
     }
 
     // A DSN with a custom high-clearance net class: export→import must preserve

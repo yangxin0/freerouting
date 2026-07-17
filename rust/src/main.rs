@@ -122,9 +122,10 @@ fn main() -> ExitCode {
         }
     };
     if strip_wiring {
-        if let Some(pos) = content.find("  (wiring") {
-            content = format!("{})", &content[..pos]);
-        }
+        // the importer's balanced, case-insensitive strip — the former
+        // exact substring truncation missed uppercase (WIRING ...) and
+        // dropped everything after the section
+        content = freerouting::io::strip_wiring(&content);
     }
     let t0 = Instant::now();
     let mut board = if design.ends_with(".json") {
