@@ -14,8 +14,8 @@ use crate::board::basic_board::BasicBoard;
 use crate::board::AngleRestriction;
 use crate::io::dsn::parse_dsn;
 use crate::io::dsn_import::{
-    apply_class_scope, apply_typed_clearances, apply_via_declaration, apply_via_rule_declaration,
-    NetworkScopeCtx,
+    apply_class_class_scope, apply_class_scope, apply_rule_scope_clearances, apply_via_declaration,
+    apply_via_rule_declaration, NetworkScopeCtx,
 };
 use crate::rules::ItemClass;
 
@@ -244,7 +244,11 @@ pub fn read_rules(board: &mut BasicBoard, content: &str) -> Result<usize, String
     }
     let resolution = board.resolution.max(1) as f64;
     let scale = move |v: f64| -> i32 { (v * resolution).round() as i32 };
-    if let Some(rule) = root.child("rule") {
+    // EVERY top-level (rule ...) scope, in document order — the untyped
+    // clearance (clearance/clear alias alike) sets the whole-matrix
+    // default, typed rules refine it, and later rules overwrite earlier
+    // ones exactly like Java's sequential reader
+    for rule in root.children("rule") {
         if let Some(w) = rule
             .child("width")
             .and_then(|n| n.arg())
@@ -253,24 +257,7 @@ pub fn read_rules(board: &mut BasicBoard, content: &str) -> Result<usize, String
             board.rules.set_default_trace_half_widths(scale(w) / 2);
             applied += 1;
         }
-        // the UNTYPED clearance is the global default: Java
-        // (Structure.set_clearance_rule with no type pairs) applies it to
-        // EVERY non-null class pair, and `(clear ...)` is the standard
-        // alias — updating only cell (1,1) left every other pair stale
-        if let Some(c) = rule
-            .children("clearance")
-            .chain(rule.children("clear"))
-            .find(|c| c.child("type").is_none())
-            .and_then(|n| n.arg())
-            .and_then(|v| v.parse::<f64>().ok())
-        {
-            board.rules.clearance_matrix.set_default_value(scale(c));
-            applied += 1;
-        }
-        // typed clearances: class pairs, smd_to_turn_gap, *_same_net
-        // (applied AFTER the untyped default so they refine it, like the
-        // in-order Java reader)
-        applied += apply_typed_clearances(&mut board.rules, rule, &scale);
+        applied += apply_rule_scope_clearances(&mut board.rules, rule, &scale, true);
     }
     // top-level (padstack ...) scopes: names already in the design
     // resolve to it; a padstack the design LACKS is imported from the
@@ -339,19 +326,11 @@ pub fn read_rules(board: &mut BasicBoard, content: &str) -> Result<usize, String
         apply_via_rule_declaration(rules, &mut via_rule_ids, rule_node);
         applied += 1;
     }
-    let mut class_for_clearance: HashMap<i32, usize> = HashMap::new();
     for class_node in root.children("class") {
         let Some(class_name) = class_node.arg() else {
             continue;
         };
-        apply_class_scope(
-            rules,
-            &ctx,
-            class_node,
-            &scale,
-            &mut class_for_clearance,
-            &via_rule_ids,
-        );
+        apply_class_scope(rules, &ctx, class_node, &scale, &via_rule_ids);
         applied += 1;
         let Some(class_idx) = rules.net_classes.get_by_name(class_name).or_else(|| {
             class_node
@@ -432,6 +411,13 @@ pub fn read_rules(board: &mut BasicBoard, content: &str) -> Result<usize, String
                 applied += 1;
             }
         }
+    }
+    // (class_class (classes A B) (rule (clearance C))): pairwise
+    // clearances between net classes (Java Network.insert_class_pairs) —
+    // applied AFTER the classes so both sides resolve
+    for cc_node in root.children("class_class") {
+        apply_class_class_scope(rules, cc_node, &scale);
+        applied += 1;
     }
     Ok(applied)
 }

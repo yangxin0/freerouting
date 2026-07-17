@@ -54,6 +54,7 @@ fn main() {
         trace_half_width: board.rules.get_min_trace_half_width().max(500),
         clearance_class: 1,
         via_padstack,
+        via_clearance_class: 0,
         via_attach_allowed: false,
         via_cost: 50_000.0,
         max_expansions: 100_000,

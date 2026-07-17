@@ -25,6 +25,10 @@ pub struct BatchRequest {
     pub trace_half_width: i32,
     pub clearance_class: usize,
     pub via_padstack: usize,
+    /// The clearance class the inserted VIAS carry (Java: the selected
+    /// `ViaInfo`'s clearance class, which may be stricter than the trace
+    /// class). 0 = fall back to `clearance_class`.
+    pub via_clearance_class: usize,
     /// Layer-change vias may land on drillable (SMD) pads of their net
     /// (Java `AutorouteControl.attach_smd_allowed`); the inserted via
     /// carries the flag for the DRC's fanout exemption.
@@ -278,6 +282,7 @@ pub fn route_net_with_store(
             trace_half_width: request.trace_half_width,
             clearance_class: request.clearance_class,
             via_padstack: request.via_padstack,
+            via_clearance_class: request.via_clearance_class,
             via_attach_allowed: request.via_attach_allowed,
             via_cost: request.via_cost,
             max_expansions: request.max_expansions,
@@ -324,12 +329,16 @@ pub fn route_net_with_store(
 }
 
 /// Routes all nets with incomplete connections in ascending net-number
-/// order (a single batch pass).
+/// order (a single batch pass). Each net routes under its OWN class rules
+/// (width, clearance class, via rule, plane via cost) — this public entry
+/// derives them like the pass scheduler does, so external callers cannot
+/// route with the base request's rules by accident.
 pub fn batch_route(board: &mut BasicBoard, request: &BatchRequest) -> BatchResult {
     let net_nos: Vec<i32> = (1..=board.rules.nets.max_net_no()).collect();
     let mut result = BatchResult::default();
     for net_no in net_nos {
-        let net_result = route_net(board, net_no, request);
+        let net_request = request_for_net(board, net_no, request);
+        let net_result = route_net(board, net_no, &net_request);
         result.routed_connections += net_result.routed_connections;
         result.failed_connections += net_result.failed_connections;
     }
@@ -479,6 +488,18 @@ pub(crate) fn request_for_net(
         .nets
         .get_by_no(net_no)
         .is_some_and(|n| n.contains_plane());
+    // the net's via rule selects the VIA INFO (span-aware: the first via
+    // whose padstack covers the full routing span, so a blind-first rule
+    // does not lock the router onto an unusable via) — it carries the
+    // padstack, the via's OWN clearance class and the attach flag
+    let last_layer = board.layer_structure.layer_count().saturating_sub(1);
+    let selected_via = board
+        .rules
+        .selected_via_for_net(net_no, &board.padstacks, last_layer);
+    let (via_padstack, via_clearance_class) = match selected_via {
+        Some(info) => (info.get_padstack(), info.get_clearance_class()),
+        None => (base.via_padstack, 0),
+    };
     BatchRequest {
         trace_half_width: if class_half_width > 0 {
             class_half_width
@@ -490,10 +511,8 @@ pub(crate) fn request_for_net(
         } else {
             base.clearance_class
         },
-        via_padstack: board
-            .rules
-            .via_padstack_for_net(net_no)
-            .unwrap_or(base.via_padstack),
+        via_padstack,
+        via_clearance_class,
         via_attach_allowed: via_attach_allowed_for_net(board, net_no, base.via_padstack),
         via_cost: if contains_plane {
             base.via_cost / 10.0
@@ -515,9 +534,13 @@ pub(crate) fn via_attach_allowed_for_net(
     net_no: i32,
     base_padstack: usize,
 ) -> bool {
+    // the same span-aware selection as request_for_net, so the attach
+    // flag belongs to the via actually being inserted
+    let last_layer = board.layer_structure.layer_count().saturating_sub(1);
     let attach = board
         .rules
-        .via_attach_allowed_for_net(net_no)
+        .selected_via_for_net(net_no, &board.padstacks, last_layer)
+        .map(|info| info.attach_smd_allowed())
         .unwrap_or_else(|| {
             board.rules.via_at_smd_allowed
                 && board
@@ -1023,6 +1046,7 @@ mod tests {
             trace_half_width: 100,
             clearance_class: 1,
             via_padstack: 1,
+            via_clearance_class: 0,
             via_attach_allowed: false,
             via_cost: 5000.0,
             max_expansions: 100_000,
@@ -1172,6 +1196,7 @@ mod tests {
             trace_half_width: 100,
             clearance_class: 1,
             via_padstack: 1,
+            via_clearance_class: 0,
             via_attach_allowed: false,
             via_cost: 5000.0,
             max_expansions: 30_000,

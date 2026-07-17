@@ -514,11 +514,44 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
             // preserve the outline verbatim: the writer must emit THIS
             // polygon and clearance, not a bounding-box fabrication
             board.outline = Some((corners.clone(), strip));
+            // a non-default outline clearance also gets its own matrix
+            // class, so the strips' DRC spacing honors the value (inserting
+            // them with the default class only changed their geometry)
+            let default_cl_value = board.rules.clearance_matrix.get_value(1, 1, 0, false);
+            let strip_class = if supplied > 0.0 && strip != default_cl_value {
+                let idx = match board.rules.clearance_matrix.get_no("boundary") {
+                    Some(idx) => idx,
+                    None => {
+                        board.rules.clearance_matrix.append_class("boundary");
+                        board
+                            .rules
+                            .clearance_matrix
+                            .get_no("boundary")
+                            .unwrap_or_else(crate::rules::BoardRules::default_clearance_class)
+                    }
+                };
+                if idx > 1 {
+                    let count = board.rules.clearance_matrix.get_class_count();
+                    for j in 1..count {
+                        board
+                            .rules
+                            .clearance_matrix
+                            .set_value_on_all_layers(idx, j, strip);
+                        board
+                            .rules
+                            .clearance_matrix
+                            .set_value_on_all_layers(j, idx, strip);
+                    }
+                }
+                idx
+            } else {
+                crate::rules::BoardRules::default_clearance_class()
+            };
             crate::io::dsn_import::insert_boundary_keepouts(
                 &mut board,
                 &corners,
                 (strip / 2).max(1),
-                crate::rules::BoardRules::default_clearance_class(),
+                strip_class,
             );
         }
     }

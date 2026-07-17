@@ -333,6 +333,31 @@ impl BoardRules {
         Some(self.via_infos.get(via_info_id).get_padstack())
     }
 
+    /// The via INFO routing `net_no` should use: the rule's first via
+    /// whose padstack spans every routing layer (`0..=last_layer`),
+    /// falling back to the rule's first via. Java tries a rule's vias in
+    /// order per needed layer span; this port's single-via maze needs the
+    /// full span, so a blind-first/through-second rule must not lock the
+    /// router onto the unusable blind via. The info also carries the
+    /// via's OWN clearance class and attach flag.
+    pub fn selected_via_for_net(
+        &self,
+        net_no: i32,
+        padstacks: &crate::core::Padstacks,
+        last_layer: usize,
+    ) -> Option<&crate::rules::ViaInfo> {
+        let net = self.nets.get_by_no(net_no)?;
+        let rule_id = self.net_classes.get(net.get_class()).get_via_rule()?;
+        let rule = self.via_rules.get(rule_id)?;
+        let full_span = rule.vias().iter().copied().find(|&id| {
+            padstacks
+                .get_by_no(self.via_infos.get(id).get_padstack())
+                .is_some_and(|p| p.from_layer() == 0 && p.to_layer() >= last_layer)
+        });
+        let chosen = full_span.or_else(|| rule.vias().first().copied())?;
+        Some(self.via_infos.get(chosen))
+    }
+
     /// Whether the via the router would use for `net_no` (the same
     /// selection as [`Self::via_padstack_for_net`]) may attach to
     /// drillable (SMD) pads (Java `ViaInfo.attach_smd_allowed`).

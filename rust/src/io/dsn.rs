@@ -153,7 +153,9 @@ fn parse_expr(bytes: &[u8], pos: &mut usize) -> Result<SExpr, ParseError> {
             // with `-`). The separator must be its own token or the
             // following quote would be swallowed into an atom, fragmenting
             // the quoted name at its spaces (Issue029's class names).
-            s @ (b'_' | b'-') if bytes.get(*pos + 1) == Some(&b'"') => {
+            // Both quote characters count (a `(string_quote ')` document
+            // glues with single quotes).
+            s @ (b'_' | b'-') if matches!(bytes.get(*pos + 1), Some(&b'"') | Some(&b'\'')) => {
                 items.push(SExpr::Atom((s as char).to_string()));
                 *pos += 1;
             }

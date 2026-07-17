@@ -228,6 +228,7 @@ fn routed_nets_reach_pin_connection_points() {
                         .is_some_and(|p| p.name.starts_with("Via"))
                 })
                 .unwrap_or(1),
+            via_clearance_class: 0,
             via_attach_allowed: false,
             via_cost: 50_000.0,
             max_expansions: 100_000,
@@ -301,6 +302,7 @@ fn ses_import_reconnects_a_routed_net() {
                     .is_some_and(|p| p.name.starts_with("Via"))
             })
             .unwrap_or(1),
+        via_clearance_class: 0,
         via_attach_allowed: false,
         via_cost: 50_000.0,
         max_expansions: 100_000,
@@ -329,13 +331,13 @@ fn ses_import_reconnects_a_routed_net() {
         .iter()
         .filter(|n| fresh.net_is_completely_connected(**n))
         .count();
-    // the reloaded session must reproduce all but a small residual of the
-    // routed board's connectivity (>= 90%), well above the previous "at least
-    // one net" bound; the residual is the unresolved connection-point gap
-    assert!(after > 0, "SES import reconnected no nets");
-    assert!(
-        after * 10 >= routed_complete * 9,
-        "SES round-trip lost too many nets: routed {routed_complete}, reloaded {after}"
+    // FULL electrical equivalence on reload: every net the routed board
+    // completed must be complete again after the session round trip (the
+    // former 90% allowance dated from before the pin-exit and
+    // center-anchored-stub work; J2 measures 100%)
+    assert_eq!(
+        after, routed_complete,
+        "SES round-trip must preserve every completed net"
     );
     // DRC equivalence, not just connectivity: the reloaded session must be
     // exactly as clean as the routed board it came from (imported vias
@@ -394,6 +396,7 @@ fn full_board_drc_over_a_routed_board() {
                     .is_some_and(|p| p.name.starts_with("Via"))
             })
             .unwrap_or(1),
+        via_clearance_class: 0,
         via_attach_allowed: false,
         via_cost: 50_000.0,
         max_expansions: 100_000,
@@ -470,10 +473,10 @@ fn full_board_drc_over_a_routed_board() {
         }
     }
     assert!(total_ends > 0, "routed board has trace ends to audit");
-    assert!(
-        off_center <= 2,
+    assert_eq!(
+        off_center, 0,
         "off-center pad terminations regressed: {off_center} of {total_ends} trace ends \
-         risk reading as opens on a strict (Java) reload"
+         risk reading as opens on a strict (Java) reload (measured 0 since round six)"
     );
 }
 

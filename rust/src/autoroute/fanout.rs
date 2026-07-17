@@ -80,8 +80,11 @@ pub fn fanout_pin(board: &mut BasicBoard, pin_id: ItemId, request: &BatchRequest
         trace_half_width: net_request.trace_half_width,
         clearance_class,
         via_padstack,
+        via_clearance_class: net_request.via_clearance_class,
         via_attach_allowed: net_request.via_attach_allowed,
-        via_cost: request.via_cost,
+        // the derived cost includes the plane-net reduction (a fanout via
+        // into a pour is exactly the case the cheap plane via exists for)
+        via_cost: net_request.via_cost,
         // fanout escapes are local: a small budget keeps hopeless pins
         // cheap (Java bounds the whole stage with a timeout instead)
         max_expansions: 3_000,

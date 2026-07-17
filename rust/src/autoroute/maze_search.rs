@@ -108,6 +108,10 @@ pub struct MazeRouteRequest {
     pub clearance_class: usize,
     /// 1-based padstack for layer-change vias.
     pub via_padstack: usize,
+    /// The clearance class inserted vias carry (the selected `ViaInfo`'s
+    /// class — a via rule may demand stricter spacing than the traces).
+    /// 0 = fall back to `clearance_class`.
+    pub via_clearance_class: usize,
     /// Vias may land on drillable (SMD) pads of their own net; the
     /// inserted via carries the flag (Java `attach_smd_allowed`).
     pub via_attach_allowed: bool,
@@ -150,6 +154,14 @@ impl MazeRouteRequest {
             item == self.dest_item
         } else {
             self.dest_items.contains(&item)
+        }
+    }
+    /// The clearance class inserted vias carry (0 = the trace class).
+    fn via_class(&self) -> usize {
+        if self.via_clearance_class == 0 {
+            self.clearance_class
+        } else {
+            self.via_clearance_class
         }
     }
 }
@@ -707,12 +719,18 @@ fn via_site_clearance(
         }
     }
     Some(same_net_required.unwrap_or_else(|| {
+        // matrix order as the FINAL DRC will see it: the pending via gets
+        // a HIGHER id than every existing item, and check_board looks up
+        // (higher, lower) = (new, old) — the transposed order could
+        // accept a site the final DRC then rejects on asymmetric matrices.
+        // The VIA's class applies (the selected ViaInfo may be stricter
+        // than the trace class).
         board
             .rules
             .clearance_matrix
             .get_value(
+                request.via_class(),
                 other.base.clearance_class,
-                request.clearance_class,
                 layer,
                 false,
             )
@@ -1542,13 +1560,13 @@ fn trace_run_is_clear(
                     continue;
                 }
             }
-            // matrix order like the DRC (Java get_value(other, this)):
-            // the KiCad-JSON importer builds an asymmetric matrix where
-            // the transposed cell is the wrong value
+            // matrix order as the FINAL DRC will see it: the pending trace
+            // gets a HIGHER id than every existing item, so check_board
+            // looks up (higher, lower) = (new, old) for this pair
             let cl = matrix
                 .get_value(
-                    other.base.clearance_class,
                     request.clearance_class,
+                    other.base.clearance_class,
                     layer,
                     false,
                 )
@@ -1743,11 +1761,14 @@ fn insert_connection(
             // shoves conflicting items free) and fails the insert when
             // even that cannot clear it.
             if via_site_is_clear(board, request, p) {
+                // the via carries the selected ViaInfo's clearance class,
+                // not the trace request's — a strict via must not be
+                // inserted under a weaker clearance
                 new_items.push(board.insert_via(
                     request.via_padstack,
                     p,
                     vec![request.net_no],
-                    request.clearance_class,
+                    request.via_class(),
                     request.via_attach_allowed,
                 ));
             } else {
@@ -1756,7 +1777,7 @@ fn insert_connection(
                     request.via_padstack,
                     p,
                     &[request.net_no],
-                    request.clearance_class,
+                    request.via_class(),
                     request.trace_half_width,
                     request.via_attach_allowed,
                 ) {
@@ -1887,6 +1908,7 @@ mod tests {
 
     fn request(start: ItemId, dest: ItemId) -> MazeRouteRequest {
         MazeRouteRequest {
+            via_clearance_class: 0,
             via_attach_allowed: false,
             net_no: 1,
             start_items: Vec::new(),

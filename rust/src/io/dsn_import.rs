@@ -219,6 +219,23 @@ pub(crate) fn apply_typed_clearances(
     rule_node: &SExpr,
     scale: &dyn Fn(f64) -> i32,
 ) -> usize {
+    apply_rule_scope_clearances(rules, rule_node, scale, false)
+}
+
+/// Walks one `(rule ...)` scope's clearance children IN DOCUMENT ORDER
+/// (`clearance` and `clear` interleaved as written, so later rules
+/// overwrite earlier ones like Java's sequential reader). With
+/// `apply_untyped`, an untyped clearance sets the whole-matrix default
+/// (`Structure.set_clearance_rule` with no type pairs); typed rules apply
+/// their class pairs, `smd_to_turn_gap` and `*_same_net` values. Class
+/// names are NOT case-folded or hyphen-mutated: quoted names like "A-B"
+/// stay intact (only classification keywords compare case-insensitively).
+pub(crate) fn apply_rule_scope_clearances(
+    rules: &mut BoardRules,
+    rule_node: &SExpr,
+    scale: &dyn Fn(f64) -> i32,
+    apply_untyped: bool,
+) -> usize {
     let mut applied = 0usize;
     // if any wire pair appears, pre-create the four default item classes
     // (Java create_default_clearance_classes)
@@ -228,30 +245,36 @@ pub(crate) fn apply_typed_clearances(
         .filter_map(|c| c.child("type"))
         .flat_map(|t| t.args())
         .any(|k| {
-            let k = k.to_ascii_lowercase().replace('-', "_");
-            k.starts_with("wire_") || k.ends_with("_wire")
+            let k = k.to_ascii_lowercase();
+            k.starts_with("wire_")
+                || k.starts_with("wire-")
+                || k.ends_with("_wire")
+                || k.ends_with("-wire")
         });
     if has_wire_pair {
         for name in ["via", "smd", "pin", "area"] {
             resolve_clearance_class(rules, name);
         }
     }
-    for clearance_node in rule_node
-        .children("clearance")
-        .chain(rule_node.children("clear"))
-    {
+    let children = rule_node.as_list().unwrap_or(&[]);
+    for clearance_node in children.iter().filter(|c| {
+        c.name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("clearance") || n.eq_ignore_ascii_case("clear"))
+    }) {
         let Some(value) = clearance_node.arg_f64().map(scale) else {
             continue;
         };
         let Some(type_node) = clearance_node.child("type") else {
-            continue; // the untyped default, applied by the caller
+            if apply_untyped {
+                // the untyped default applies to EVERY non-null class pair
+                rules.clearance_matrix.set_default_value(value);
+                applied += 1;
+            }
+            continue; // untyped: in DSN import the caller applied it
         };
-        let tokens: Vec<String> = type_node
-            .args()
-            .map(|t| t.to_ascii_lowercase().replace('-', "_"))
-            .collect();
+        let tokens: Vec<String> = type_node.args().map(|t| t.to_string()).collect();
         let mut pairs: Vec<(String, String)> = Vec::new();
-        if tokens.len() == 3 && tokens[1] == "_" {
+        if tokens.len() == 3 && (tokens[1] == "_" || tokens[1] == "-") {
             // `(type "A B"_"C D")`: quoted names glued by a bare separator
             // (its own token, see the parser) — the pair is exactly the two
             // quoted names, underscores INSIDE them preserved
@@ -261,12 +284,13 @@ pub(crate) fn apply_typed_clearances(
             // one pair split across two tokens: `"A" "B"`, `"A"_bare`
             // (leading separator on the second) or `bare_"B"` (trailing
             // separator on the first)
-            let a = tokens[0].strip_suffix('_').unwrap_or(&tokens[0]);
-            let b = tokens[1].strip_prefix('_').unwrap_or(&tokens[1]);
+            let a = tokens[0].strip_suffix(['_', '-']).unwrap_or(&tokens[0]);
+            let b = tokens[1].strip_prefix(['_', '-']).unwrap_or(&tokens[1]);
             pairs.push((a.to_string(), b.to_string()));
         } else {
             for kind in &tokens {
-                if kind == "smd_to_turn_gap" {
+                let lower = kind.to_ascii_lowercase().replace('-', "_");
+                if lower == "smd_to_turn_gap" {
                     rules.set_pin_edge_to_turn_dist(value as f64);
                     applied += 1;
                     continue;
@@ -274,7 +298,7 @@ pub(crate) fn apply_typed_clearances(
                 // `A_B_same_net`: the clearance required between two
                 // SAME-NET item-class items (a drill-breakout rule). Java
                 // parses but never applies these; the DRC uses them.
-                if let Some(base) = kind.strip_suffix("_same_net") {
+                if let Some(base) = lower.strip_suffix("_same_net") {
                     if let Some((a, b)) = base.split_once('_') {
                         if let (Some(ica), Some(icb)) = (item_class_of(a), item_class_of(b)) {
                             rules.set_same_net_clearance(ica, icb, value);
@@ -283,9 +307,11 @@ pub(crate) fn apply_typed_clearances(
                     }
                     continue;
                 }
-                // split at the FIRST '_': the second name may contain
-                // underscores (a single-token type has no pair to set)
-                if let Some((a, b)) = kind.split_once('_') {
+                // split the RAW token at the FIRST '_' (the second name may
+                // contain underscores); hyphen spellings (`smd-smd`) split
+                // at '-' only when no underscore exists, so quoted names
+                // are never mutated
+                if let Some((a, b)) = kind.split_once('_').or_else(|| kind.split_once('-')) {
                     pairs.push((a.to_string(), b.to_string()));
                 }
             }
@@ -305,19 +331,59 @@ pub(crate) fn apply_typed_clearances(
     applied
 }
 
+/// Applies one `(class_class (classes A B ...) (rule (clearance C)))`
+/// scope: pairwise clearances between the named net classes' trace
+/// clearance classes (Java `Network.insert_class_pairs`).
+pub(crate) fn apply_class_class_scope(
+    rules: &mut BoardRules,
+    node: &SExpr,
+    scale: &dyn Fn(f64) -> i32,
+) {
+    let names: Vec<String> = node
+        .child("classes")
+        .map(|c| c.args().map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    let mut value: Option<i32> = None;
+    for rule in node.children("rule") {
+        if let Some(c) = rule
+            .child("clearance")
+            .or_else(|| rule.child("clear"))
+            .and_then(|c| c.arg_f64())
+        {
+            value = Some(scale(c));
+        }
+    }
+    let Some(v) = value else {
+        return;
+    };
+    let tcc_of = |rules: &BoardRules, name: &str| -> Option<usize> {
+        rules
+            .net_classes
+            .get_by_name(name)
+            .map(|idx| rules.net_classes.get(idx).get_trace_clearance_class())
+    };
+    for i in 0..names.len() {
+        for j in (i + 1)..names.len() {
+            let (Some(a), Some(b)) = (tcc_of(rules, &names[i]), tcc_of(rules, &names[j])) else {
+                continue;
+            };
+            rules.clearance_matrix.set_value_on_all_layers(a, b, v);
+            rules.clearance_matrix.set_value_on_all_layers(b, a, v);
+        }
+    }
+}
+
 /// Applies one `(class NAME [net...] ...)` scope (Java
 /// `Network.insert_net_class`): membership, inline clearance rule or
 /// `(clearance_class NAME)` reference, `(via_rule NAME)` reference or
 /// `(circuit (use_via ...))` fallback, `(circuit (use_layer ...))`,
 /// per-class widths and `(shove_fixed ...)`. A class name already on the
 /// board updates that class in place (Java looks classes up by name).
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_class_scope(
     rules: &mut BoardRules,
     ctx: &NetworkScopeCtx,
     class_node: &SExpr,
     scale: &dyn Fn(f64) -> i32,
-    class_for_clearance: &mut HashMap<i32, usize>,
     via_rule_ids: &HashMap<String, usize>,
 ) {
     let clearance_child = |rule: &SExpr| -> Option<f64> {
@@ -341,17 +407,18 @@ pub(crate) fn apply_class_scope(
         .get_by_name(class_name)
         .unwrap_or_else(|| rules.append_net_class(class_name));
     let is_default_descriptor = class_idx == default_idx;
-    let half_width = class_node
-        .child("rule")
-        .and_then(|r| r.child("width"))
-        .and_then(|w| w.arg_f64())
-        .map(scale)
-        .map(|w| (w / 2).max(1));
-    // the net class's own trace clearance (scaled board units)
-    let class_clearance: Option<i32> = class_node
-        .child("rule")
-        .and_then(clearance_child)
-        .map(scale);
+    // EVERY (rule ...) scope of the class is read in order, later values
+    // overwriting earlier ones (only the first scalar rule was read)
+    let mut half_width: Option<i32> = None;
+    let mut class_clearance: Option<i32> = None;
+    for rule in class_node.children("rule") {
+        if let Some(w) = rule.child("width").and_then(|w| w.arg_f64()) {
+            half_width = Some((scale(w) / 2).max(1));
+        }
+        if let Some(c) = clearance_child(rule) {
+            class_clearance = Some(scale(c));
+        }
+    }
     let clearance_class_idx = match class_clearance {
         Some(c) => {
             if is_default_descriptor && c == ctx.default_clearance {
@@ -360,28 +427,34 @@ pub(crate) fn apply_class_scope(
                 // class and leave the default net class's item classes
                 // (so plain-net smd pads stay tight); no set_all below.
                 BoardRules::default_clearance_class()
-            } else if let Some(&idx) = class_for_clearance.get(&c) {
-                idx
             } else {
-                // create a dynamic matrix class holding this spacing to
-                // every class (including itself)
-                let name = format!("cl_{c}");
-                rules.clearance_matrix.append_class(&name);
-                let idx = rules
-                    .clearance_matrix
-                    .get_no(&name)
-                    .unwrap_or_else(BoardRules::default_clearance_class);
-                // Java parity (Network.add_clearance_rule): the new
-                // class's clearance to every existing class is the
-                // MAXIMUM of its own value and the existing entry, so a
-                // stricter class is never under-cleared next to a looser
-                // one regardless of class-creation order. append_class
-                // already copied the (progressively elevated) default
-                // row, so max() preserves accumulated cross-class
-                // spacing. Start at class 1 to leave "null" (0) at zero.
+                // Java Network.add_clearance_rule: the clearance class is
+                // NAMED after the net class, so a later typed A_B rule
+                // naming the class targets the SAME matrix column. The
+                // former cl_<value> key collapsed distinct classes with
+                // equal values and left typed name rules inert.
+                let idx = match rules.clearance_matrix.get_no(class_name) {
+                    Some(idx) => idx,
+                    None => {
+                        rules.clearance_matrix.append_class(class_name);
+                        rules
+                            .clearance_matrix
+                            .get_no(class_name)
+                            .unwrap_or_else(BoardRules::default_clearance_class)
+                    }
+                };
+                // Java parity (Network.add_clearance_rule): the class's
+                // clearance to every existing class is the MAXIMUM of its
+                // own value and the existing entry, so a stricter class is
+                // never under-cleared next to a looser one regardless of
+                // class-creation order. Start at class 1 to leave
+                // "null" (0) at zero.
                 let n = rules.clearance_matrix.get_class_count();
                 let layers = rules.clearance_matrix.get_layer_count();
                 for j in 1..n {
+                    if j == idx {
+                        continue;
+                    }
                     for layer in 0..layers {
                         let curr = rules
                             .clearance_matrix
@@ -393,7 +466,6 @@ pub(crate) fn apply_class_scope(
                 }
                 // the class's clearance to itself is exactly its own value
                 rules.clearance_matrix.set_value_on_all_layers(idx, idx, c);
-                class_for_clearance.insert(c, idx);
                 idx
             }
         }
@@ -711,10 +783,12 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
         .iter()
         .flat_map(|r| r.children("clearance").chain(r.children("clear")))
         .collect();
+    // ONLY an untyped clearance may become the global default: falling
+    // back to the first TYPED rule made `(rule (clearance 500 (type
+    // A_B)))` change every class pair instead of only A_B
     let default_clearance = clearance_nodes
         .iter()
         .find(|c| c.child("type").is_none())
-        .or_else(|| clearance_nodes.first())
         .and_then(|c| c.arg_f64())
         .map(&scale)
         .unwrap_or(200);
@@ -763,6 +837,33 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
         apply_typed_clearances(&mut rules, rule, &scale);
     }
     rules.set_default_trace_half_widths((default_width / 2).max(1));
+    // (layer L ... (rule (width W) (clearance C))): per-layer defaults
+    // (Java Structure.read_layer_scope) — the layer's width lands on the
+    // default net class's layer entry and its clearance on the matrix
+    // layer, overriding the global defaults above
+    for layer_node in structure.children("layer") {
+        let Some(layer) = layer_node.arg().and_then(&layer_no) else {
+            continue;
+        };
+        for rule in layer_node.children("rule") {
+            if let Some(w) = rule.child("width").and_then(|w| w.arg_f64()).map(&scale) {
+                let dc = rules.get_default_net_class();
+                rules
+                    .net_classes
+                    .get_mut(dc)
+                    .set_trace_half_width_on_layer(layer, (w / 2).max(1));
+            }
+            if let Some(c) = rule
+                .child("clearance")
+                .or_else(|| rule.child("clear"))
+                .filter(|c| c.child("type").is_none())
+                .and_then(|c| c.arg_f64())
+                .map(&scale)
+            {
+                rules.clearance_matrix.set_default_value_on_layer(layer, c);
+            }
+        }
+    }
 
     // library: padstacks and images
     let mut padstacks = Padstacks::new(layer_count);
@@ -873,15 +974,9 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     // network classes: per-class trace width, clearance and via
     // ((class NAME net... (circuit (use_via V)) (rule (width W) ...)));
     // the application semantics live in the shared appliers, reused by
-    // the standard `.rules` reader.
-    //
-    // Value-keyed dedup among classes that carry a clearance rule: two classes
-    // with the same clearance value share one matrix class (identical to Java's
-    // per-name classes since the values are equal). NOT seeded with the default
-    // value — a named class whose clearance equals the board default still gets
-    // its own matrix class so set_all can point its pins at the class value
-    // (2002) rather than the tighter smd class (500), matching Java.
-    let mut class_for_clearance: HashMap<i32, usize> = HashMap::new();
+    // the standard `.rules` reader. Each class with an inline clearance
+    // gets a matrix class NAMED after it (Java Network.add_clearance_rule),
+    // so typed rules addressing the class name hit the right column.
 
     // named via infos and via rules declared in the network scope
     // ((via NAME PADSTACK [CLEARANCE_CLASS] [attach]) and
@@ -904,14 +999,12 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
 
     for network in pcb.children("network") {
         for class_node in network.children("class") {
-            apply_class_scope(
-                &mut rules,
-                &ctx,
-                class_node,
-                &scale,
-                &mut class_for_clearance,
-                &via_rule_ids,
-            );
+            apply_class_scope(&mut rules, &ctx, class_node, &scale, &via_rule_ids);
+        }
+        // (class_class (classes A B) (rule (clearance C))): a pairwise
+        // clearance between two net classes (Java Network.insert_class_pairs)
+        for cc_node in network.children("class_class") {
+            apply_class_class_scope(&mut rules, cc_node, &scale);
         }
     }
 
@@ -1069,7 +1162,9 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 .map(|c| IntPoint::new(scale(c[0]), scale(c[1])))
                 .collect();
             keep_outline(&mut board, &corners, &layer_token, &mut outline_from_signal);
-            insert_boundary_keepouts(&mut board, &corners, default_clearance / 2, boundary_cl);
+            // the strip width follows the boundary's RESOLVED clearance
+            // value, not blindly the board default
+            insert_boundary_keepouts(&mut board, &corners, boundary_cl_value / 2, boundary_cl);
         } else if let Some(rect) = boundary.child("rect") {
             // (boundary (rect <layer> x1 y1 x2 y2)): a rectangular outline.
             // Previously only `path` boundaries produced keepouts, so
@@ -1087,7 +1182,7 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                     IntPoint::new(scale(xmin), scale(ymax)),
                 ];
                 keep_outline(&mut board, &corners, &layer_token, &mut outline_from_signal);
-                insert_boundary_keepouts(&mut board, &corners, default_clearance / 2, boundary_cl);
+                insert_boundary_keepouts(&mut board, &corners, boundary_cl_value / 2, boundary_cl);
             }
         }
     }

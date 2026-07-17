@@ -722,6 +722,83 @@ FIXED:
   surrogates and unknown escapes are rejected as malformed instead of
   being passed through.
 
+## Ninth-round remediation (2026-07-17) — verification findings
+
+An independent verification of HEAD 40e267d2 produced 11 findings (8 P1,
+3 P2). All fixed except the two assessed items at the end. 265 tests,
+fmt/clippy clean; fixture baselines unchanged (J2 24/24 at 999.98,
+Issue093 @130, Issue187 529/529 @670, Issue413/143 clean, Issue721 @139,
+Issue029 146/163 @769.62, Issue593 59/94 @332.05).
+
+FIXED:
+
+- **Routing preflights use the final DRC's matrix order.** The pending
+  trace/via always receives a HIGHER id than existing items, so
+  `check_board` looks up (new, old); `via_site_clearance` and
+  `trace_run_is_clear` used the transposed (old, new) cell, and the
+  optimizer's target-net gate now id-orders its pairs too — with
+  `M[1,2]=0, M[2,1]=5000` the router could route what the final DRC then
+  rejected.
+- **Via rules select span-aware and vias carry the ViaInfo's class.**
+  `selected_via_for_net` picks the rule's first via whose padstack spans
+  every routing layer (a blind-first/through-second rule no longer locks
+  the single-via maze onto the unusable blind via) and carries the via's
+  OWN clearance class and attach flag; `via_clearance_class` is threaded
+  through BatchRequest/MazeRouteRequest (0 = trace class) into
+  `via_site_clearance`, the plain via insert and the forced-via path, so
+  a strict via can no longer be inserted under the weaker trace class.
+- **Inline class clearances key by NAME** (Java
+  `Network.add_clearance_rule`): each class with an inline clearance gets
+  a matrix column named after it — the former `cl_<value>` key collapsed
+  distinct equal-valued classes and left typed `A_B` name rules inert.
+  Class scopes also read EVERY `(rule ...)` child (later wins), not only
+  the first.
+- **Rule scopes: complete and in order.** `.rules` reads every top-level
+  `(rule ...)` in document order with `clearance`/`clear` interleaved as
+  written (last write wins, like Java's sequential reader); the DSN
+  importer applies `(layer L (rule ...))` per-layer width/clearance
+  defaults and `(class_class (classes A B) (rule (clearance C)))`
+  pairwise class clearances (Java `insert_class_pairs`), in both readers.
+- **A typed-only clearance rule no longer becomes the global default**
+  (only untyped rules feed `default_clearance`).
+- **Outline clearance reaches the routing geometry**: DSN boundary strips
+  are sized by the boundary's RESOLVED class value, and a non-default
+  KiCad outline clearance gets its own "boundary" matrix class so the
+  strips' DRC spacing honors it (not just their width).
+- **Public `batch_route` derives per-net rules** like the pass scheduler;
+  fanout uses the derived (plane-reduced) via cost.
+- **MCP failures are tool errors**: a non-2xx REST status sets
+  `isError: true` instead of wrapping the failure body in a success;
+  `job_id` must be a non-negative integer exactly representable in f64
+  (missing/fractional/negative/imprecise ids are -32602 errors).
+- **Composite separators also recognize single quotes**
+  (`(string_quote ')` documents), and the typed-clearance applier no
+  longer lowercases or hyphen-mutates class names — quoted names like
+  "A-B" stay intact; classification keywords compare case-insensitively
+  and `smd-smd` spellings still split (at '-' only when no '_' exists).
+- **Electrical equivalence pinned at measured actuals**: the SES
+  round-trip test now requires EVERY completed net to reload complete
+  (was ≥90%; J2 measures 100%), and the risky off-center-end class is
+  asserted at exactly ZERO (measured 0 since round six). The remaining
+  centroid fallback (`destination_point`) only engages when the drill
+  center lies outside the arrival room, and its output is now covered by
+  these hard bounds.
+
+ASSESSED:
+
+- **KiCad JSON scalar class values are Java-parity lossy**: Java's own
+  KiCadJsonWriter serializes layer-0 trace widths and clearances (the
+  schema has scalar fields), and the reader broadcasts them — a
+  layer-dependent class narrows to layer 0 in BOTH implementations. A
+  zone's `clearanceValue` is deliberately ignored when its class name
+  already resolved: the class definition (netClasses/clearanceRules)
+  is authoritative for known classes; the value exists to recreate
+  matrix-only classes.
+- **The outline model holds one contour + one scalar clearance**;
+  multi-contour outlines and per-direction boundary classes are not
+  representable — a board-outline entity is part of the component-model
+  porting phase.
+
 ## OPEN ITEMS (reconciled 2026-07-15, iter 190)
 
 The early-phase checklists above are ticked with pointers; these are

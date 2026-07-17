@@ -352,7 +352,16 @@ fn mcp_dispatch(request: &str, jobs: &Jobs, route_seconds: u64) -> String {
             let params = req.get("params").cloned().unwrap_or(Json::Null);
             let name = params.str_or("name", "");
             let args = params.get("arguments").cloned().unwrap_or(Json::Null);
-            let job_id = args.num("job_id") as u64;
+            // a job id must be a non-negative INTEGER exactly representable
+            // as f64 — a bare `as u64` cast silently accepted missing,
+            // fractional, negative or imprecise ids
+            let needs_id = !matches!(name.as_str(), "enqueue_job" | "system_status");
+            let job_id = match args.get("job_id").and_then(|v| v.as_f64()) {
+                Some(v) if v >= 0.0 && v.fract() == 0.0 && v <= (1u64 << 53) as f64 => v as u64,
+                Some(_) => return mcp_error(id, -32602, "job_id must be a non-negative integer"),
+                None if needs_id => return mcp_error(id, -32602, "job_id is required"),
+                None => 0,
+            };
             let (verb, path, payload): (&str, String, Vec<u8>) = match name.as_str() {
                 "enqueue_job" => ("POST", "/v1/jobs/enqueue".into(), Vec::new()),
                 "set_job_input" => (
@@ -366,12 +375,16 @@ fn mcp_dispatch(request: &str, jobs: &Jobs, route_seconds: u64) -> String {
                 "system_status" => ("GET", "/v1/system/status".into(), Vec::new()),
                 _ => return mcp_error(id, -32602, "Unknown tool"),
             };
-            let (_, _, out) = route(verb, &path, &payload, jobs, route_seconds);
+            let (status, _, out) = route(verb, &path, &payload, jobs, route_seconds);
+            // a REST failure surfaces as an MCP tool ERROR (isError), not a
+            // successful result wrapping the error body
+            let is_error = !status.starts_with("2");
             mcp_result(
                 &id,
                 &format!(
-                    "{{\"content\": [{{\"type\": \"text\", \"text\": {}}}]}}",
-                    json_string(&out)
+                    "{{\"content\": [{{\"type\": \"text\", \"text\": {}}}], \"isError\": {}}}",
+                    json_string(&out),
+                    is_error
                 ),
             )
         }
@@ -436,6 +449,7 @@ fn run_job(
         trace_half_width: board.rules.get_min_trace_half_width().max(500),
         clearance_class: 1,
         via_padstack,
+        via_clearance_class: 0,
         via_attach_allowed: false,
         via_cost: 50_000.0,
         max_expansions: 100_000,

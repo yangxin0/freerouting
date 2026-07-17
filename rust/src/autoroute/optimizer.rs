@@ -33,13 +33,17 @@ fn net_violations(board: &BasicBoard, net_no: i32) -> usize {
                 let Some(other) = board.get_item(oid) else {
                     continue;
                 };
-                // The authoritative DRC's pair predicate: same (other, item)
-                // matrix order, same same-net drill rule, same keepout and
-                // conduction exclusions — the optimizer's own violation gate
-                // must agree with the final DRC, and skipping ALL same-net
-                // pairs here let it accept same-net drill violations the
-                // final check then reported.
-                let Some(cl) = crate::drc::required_clearance(board, item, other, *l) else {
+                // The authoritative DRC's pair predicate in the final DRC's
+                // (lower-id, higher-id) order: same same-net drill rule,
+                // same keepout and conduction exclusions — the optimizer's
+                // own violation gate must agree with the final DRC even on
+                // asymmetric matrices.
+                let required = if oid < *id {
+                    crate::drc::required_clearance(board, other, item, *l)
+                } else {
+                    crate::drc::required_clearance(board, item, other, *l)
+                };
+                let Some(cl) = required else {
                     continue;
                 };
                 let check = s.offset(cl);
