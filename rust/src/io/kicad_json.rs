@@ -385,7 +385,14 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
         }
         let name = zone.str_or("netName", "");
         let net = net_no_by_name(&board.rules, &name);
-        let zone_cl = board.rules.get_trace_clearance_class(net.unwrap_or(0));
+        // an explicit clearance class (by matrix name) wins; the net's
+        // class is the fallback — custom keepout classes used to reload
+        // as the default
+        let zone_cl = zone
+            .get("clearanceClass")
+            .and_then(|v| v.as_str())
+            .and_then(|n| board.rules.clearance_matrix.get_no(n))
+            .unwrap_or_else(|| board.rules.get_trace_clearance_class(net.unwrap_or(0)));
         let area = PolylineArea::new(PolygonShape::new(corners), Vec::new());
         let id = board.insert_area(
             area,
@@ -478,6 +485,9 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
             } else {
                 board.rules.clearance_matrix.get_value(1, 1, 0, false)
             };
+            // preserve the outline verbatim: the writer must emit THIS
+            // polygon and clearance, not a bounding-box fabrication
+            board.outline = Some((corners.clone(), strip));
             crate::io::dsn_import::insert_boundary_keepouts(
                 &mut board,
                 &corners,

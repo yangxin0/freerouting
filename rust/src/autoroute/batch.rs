@@ -197,6 +197,38 @@ pub fn route_net_with_store(
         let Some((start, dest)) = best else {
             break;
         };
+        // Java plane routing (BatchAutorouter.autoroute_item): for a net
+        // carrying a copper pour, the search STARTS from the plane-connected
+        // side (route_start_set = the connected set) and grows toward the
+        // unconnected items — orient the pair so the pour-side component is
+        // the start when exactly one side already reaches the plane
+        let contains_plane = board
+            .rules
+            .nets
+            .get_by_no(net_no)
+            .is_some_and(|n| n.contains_plane());
+        let (start, dest) = if contains_plane {
+            let side_has_plane = |id: ItemId| {
+                components
+                    .iter()
+                    .find(|c| c.contains(&id))
+                    .is_some_and(|c| {
+                        c.iter().any(|&i| {
+                            matches!(
+                                board.get_item(i).map(|it| &it.kind),
+                                Some(crate::board::ItemKind::ObstacleArea(a)) if a.is_conduction
+                            )
+                        })
+                    })
+            };
+            if !side_has_plane(start) && side_has_plane(dest) {
+                (dest, start)
+            } else {
+                (start, dest)
+            }
+        } else {
+            (start, dest)
+        };
         // route component to component (Java: p_start_set/p_dest_set):
         // the maze may start from any endpoint-capable item and arrive at
         // ANY connectable item of the destination component — trace
@@ -302,13 +334,20 @@ pub fn batch_route(board: &mut BasicBoard, request: &BatchRequest) -> BatchResul
 /// victims are rerouted immediately. Transactional: commits only if the
 /// failed net and every victim end up completely connected, otherwise
 /// the board state is restored.
+///
+/// `request` is the BASE request: the per-net rules (width, clearance
+/// class, via rule, attach policy, plane via cost) are derived here for
+/// the target AND separately for every victim — copying the
+/// target-adjusted request onto the victims recreated a strict-clearance
+/// victim under the aggressor's weaker class.
 pub fn route_net_with_ripup(
     board: &mut BasicBoard,
     net_no: i32,
     request: &BatchRequest,
     ripup_penalty: f64,
 ) -> BatchResult {
-    let mut result = route_net(board, net_no, request);
+    let net_request = request_for_net(board, net_no, request);
+    let mut result = route_net(board, net_no, &net_request);
     if result.failed_connections == 0 || ripup_penalty <= 0.0 {
         return result;
     }
@@ -325,7 +364,7 @@ pub fn route_net_with_ripup(
     let rip_request = BatchRequest {
         ripup_penalty,
         deadline: Some(sub_deadline),
-        ..*request
+        ..net_request
     };
     let retry = route_net(board, net_no, &rip_request);
     let mut extra_routed = retry.routed_connections;
@@ -349,9 +388,11 @@ pub fn route_net_with_ripup(
             if board.net_is_completely_connected(ripped) {
                 continue;
             }
+            // the victim reroutes under ITS OWN net-class rules, derived
+            // from the base request — not the target-adjusted one
             let victim_request = BatchRequest {
                 deadline: Some(sub_deadline),
-                ..*request
+                ..request_for_net(board, ripped, request)
             };
             let r = route_net(board, ripped, &victim_request);
             extra_routed += r.routed_connections;
@@ -579,8 +620,7 @@ fn repair_violations(
             if time_limit.is_some_and(|t| t.limit_exceeded()) {
                 break;
             }
-            let net_request = request_for_net(board, net_no, &repair_request);
-            route_net_with_ripup(board, net_no, &net_request, ripup_penalty);
+            route_net_with_ripup(board, net_no, &repair_request, ripup_penalty);
         }
         crate::board::basic_board::set_birth_tag(0);
         let no_net_broken = complete_before
@@ -697,7 +737,6 @@ pub fn batch_route_passes_with_time_limit(
             if board.net_is_completely_connected(net_no) {
                 continue;
             }
-            let net_request = request_for_net(board, net_no, &pass_request);
             // cross-net room reuse (Java: maintain_database): a clear
             // win on big boards since SRN + obstacle rooms (8088sbc
             // pass 0: 18.9s → 9.8s, 2.6× fewer completions), a small
@@ -708,11 +747,16 @@ pub fn batch_route_passes_with_time_limit(
                 .unwrap_or_else(|_| board.item_count() >= 400);
             let net_start = std::time::Instant::now();
             let result = if ripup_penalty > 0.0 {
-                route_net_with_ripup(board, net_no, &net_request, ripup_penalty)
-            } else if cross_net {
-                route_net_with_store(board, net_no, &net_request, &mut engine_store)
+                // takes the BASE request: target and victim rules are
+                // derived per net inside
+                route_net_with_ripup(board, net_no, &pass_request, ripup_penalty)
             } else {
-                route_net(board, net_no, &net_request)
+                let net_request = request_for_net(board, net_no, &pass_request);
+                if cross_net {
+                    route_net_with_store(board, net_no, &net_request, &mut engine_store)
+                } else {
+                    route_net(board, net_no, &net_request)
+                }
             };
             if crate::debug::stats() && net_start.elapsed().as_secs() >= 15 {
                 eprintln!(
@@ -853,8 +897,7 @@ pub fn batch_route_passes_with_time_limit(
             if restart_limit.is_some_and(|t| t.limit_exceeded()) {
                 break;
             }
-            let net_request = request_for_net(board, net_no, &restart_request);
-            let result = route_net_with_ripup(board, net_no, &net_request, ripup_penalty);
+            let result = route_net_with_ripup(board, net_no, &restart_request, ripup_penalty);
             restart.routed_connections += result.routed_connections;
             restart.failed_connections += result.failed_connections;
             if lock_restart

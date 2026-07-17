@@ -1341,7 +1341,10 @@ pub fn maze_route(board: &mut BasicBoard, request: &MazeRouteRequest) -> Option<
         request.trace_half_width,
     );
     let result = find_connection(board, &mut engine, request)?;
-    insert_connection(board, request, &result)
+    // the same angle normalization as the engine path: inserting the raw
+    // search corners bypassed the board's 45/90-degree restriction
+    let restricted = restrict_corners(&engine, &result, board.rules.get_trace_angle_restriction());
+    insert_connection(board, request, &restricted)
 }
 
 /// The intermediate corner making from→to compliant with the angle

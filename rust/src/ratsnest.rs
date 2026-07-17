@@ -147,7 +147,7 @@ pub fn ratsnest_json(board: &BasicBoard) -> String {
         let comma = if i + 1 < lines.len() { "," } else { "" };
         out.push_str(&format!(
             "    {{\"net\": \"{}\", \"from\": [{:.4}, {:.4}], \"to\": [{:.4}, {:.4}]}}{comma}\n",
-            l.net_name.replace('"', "'"),
+            crate::io::json::escape(&l.net_name),
             l.from.0 * scale,
             -l.from.1 * scale,
             l.to.0 * scale,

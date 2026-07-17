@@ -159,6 +159,12 @@ impl<'a> Parser<'a> {
                     match self.peek() {
                         Some(b'n') => out.push('\n'),
                         Some(b't') => out.push('\t'),
+                        // the remaining RFC 8259 escapes — falling through
+                        // to the identity case turned \r, \b and \f into
+                        // literal 'r', 'b' and 'f'
+                        Some(b'r') => out.push('\r'),
+                        Some(b'b') => out.push('\u{0008}'),
+                        Some(b'f') => out.push('\u{000c}'),
                         Some(b'u') => {
                             // \uXXXX
                             let hex = self

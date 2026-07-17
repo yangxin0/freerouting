@@ -191,6 +191,19 @@ fn route(
             let Some(job) = map.get_mut(&id) else {
                 return not_found;
             };
+            // input may only be (re)uploaded before the job starts: an
+            // unconditional READY_TO_START reopened cancelled jobs and
+            // could arm a second worker on a running one
+            if !matches!(job.state, JobState::Queued | JobState::ReadyToStart) {
+                return (
+                    "409 Conflict",
+                    "application/json",
+                    format!(
+                        "{{\"error\": \"job is {} and no longer accepts input\"}}",
+                        job.state.as_str()
+                    ),
+                );
+            }
             job.input_dsn = Some(String::from_utf8_lossy(body).to_string());
             job.state = JobState::ReadyToStart;
             ("200 OK", "application/json", job_json(job))

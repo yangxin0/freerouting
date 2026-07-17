@@ -1,14 +1,38 @@
 //! Port of `RulesWriter.java` / `RulesReader.java`: persisting the board
-//! design rules in the Specctra `(rules PCB ...)` format — snap angle,
-//! the default width/clearance rule, and the net classes with their
-//! rules.
+//! design rules in the standard Specctra `(rules PCB ...)` format — snap
+//! angle, the default width/clearance rule with its typed clearances,
+//! via padstacks, `(via ...)`/`(via_rule ...)` declarations, and the net
+//! classes with membership, clearance-class/via-rule references and
+//! circuit rules. The reader applies the same grammar through the shared
+//! network-scope appliers used by the DSN importer, so a standard
+//! Freerouting `.rules` file (e.g. Issue593's) restores its classes, via
+//! rules and typed clearances instead of only the global defaults.
+
+use std::collections::HashMap;
 
 use crate::board::basic_board::BasicBoard;
 use crate::board::AngleRestriction;
 use crate::io::dsn::parse_dsn;
+use crate::io::dsn_import::{
+    apply_class_scope, apply_typed_clearances, apply_via_declaration, apply_via_rule_declaration,
+    NetworkScopeCtx,
+};
+use crate::rules::ItemClass;
+
+fn item_class_token(ic: ItemClass) -> Option<&'static str> {
+    match ic {
+        ItemClass::Via => Some("via"),
+        ItemClass::Pin => Some("pin"),
+        ItemClass::Smd => Some("smd"),
+        ItemClass::Area => Some("area"),
+        ItemClass::Trace => Some("wire"),
+        ItemClass::None => None,
+    }
+}
 
 /// Serializes the design rules (Java: `RulesWriter.write`).
 pub fn write_rules(board: &BasicBoard, design_name: &str) -> String {
+    let scale_out = |v: i32| v as f64 / board.resolution.max(1) as f64;
     let mut out = String::new();
     out.push_str(&format!("(rules PCB {design_name}\n"));
     let angle = match board.rules.get_trace_angle_restriction() {
@@ -17,37 +41,154 @@ pub fn write_rules(board: &BasicBoard, design_name: &str) -> String {
         AngleRestriction::NinetyDegree => "ninety_degree",
     };
     out.push_str(&format!("  (snap_angle {angle})\n"));
+    // the default rule: width, untyped clearance, then the typed
+    // clearances this board carries (smd_to_turn_gap, same-net drill
+    // rules, and every distinct class pair differing from the default —
+    // quoted two-token pairs, the form Java also writes)
     let hw = board.rules.get_min_trace_half_width();
-    let cl = board.rules.clearance_matrix.get_value(1, 1, 0, false);
-    out.push_str(&format!(
-        "  (rule\n    (width {})\n    (clearance {})\n  )\n",
-        (2 * hw) as f64 / board.resolution.max(1) as f64,
-        cl as f64 / board.resolution.max(1) as f64,
-    ));
-    let scale_out = |v: i32| v as f64 / board.resolution.max(1) as f64;
+    let matrix = &board.rules.clearance_matrix;
+    let default_cl = matrix.get_value(1, 1, 0, false);
+    out.push_str("  (rule\n");
+    out.push_str(&format!("    (width {})\n", scale_out(2 * hw)));
+    out.push_str(&format!("    (clearance {})\n", scale_out(default_cl)));
+    let turn_gap = board.rules.get_pin_edge_to_turn_dist();
+    if turn_gap > 0.0 {
+        out.push_str(&format!(
+            "    (clearance {} (type smd_to_turn_gap))\n",
+            turn_gap / board.resolution.max(1) as f64
+        ));
+    }
+    let mut same_net: Vec<(ItemClass, ItemClass, i32)> = board
+        .rules
+        .same_net_clearances()
+        .filter(|(a, b, _)| a <= b)
+        .collect();
+    same_net.sort();
+    for (a, b, v) in same_net {
+        if let (Some(ta), Some(tb)) = (item_class_token(a), item_class_token(b)) {
+            out.push_str(&format!(
+                "    (clearance {} (type {ta}_{tb}_same_net))\n",
+                scale_out(v)
+            ));
+        }
+    }
+    for i in 1..matrix.get_class_count() {
+        for j in i..matrix.get_class_count() {
+            let v = matrix.get_value(i, j, 0, false);
+            if v != default_cl && v > 0 {
+                out.push_str(&format!(
+                    "    (clearance {} (type \"{}\" \"{}\"))\n",
+                    scale_out(v),
+                    matrix.get_name(i).unwrap_or("default"),
+                    matrix.get_name(j).unwrap_or("default"),
+                ));
+            }
+        }
+    }
+    out.push_str("  )\n");
+    // via padstacks referenced by the via infos, as per-layer rect
+    // approximations of their tile shapes (the model keeps resolved
+    // shapes, not the pad taxonomy)
+    let mut via_padstacks: Vec<usize> = (0..board.rules.via_infos.count())
+        .map(|i| board.rules.via_infos.get(i).get_padstack())
+        .collect();
+    via_padstacks.sort_unstable();
+    via_padstacks.dedup();
+    for &ps_no in &via_padstacks {
+        let Some(ps) = board.padstacks.get_by_no(ps_no) else {
+            continue;
+        };
+        out.push_str(&format!("  (padstack \"{}\"\n", ps.name));
+        for layer in ps.from_layer()..=ps.to_layer() {
+            let Some(shape) = ps.get_shape(layer) else {
+                continue;
+            };
+            let bb = shape.bounding_box();
+            let layer_name = board
+                .layer_structure
+                .arr
+                .get(layer)
+                .map(|l| l.name.as_str())
+                .unwrap_or("F.Cu");
+            out.push_str(&format!(
+                "    (shape (rect {layer_name} {} {} {} {}))\n",
+                scale_out(bb.ll.x),
+                scale_out(bb.ll.y),
+                scale_out(bb.ur.x),
+                scale_out(bb.ur.y),
+            ));
+        }
+        if !ps.attach_allowed {
+            out.push_str("    (attach off)\n");
+        }
+        out.push_str("  )\n");
+    }
+    // via declarations ((via NAME PADSTACK CLEARANCE_CLASS [attach]))
+    for i in 0..board.rules.via_infos.count() {
+        let info = board.rules.via_infos.get(i);
+        let Some(ps) = board.padstacks.get_by_no(info.get_padstack()) else {
+            continue;
+        };
+        out.push_str(&format!(
+            "  (via \"{}\" \"{}\" \"{}\"{})\n",
+            info.get_name(),
+            ps.name,
+            matrix
+                .get_name(info.get_clearance_class())
+                .unwrap_or("default"),
+            if info.attach_smd_allowed() {
+                " attach"
+            } else {
+                ""
+            }
+        ));
+    }
+    // via rules ((via_rule NAME VIA...))
+    for rule in &board.rules.via_rules {
+        out.push_str(&format!("  (via_rule \"{}\"", rule.name));
+        for k in 0..rule.via_count() {
+            out.push_str(&format!(
+                " \"{}\"",
+                board.rules.via_infos.get(rule.get_via(k)).get_name()
+            ));
+        }
+        out.push_str(")\n");
+    }
+    // net classes with their MEMBER NETS (Java Network.write_net_class);
+    // a class without members reads back as the default-class descriptor
     for i in 0..board.rules.net_classes.count() {
         let class = board.rules.net_classes.get(i);
-        out.push_str(&format!("  (class \"{}\"\n", class.get_name()));
+        out.push_str(&format!("  (class \"{}\"", class.get_name()));
+        for n in 1..=board.rules.nets.max_net_no() {
+            if let Some(net) = board.rules.nets.get_by_no(n) {
+                if net.get_class() == i {
+                    out.push_str(&format!(" \"{}\"", net.name));
+                }
+            }
+        }
+        out.push('\n');
+        // the trace clearance class by NAME (standard reference form)
+        if let Some(name) = matrix.get_name(class.get_trace_clearance_class()) {
+            out.push_str(&format!("    (clearance_class \"{name}\")\n"));
+        }
+        // the via rule by name
+        if let Some(rule) = class
+            .get_via_rule()
+            .and_then(|rule_id| board.rules.via_rules.get(rule_id))
+        {
+            out.push_str(&format!("    (via_rule \"{}\")\n", rule.name));
+        }
         // the widest active-layer width (the single-width router's rule)
         let hw = (0..class.layer_count())
             .filter(|&l| class.is_active_routing_layer(l))
             .map(|l| class.get_trace_half_width(l))
             .max()
             .unwrap_or(0);
-        // emit width AND clearance so a custom class's spacing is not discarded
-        let tcc = class.get_trace_clearance_class();
-        let class_cl = board.rules.clearance_matrix.get_value(tcc, tcc, 0, false);
-        out.push_str("    (rule");
         if hw > 0 {
-            out.push_str(&format!(" (width {})", scale_out(2 * hw)));
+            out.push_str(&format!("    (rule (width {}))\n", scale_out(2 * hw)));
         }
-        if class_cl > 0 {
-            out.push_str(&format!(" (clearance {})", scale_out(class_cl)));
-        }
-        out.push_str(")\n");
         // per-layer widths: a layer whose width differs from the class
-        // maximum gets its own (layer_rule L (rule (width ...))), so a
-        // layer-dependent class no longer collapses to one width
+        // maximum gets its own (layer_rule L (rule (width ...)))
         let layer_count = board.layer_structure.layer_count();
         for l in 0..layer_count {
             let lw = class.get_trace_half_width(l);
@@ -76,17 +217,6 @@ pub fn write_rules(board: &BasicBoard, design_name: &str) -> String {
         if class.is_shove_fixed() {
             out.push_str("    (shove_fixed on)\n");
         }
-        // the class's via rule, persisted by its first via's padstack name
-        if let Some(padstack_name) = class
-            .get_via_rule()
-            .and_then(|rule_id| board.rules.via_rules.get(rule_id))
-            .filter(|rule| rule.via_count() > 0)
-            .map(|rule| board.rules.via_infos.get(rule.get_via(0)).get_padstack())
-            .and_then(|ps| board.padstacks.get_by_no(ps))
-            .map(|ps| ps.name.clone())
-        {
-            out.push_str(&format!("    (use_via \"{padstack_name}\")\n"));
-        }
         out.push_str("  )\n");
     }
     out.push_str(")\n");
@@ -94,7 +224,13 @@ pub fn write_rules(board: &BasicBoard, design_name: &str) -> String {
 }
 
 /// Applies a `.rules` document to the board (Java: `RulesReader.read`);
-/// returns the number of applied settings.
+/// returns the number of applied settings. Standard grammar: the
+/// `(via ...)`, `(via_rule ...)` and `(class ...)` scopes go through the
+/// same appliers as the DSN network scope, so class membership,
+/// clearance-class and via-rule references, circuit rules and typed
+/// clearances all take effect. `(padstack ...)` scopes resolve by NAME
+/// against the design's library (shapes are not rebuilt); a padstack
+/// unknown to the design is skipped.
 pub fn read_rules(board: &mut BasicBoard, content: &str) -> Result<usize, String> {
     let root = parse_dsn(content).map_err(|e| format!("rules parse error: {e:?}"))?;
     let mut applied = 0usize;
@@ -106,7 +242,8 @@ pub fn read_rules(board: &mut BasicBoard, content: &str) -> Result<usize, String
         });
         applied += 1;
     }
-    let scale = |v: f64| -> i32 { (v * board.resolution.max(1) as f64).round() as i32 };
+    let resolution = board.resolution.max(1) as f64;
+    let scale = move |v: f64| -> i32 { (v * resolution).round() as i32 };
     if let Some(rule) = root.child("rule") {
         if let Some(w) = rule
             .child("width")
@@ -116,8 +253,10 @@ pub fn read_rules(board: &mut BasicBoard, content: &str) -> Result<usize, String
             board.rules.set_default_trace_half_widths(scale(w) / 2);
             applied += 1;
         }
+        // the UNTYPED clearance is the global default
         if let Some(c) = rule
-            .child("clearance")
+            .children("clearance")
+            .find(|c| c.child("type").is_none())
             .and_then(|n| n.arg())
             .and_then(|v| v.parse::<f64>().ok())
         {
@@ -130,48 +269,68 @@ pub fn read_rules(board: &mut BasicBoard, content: &str) -> Result<usize, String
             }
             applied += 1;
         }
+        // typed clearances: class pairs, smd_to_turn_gap, *_same_net
+        applied += apply_typed_clearances(&mut board.rules, rule, &scale);
     }
-    // per-class (class NAME (rule (width W) (clearance C))) blocks: apply the
-    // width and clearance to the named net class instead of ignoring them.
+    // split the board borrows: the appliers mutate rules while reading
+    // the padstack library and layer structure
+    let padstack_nos: HashMap<String, usize> = (1..=board.padstacks.count())
+        .filter_map(|no| board.padstacks.get_by_no(no).map(|p| (p.name.clone(), no)))
+        .collect();
+    let mut via_rule_ids: HashMap<String, usize> = board
+        .rules
+        .via_rules
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.name.clone(), i))
+        .collect();
+    let default_clearance = board.rules.clearance_matrix.get_value(1, 1, 0, false);
+    let BasicBoard {
+        ref mut rules,
+        ref padstacks,
+        ref layer_structure,
+        ..
+    } = *board;
+    let ctx = NetworkScopeCtx {
+        padstack_nos: &padstack_nos,
+        padstacks,
+        layer_structure,
+        default_clearance,
+    };
+    for via_node in root.children("via") {
+        apply_via_declaration(rules, &ctx, via_node);
+        applied += 1;
+    }
+    for rule_node in root.children("via_rule") {
+        apply_via_rule_declaration(rules, &mut via_rule_ids, rule_node);
+        applied += 1;
+    }
+    let mut class_for_clearance: HashMap<i32, usize> = HashMap::new();
     for class_node in root.children("class") {
         let Some(class_name) = class_node.arg() else {
             continue;
         };
-        let Some(class_idx) = board.rules.net_classes.get_by_name(class_name) else {
+        apply_class_scope(
+            rules,
+            &ctx,
+            class_node,
+            &scale,
+            &mut class_for_clearance,
+            &via_rule_ids,
+        );
+        applied += 1;
+        let Some(class_idx) = rules.net_classes.get_by_name(class_name).or_else(|| {
+            class_node
+                .args()
+                .nth(1)
+                .is_none()
+                .then(|| rules.get_default_net_class())
+        }) else {
             continue;
         };
-        // the (rule ...) node is optional: use_layer/shove_fixed/use_via
-        // and layer_rule below must apply even without one
-        if let Some(rule) = class_node.child("rule") {
-            if let Some(w) = rule
-                .child("width")
-                .and_then(|n| n.arg())
-                .and_then(|v| v.parse::<f64>().ok())
-            {
-                board
-                    .rules
-                    .net_classes
-                    .get_mut(class_idx)
-                    .set_trace_half_width((scale(w) / 2).max(1));
-                applied += 1;
-            }
-            // the default class's clearance is carried by the global rule
-            // above; apply per-class clearance only to the non-default
-            // classes so the shared default clearance class is not perturbed.
-            if class_idx != 0 {
-                if let Some(c) = rule
-                    .child("clearance")
-                    .and_then(|n| n.arg())
-                    .and_then(|v| v.parse::<f64>().ok())
-                {
-                    board.rules.ensure_net_class_clearance(class_idx, scale(c));
-                    applied += 1;
-                }
-            }
-        }
         // per-layer width overrides ((layer_rule L (rule (width W))))
         for lr in class_node.children("layer_rule") {
-            let Some(layer) = lr.arg().and_then(|n| board.layer_structure.get_no(n)) else {
+            let Some(layer) = lr.arg().and_then(|n| layer_structure.get_no(n)) else {
                 continue;
             };
             if let Some(w) = lr
@@ -180,71 +339,47 @@ pub fn read_rules(board: &mut BasicBoard, content: &str) -> Result<usize, String
                 .and_then(|n| n.arg())
                 .and_then(|v| v.parse::<f64>().ok())
             {
-                board
-                    .rules
+                rules
                     .net_classes
                     .get_mut(class_idx)
                     .set_trace_half_width_on_layer(layer, (scale(w) / 2).max(1));
                 applied += 1;
             }
         }
-        // restricted active routing layers, like the DSN class scope — the
-        // PRESENCE of (use_layer ...) restricts, so an empty list (no layer
-        // active) round-trips instead of reloading as all-active
+        // an EMPTY (use_layer) list means NO layer is active; the shared
+        // class applier only restricts on non-empty lists
         let has_use_layer = class_node
             .children("circuit")
             .any(|c| c.child("use_layer").is_some());
-        if has_use_layer {
-            let use_layers: Vec<usize> = class_node
-                .children("circuit")
-                .flat_map(|c| c.children("use_layer"))
-                .flat_map(|u| u.args())
-                .filter_map(|n| board.layer_structure.get_no(n))
-                .collect();
-            let class = board.rules.net_classes.get_mut(class_idx);
-            class.set_all_layers_active(false);
-            for l in use_layers {
-                class.set_active_routing_layer(l, true);
-            }
-            applied += 1;
-        }
-        if let Some(v) = class_node.child("shove_fixed").and_then(|s| s.arg()) {
-            board
-                .rules
+        let resolved: Vec<usize> = class_node
+            .children("circuit")
+            .flat_map(|c| c.children("use_layer"))
+            .flat_map(|u| u.args())
+            .filter_map(|n| layer_structure.get_no(n))
+            .collect();
+        if has_use_layer && resolved.is_empty() {
+            rules
                 .net_classes
                 .get_mut(class_idx)
-                .set_shove_fixed(v.eq_ignore_ascii_case("on"));
+                .set_all_layers_active(false);
             applied += 1;
         }
-        // (use_via "PADSTACK"): bind the class to a via rule over the named
-        // padstack, reusing a declared via info when one exists
-        if let Some(padstack_no) =
-            class_node
-                .child("use_via")
-                .and_then(|u| u.arg())
-                .and_then(|name| {
-                    (1..=board.padstacks.count()).find(|&no| {
-                        board
-                            .padstacks
-                            .get_by_no(no)
-                            .is_some_and(|p| p.name == name)
-                    })
-                })
+        // legacy private form from earlier rounds of this port:
+        // (use_via "PADSTACK") directly in the class scope
+        if let Some(padstack_no) = class_node
+            .child("use_via")
+            .and_then(|u| u.arg())
+            .and_then(|name| padstack_nos.get(name).copied())
         {
-            let existing = (0..board.rules.via_infos.count())
-                .find(|&i| board.rules.via_infos.get(i).get_padstack() == padstack_no);
-            let tcc = board
-                .rules
-                .net_classes
-                .get(class_idx)
-                .get_trace_clearance_class();
-            let attach = board.rules.via_at_smd_allowed
-                && board
-                    .padstacks
+            let existing = (0..rules.via_infos.count())
+                .find(|&i| rules.via_infos.get(i).get_padstack() == padstack_no);
+            let tcc = rules.net_classes.get(class_idx).get_trace_clearance_class();
+            let attach = rules.via_at_smd_allowed
+                && padstacks
                     .get_by_no(padstack_no)
                     .is_some_and(|p| p.attach_allowed);
             let via_info_id = existing.or_else(|| {
-                board.rules.via_infos.add(crate::rules::ViaInfo::new(
+                rules.via_infos.add(crate::rules::ViaInfo::new(
                     format!("via::{class_name}"),
                     padstack_no,
                     tcc,
@@ -254,10 +389,9 @@ pub fn read_rules(board: &mut BasicBoard, content: &str) -> Result<usize, String
             if let Some(via_info_id) = via_info_id {
                 let mut via_rule = crate::rules::ViaRule::new(class_name);
                 via_rule.append_via(via_info_id);
-                board.rules.via_rules.push(via_rule);
-                let rule_id = board.rules.via_rules.len() - 1;
-                board
-                    .rules
+                rules.via_rules.push(via_rule);
+                let rule_id = rules.via_rules.len() - 1;
+                rules
                     .net_classes
                     .get_mut(class_idx)
                     .set_via_rule(Some(rule_id));
@@ -319,6 +453,10 @@ mod tests {
         let text = write_rules(&board, "mini2");
         assert!(text.contains("use_layer"), "restricted layers persisted");
         assert!(text.contains("shove_fixed on"), "shove_fixed persisted");
+        assert!(
+            text.contains("(class \"special\" \"N1\""),
+            "class net membership persisted: {text}"
+        );
         let mut board2 = import_dsn(TWO_LAYER).expect("import");
         read_rules(&mut board2, &text).expect("read");
         let idx2 = board2.rules.net_classes.get_by_name("special").unwrap();
@@ -385,6 +523,66 @@ mod tests {
         assert_eq!(
             board2.rules.get_trace_angle_restriction(),
             AngleRestriction::NinetyDegree
+        );
+    }
+
+    #[test]
+    fn standard_freerouting_rules_file_applies_fully() {
+        // Issue593's rules file (standard Java RulesWriter output): the
+        // via declarations, via rules, class membership and typed
+        // clearances must all take effect, not just the global defaults
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let dsn = std::fs::read_to_string(format!("{root}/fixtures/Issue593-BBD_Mars-64.dsn"))
+            .expect("fixture missing from checkout");
+        let rules_text =
+            std::fs::read_to_string(format!("{root}/fixtures/Issue593-BBD_Mars-64.rules"))
+                .expect("fixture missing from checkout");
+        let mut board = import_dsn(&dsn).expect("import");
+        let applied = read_rules(&mut board, &rules_text).expect("read rules");
+        assert!(
+            applied >= 10,
+            "the standard rules file must restore more than the defaults (applied {applied})"
+        );
+        // the typed clearances from the (rule ...) scope (single-token
+        // names without '_' are skipped, exactly like Java)
+        assert_eq!(
+            board.rules.get_pin_edge_to_turn_dist(),
+            1250.0,
+            "smd_to_turn_gap 125.0 at resolution 10"
+        );
+        // the via declarations and rules
+        assert!(
+            board
+                .rules
+                .via_infos
+                .get_by_name("Via[0-1]_800:400_um")
+                .is_some(),
+            "via declaration must be applied"
+        );
+        assert!(
+            board
+                .rules
+                .via_infos
+                .get_by_name("Via[0-1]_800:400_um-kicad_default")
+                .is_some(),
+            "second via declaration must be applied"
+        );
+        // the kicad_default class: membership + via rule
+        let kd = board
+            .rules
+            .net_classes
+            .get_by_name("kicad_default")
+            .expect("kicad_default class");
+        let gnd = &board.rules.nets.get_by_name("GND");
+        assert!(!gnd.is_empty());
+        assert_eq!(
+            gnd[0].get_class(),
+            kd,
+            "GND must join kicad_default per the class membership"
+        );
+        assert!(
+            board.rules.net_classes.get(kd).get_via_rule().is_some(),
+            "the class's via rule reference must bind"
         );
     }
 }

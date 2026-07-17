@@ -199,6 +199,7 @@ pub fn optimize_nets_pass(
             continue; // nothing routed (single-pad net or pad-only)
         }
         board.generate_snapshot();
+        let id_watermark = board.next_item_id();
         rip_net_route_items(board, net_no);
         // reroute with a modest per-net budget; in-search ripup enabled
         // so the reroute may push others aside (their recovery is part
@@ -212,19 +213,22 @@ pub fn optimize_nets_pass(
             .min(cap);
         // Reroute with the net's own class rules (width, clearance class, via
         // padstack), not the base request, so the optimizer does not relay
-        // traces under the wrong clearance.
-        let net_request = BatchRequest {
+        // traces under the wrong clearance. route_net_with_ripup derives the
+        // target's AND every victim's rules from the base itself.
+        let base_request = BatchRequest {
             deadline: Some(crate::datastructures::TimeLimit::new(budget_ms)),
-            ..crate::autoroute::batch::request_for_net(board, net_no, request)
+            ..*request
         };
         crate::board::basic_board::set_birth_tag(1);
         if was_complete {
+            let net_request =
+                crate::autoroute::batch::request_for_net(board, net_no, &base_request);
             let _ = crate::autoroute::batch::route_net(board, net_no, &net_request);
         } else {
             // recovery attempt: in-search ripup with a strong penalty
             // (the plain reroute already failed during routing)
             let penalty = request.via_cost.max(20_000.0) * 2.0;
-            let _ = route_net_with_ripup(board, net_no, &net_request, penalty);
+            let _ = route_net_with_ripup(board, net_no, &base_request, penalty);
         }
         // Whole-board acceptance (Java `ItemRouteResult.improved`): fewer
         // incomplete airlines, else fewer vias, else shorter traces. Partial
@@ -246,7 +250,18 @@ pub fn optimize_nets_pass(
                 Ordering::Equal => global_after.len_after + min_gain < gb.len_after,
             },
         };
-        let candidate = global_improved && net_violations(board, net_no) <= violations_before;
+        // DRC acceptance is NOT only target-scoped: the reroute's ripup can
+        // move FOREIGN copper (shove substitutes, victim reroutes). A new
+        // violation must involve an item this step created, so auditing
+        // every post-watermark foreign item with the authoritative pair
+        // predicate closes the gap the target-net count missed.
+        let foreign_new_clear = board
+            .items()
+            .filter(|(id, it)| **id >= id_watermark && !it.base.contains_net(net_no))
+            .all(|(id, _)| crate::drc::item_is_clear(board, *id));
+        let candidate = global_improved
+            && net_violations(board, net_no) <= violations_before
+            && foreign_new_clear;
         // Retained guard (stricter than Java's raw count): never accept a
         // reroute that breaks a previously-complete net, even if the global
         // airline count still nets out lower — catches the symmetric one-for-one

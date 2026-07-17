@@ -92,6 +92,13 @@ impl BoardRules {
         self.same_net_clearance.values().copied().max().unwrap_or(0)
     }
 
+    /// All recorded same-net clearances (both orderings), for persistence.
+    pub fn same_net_clearances(&self) -> impl Iterator<Item = (ItemClass, ItemClass, i32)> + '_ {
+        self.same_net_clearance
+            .iter()
+            .map(|(&(a, b), &v)| (a, b, v))
+    }
+
     /// The default item clearance class.
     pub fn default_clearance_class() -> usize {
         1

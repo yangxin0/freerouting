@@ -72,6 +72,12 @@ pub struct BasicBoard {
     /// The imported DSN document without its wiring section (for DSN
     /// export: the router only changes the wiring).
     pub dsn_source: Option<String>,
+    /// The imported board outline — closed corner list (board units) and
+    /// its clearance — when the source carried one. Preserved for
+    /// lossless export: the outline polygon is not reconstructible from
+    /// the boundary keepout strips, and fabricating it from the all-item
+    /// bounding box grows the board by whatever copper overhangs it.
+    pub outline: Option<(Vec<IntPoint>, i32)>,
     /// The undoable item database.
     item_list: UndoableObjects<ItemId, Item>,
     /// The spatial index over all item shapes.
@@ -123,6 +129,7 @@ impl BasicBoard {
             resolution: 10,
             unit: "um".to_string(),
             dsn_source: None,
+            outline: None,
             item_list: UndoableObjects::new(),
             search_tree: MinAreaTree::new(),
             tree_entries: BTreeMap::new(),
@@ -199,6 +206,14 @@ impl BasicBoard {
     fn new_id_no(&mut self) -> ItemId {
         self.next_id_no += 1;
         self.next_id_no
+    }
+
+    /// The id the NEXT inserted item will receive. Ids are never reused,
+    /// so items with `id >= next_item_id()` captured at an earlier point
+    /// were created after it — a cheap watermark for "what did this step
+    /// create".
+    pub fn next_item_id(&self) -> ItemId {
+        self.next_id_no + 1
     }
 
     /// Inserts an item, assigning it a fresh id. Returns the id.

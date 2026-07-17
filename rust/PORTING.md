@@ -594,6 +594,82 @@ ASSESSED:
   remains as designed (legal, connected, geometry-only displacement) —
   see the fifth round.
 
+## Seventh-round remediation (2026-07-17) — verification findings
+
+An independent verification of HEAD 15360c79 produced 9 findings (4 P1,
+5 P2). All fixed except the assessed model limits at the end. 260 tests,
+fmt/clippy clean; fixture baselines unchanged (J2 24/24 at 999.98,
+Issue093 @130, Issue413/143 clean, Issue721 @139; Issue593 A/B-verified
+against the pre-round build: identical 59/94 completion at tl=30 with
+fewer vias, 46 vs 50).
+
+FIXED:
+
+- **Victims reroute under their own net rules.** `route_net_with_ripup`
+  now takes the BASE request and derives the per-net rules (width,
+  clearance class, via rule, attach policy, plane via cost) separately
+  for the target and for every victim — copying the target-adjusted
+  request onto victims recreated a strict-clearance victim under the
+  aggressor's weaker class. All four call sites (pass loop, repair,
+  restart fallback, optimizer) pass their pristine base.
+- **KiCad outline round-trip.** `BasicBoard::outline` preserves the
+  source outline polygon and clearance (set by the DSN boundary importer
+  AND the KiCad reader); the writer emits it verbatim instead of
+  fabricating a bounding box at a made-up clearance. Fixture tests:
+  Issue027's polygon extents survive, Issue649's 0.5 mm clearance
+  survives.
+- **`.rules` speaks the standard Freerouting grammar.** The DSN network
+  scope's `(via ...)`, `(via_rule ...)` and `(class ...)` application
+  logic is extracted into shared appliers (`apply_via_declaration`,
+  `apply_via_rule_declaration`, `apply_class_scope`,
+  `apply_typed_clearances`) used identically by the DSN importer and
+  `read_rules`, so a standard file restores class membership, clearance
+  class and via-rule references, circuit rules and typed clearances —
+  verified against Issue593-BBD_Mars-64.rules (via declarations bind,
+  GND joins kicad_default, smd_to_turn_gap applies). The writer emits
+  the standard forms (member nets, padstack scopes as rect
+  approximations, via/via_rule declarations, `(clearance V (type
+  "A" "B"))` pairs, same-net rules) and dropped the private `use_via`
+  form (still parsed for files written by earlier rounds). Grammar
+  bounds kept from Java: single-token type names without `_` are
+  skipped exactly like `Structure.set_clearance_rule`;
+  `autoroute_settings` is not consumed (no Rust state for per-layer
+  directional costs — the standing router-core gap).
+- **API job state machine**: input upload is guarded (only QUEUED /
+  READY_TO_START accept input, 409 otherwise), so cancelled jobs cannot
+  be reopened and running jobs cannot arm a second worker.
+- **Plane-directed routing**: beyond the 1/10 via cost, a plane net's
+  connection pair is oriented so the pour-connected component is the
+  START side (Java `route_start_set = connected set`), growing the
+  search from the plane toward the unconnected item.
+- **Public `maze_route` normalizes angles** through the same
+  `restrict_corners` as the engine path.
+- **Optimizer DRC acceptance covers foreign copper**: every item created
+  by the step (id watermark) that is NOT on the target net must pass the
+  authoritative pair predicate (`drc::item_is_clear`) — a new violation
+  must involve a new item, so this closes the moved-foreign-items gap
+  the target-net count missed; target-net items keep the
+  before/after-count tolerance for boards with imported violations.
+- **JSON conformance**: the parser decodes `\r`, `\b`, `\f` (previously
+  literal r/b/f — corrupting JSON-RPC ids); ratsnest output escapes net
+  names through the shared escaper.
+- **KiCad keepout clearance classes** round-trip by matrix-class name
+  (`clearanceClass` on zones).
+
+ASSESSED (model limits, unchanged):
+
+- **KiCad component fidelity**: the collapsed item model has no
+  component entity — references are fabricated (`C{n}`), transforms are
+  identity, pads are bounding-box rects, and via drills are
+  diameter-derived. A faithful component model (refdes, placement
+  transform, pad-shape taxonomy, drill sizes) is its own porting phase,
+  tracked as an open item; the current writer round-trips ELECTRICAL
+  behavior (spans, nets, shapes-as-extents) but not fabrication data.
+- **Plane routing depth**: cost and orientation now match Java's
+  mechanisms; Java's remaining plane-specific behavior (the
+  CONNECTED_TO_PLANE early-out) is structural in this port because
+  conduction areas are connectable net items in the connectivity model.
+
 ## OPEN ITEMS (reconciled 2026-07-15, iter 190)
 
 The early-phase checklists above are ticked with pointers; these are

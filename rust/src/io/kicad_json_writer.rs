@@ -212,36 +212,41 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
         ));
     }
     out.push_str("  ],\n");
-    // outline: the board's bounding box (the exact outline polygon is not
-    // reconstructible from the boundary keepout strips)
-    let bb = board.bounding_box();
-    let outline_corners = if bb.is_empty() {
-        String::new()
-    } else {
-        [
-            (bb.ll.x, bb.ll.y),
-            (bb.ur.x, bb.ll.y),
-            (bb.ur.x, bb.ur.y),
-            (bb.ll.x, bb.ur.y),
-        ]
-        .iter()
-        .map(|(x, y)| {
-            format!(
-                "{{\"x\": {:.6}, \"y\": {:.6}}}",
-                mm(*x as f64),
-                mm(-*y as f64)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-    };
-    // the outline clearance is the board's real default clearance, not a
-    // hardcoded 0.2 mm (Issue649 keeps its 0.5); the reader consumes it as
-    // the boundary strip width
+    // outline: the PRESERVED source outline when the import carried one
+    // (a DSN boundary or a KiCad outline object) — the exact polygon and
+    // its clearance survive the round trip. Only a board without one
+    // falls back to the all-item bounding box at the default clearance.
     let default_clearance = matrix.get_value(1, 1, 0, false) as f64;
+    let (outline_points, outline_clearance): (Vec<(f64, f64)>, f64) = match &board.outline {
+        Some((corners, cl)) => (
+            corners.iter().map(|p| (p.x as f64, p.y as f64)).collect(),
+            *cl as f64,
+        ),
+        None => {
+            let bb = board.bounding_box();
+            if bb.is_empty() {
+                (Vec::new(), default_clearance)
+            } else {
+                (
+                    vec![
+                        (bb.ll.x as f64, bb.ll.y as f64),
+                        (bb.ur.x as f64, bb.ll.y as f64),
+                        (bb.ur.x as f64, bb.ur.y as f64),
+                        (bb.ll.x as f64, bb.ur.y as f64),
+                    ],
+                    default_clearance,
+                )
+            }
+        }
+    };
+    let outline_corners = outline_points
+        .iter()
+        .map(|(x, y)| format!("{{\"x\": {:.6}, \"y\": {:.6}}}", mm(*x), mm(-*y)))
+        .collect::<Vec<_>>()
+        .join(", ");
     out.push_str(&format!(
         "  \"outline\": {{\"corners\": [{outline_corners}], \"clearance\": {:.6}}},\n",
-        mm(default_clearance)
+        mm(outline_clearance)
     ));
     // routed traces and vias
     let mut traces = Vec::new();
@@ -332,12 +337,18 @@ pub fn export_kicad_json(board: &BasicBoard) -> String {
         if corners.len() < 3 {
             continue;
         }
+        // the zone's clearance class BY NAME, so a custom keepout class
+        // does not reload as the default
+        let cl_name = matrix
+            .get_name(item.base.clearance_class)
+            .unwrap_or("default");
         zones.push(format!(
-            "    {{\"netName\": \"{}\", \"layerIndex\": {}, \"isObstacle\": {}, \"viaOnly\": {}, \"polygon\": [{}]}}",
+            "    {{\"netName\": \"{}\", \"layerIndex\": {}, \"isObstacle\": {}, \"viaOnly\": {}, \"clearanceClass\": \"{}\", \"polygon\": [{}]}}",
             esc(&net_name),
             a.layer,
             a.is_obstacle,
             a.via_only,
+            esc(cl_name),
             corners.join(", ")
         ));
     }
@@ -448,6 +459,59 @@ mod tests {
             })
             .expect("conduction area");
         assert!(zone2.is_obstacle, "obstacle flag must survive");
+    }
+
+    #[test]
+    fn source_outline_geometry_and_clearance_survive_round_trip() {
+        // Issue027: the DSN boundary polygon must be exported verbatim, not
+        // fabricated from the whole-board bounding box (which pours expand);
+        // Issue649: the KiCad outline clearance (0.5 mm) must survive reload.
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let dsn = std::fs::read_to_string(format!("{root}/fixtures/Issue027-zMRETestFixture.dsn"))
+            .expect("fixture missing from checkout");
+        let board = import_dsn(&dsn).expect("import");
+        let (outline, _) = board.outline.clone().expect("DSN boundary preserved");
+        let json = export_kicad_json(&board);
+        let board2 = import_kicad_json(&json).expect("re-import");
+        let (outline2, _) = board2.outline.clone().expect("outline consumed");
+        // same corner count and same extents (units differ only by the
+        // mm round trip: compare in mm with a loose epsilon)
+        assert_eq!(outline.len(), outline2.len(), "outline polygon preserved");
+        let extent = |pts: &[crate::geometry::planar::IntPoint], per_mm: f64| {
+            let xs: Vec<f64> = pts.iter().map(|p| p.x as f64 / per_mm).collect();
+            let ys: Vec<f64> = pts.iter().map(|p| p.y as f64 / per_mm).collect();
+            (
+                xs.iter().cloned().fold(f64::MAX, f64::min),
+                xs.iter().cloned().fold(f64::MIN, f64::max),
+                ys.iter().cloned().fold(f64::MAX, f64::min),
+                ys.iter().cloned().fold(f64::MIN, f64::max),
+            )
+        };
+        let a = extent(&outline, board.board_units_per_mm());
+        let b = extent(&outline2, board2.board_units_per_mm());
+        assert!(
+            (a.0 - b.0).abs() < 0.01
+                && (a.1 - b.1).abs() < 0.01
+                && (a.2 - b.2).abs() < 0.01
+                && (a.3 - b.3).abs() < 0.01,
+            "outline extents must survive the round trip: {a:?} vs {b:?}"
+        );
+
+        let kicad_json = std::fs::read_to_string(format!(
+            "{root}/fixtures/Issue649-kicad_ecc83-pp_input_board_v1.json"
+        ))
+        .expect("fixture missing from checkout");
+        let board3 = import_kicad_json(&kicad_json).expect("import");
+        let (_, cl) = board3.outline.clone().expect("outline preserved");
+        let cl_mm = cl as f64 / board3.board_units_per_mm();
+        let json3 = export_kicad_json(&board3);
+        let board4 = import_kicad_json(&json3).expect("re-import");
+        let (_, cl4) = board4.outline.clone().expect("outline preserved");
+        let cl4_mm = cl4 as f64 / board4.board_units_per_mm();
+        assert!(
+            (cl_mm - cl4_mm).abs() < 1e-6,
+            "the outline clearance must survive the round trip ({cl_mm} vs {cl4_mm})"
+        );
     }
 
     #[test]

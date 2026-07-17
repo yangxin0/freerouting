@@ -9,7 +9,7 @@ use crate::board::LayerStructure;
 
 /// Item classes for default clearance-class lookup
 /// (Java: `DefaultItemClearanceClasses.ItemClass`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ItemClass {
     None,
     Trace,
