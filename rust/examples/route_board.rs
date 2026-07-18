@@ -164,7 +164,7 @@ fn main() {
             st.searches, st.expansions, st.pushes, st.rooms_completed
         );
     }
-    let ses = export_ses(&board, "routed_board", 10);
+    let ses = export_ses(&board, "routed_board", 10).expect("cannot serialize session");
     let out = "routed_board.ses";
     std::fs::write(out, &ses).expect("cannot write session");
     println!("session written to {out} ({} bytes)", ses.len());

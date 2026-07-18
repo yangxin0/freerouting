@@ -65,7 +65,7 @@ pub fn opt_via_location(board: &mut BasicBoard, via_id: ItemId, max_recursion: u
     let ItemKind::Via(via) = &item.kind else {
         return false;
     };
-    if item.base.is_shove_fixed() || item.base.component_no != 0 {
+    if item.base.is_shove_fixed() || item.base.component_no != 0 || via.is_escape_via {
         return false;
     }
     let contacts = board.get_normal_contacts(via_id);
@@ -83,6 +83,7 @@ pub fn opt_via_location(board: &mut BasicBoard, via_id: ItemId, max_recursion: u
     let attach_allowed = via.attach_allowed;
     let net_nos = item.base.net_nos.clone();
     let cl_class = item.base.clearance_class;
+    let via_clearance_class_explicit = item.base.clearance_class_explicit;
     let tolerance = board
         .padstacks
         .get_by_no(padstack)
@@ -117,6 +118,7 @@ pub fn opt_via_location(board: &mut BasicBoard, via_id: ItemId, max_recursion: u
         if len_after + 2.0 * hw1.max(hw2) as f64 >= len_before {
             continue;
         }
+        let watermark = board.next_item_id();
         board.generate_snapshot();
         // detach the via-end stubs so the move has room
         let mut new_items: Vec<ItemId> = Vec::new();
@@ -140,7 +142,10 @@ pub fn opt_via_location(board: &mut BasicBoard, via_id: ItemId, max_recursion: u
                 hw1.max(hw2),
                 attach_allowed,
             ) {
-                Some(vid) => new_items.push(vid),
+                Some(vid) => {
+                    board.set_item_clearance_class_explicit(vid, via_clearance_class_explicit);
+                    new_items.push(vid)
+                }
                 None => ok = false,
             }
         }
@@ -152,9 +157,10 @@ pub fn opt_via_location(board: &mut BasicBoard, via_id: ItemId, max_recursion: u
                 .iter()
                 .all(|&n| board.net_is_completely_connected(n));
         let stubs_clear = all_connected
-            && new_items
-                .iter()
-                .all(|&nid| crate::drc::item_is_clear(board, nid));
+            && board
+                .item_ids_since(watermark)
+                .into_iter()
+                .all(|nid| crate::drc::item_is_clear(board, nid));
         if stubs_clear {
             board.pop_snapshot();
             return true;
@@ -175,7 +181,7 @@ fn opt_single_contact_via(board: &mut BasicBoard, via_id: ItemId, trace_id: Item
     let ItemKind::Via(via) = &item.kind else {
         return false;
     };
-    if item.base.is_shove_fixed() || item.base.component_no != 0 {
+    if item.base.is_shove_fixed() || item.base.component_no != 0 || via.is_escape_via {
         return false;
     }
     let Some(t) = board.get_item(trace_id).cloned() else {
@@ -189,6 +195,7 @@ fn opt_single_contact_via(board: &mut BasicBoard, via_id: ItemId, trace_id: Item
     let attach_allowed = via.attach_allowed;
     let net_nos = item.base.net_nos.clone();
     let cl_class = item.base.clearance_class;
+    let via_clearance_class_explicit = item.base.clearance_class_explicit;
     let tolerance = board
         .padstacks
         .get_by_no(padstack)
@@ -205,6 +212,7 @@ fn opt_single_contact_via(board: &mut BasicBoard, via_id: ItemId, trace_id: Item
         ItemKind::PolylineTrace(pt) => pt.half_width,
         _ => return false,
     };
+    let watermark = board.next_item_id();
     board.generate_snapshot();
     let mut new_items: Vec<ItemId> = Vec::new();
     // when the via reaches the trace's far corner the stub degenerates:
@@ -229,6 +237,7 @@ fn opt_single_contact_via(board: &mut BasicBoard, via_id: ItemId, trace_id: Item
             attach_allowed,
         ) {
             Some(vid) => {
+                board.set_item_clearance_class_explicit(vid, via_clearance_class_explicit);
                 new_items.push(vid);
                 true
             }
@@ -243,9 +252,10 @@ fn opt_single_contact_via(board: &mut BasicBoard, via_id: ItemId, trace_id: Item
             .iter()
             .all(|&n| board.net_is_completely_connected(n));
     let clear = connected
-        && new_items
-            .iter()
-            .all(|&nid| crate::drc::item_is_clear(board, nid));
+        && board
+            .item_ids_since(watermark)
+            .into_iter()
+            .all(|nid| crate::drc::item_is_clear(board, nid));
     if clear {
         board.pop_snapshot();
         true
@@ -294,13 +304,16 @@ fn shorten_trace_at(
     let (layer, half_width) = (t.layer, t.half_width);
     let net_nos = item.base.net_nos.clone();
     let cl = item.base.clearance_class;
+    let cl_explicit = item.base.clearance_class_explicit;
     // the shortened stub keeps the source trace's fixed state (Java
     // Trace.split/combine semantics); recreating it Unfixed silently
     // stripped protection
     let fixed_state = item.base.fixed_state;
     board.remove_item(trace_id);
-    crate::board::basic_board::set_birth_tag(3);
-    let new_id = board.insert_trace(polyline, layer, half_width, net_nos, cl);
+    let new_id = {
+        let _birth_tag = crate::board::basic_board::birth_tag_scope(3);
+        board.insert_trace_with_provenance(polyline, layer, half_width, net_nos, cl, cl_explicit)
+    };
     board.set_fixed_state(new_id, fixed_state);
     Some(new_id)
 }
@@ -380,6 +393,33 @@ mod tests {
             crate::drc::check_board(&board).violations.is_empty(),
             "the refused move must leave the board DRC-clean"
         );
+    }
+
+    #[test]
+    fn optimizer_leaves_escape_via_on_its_smd_contact() {
+        let mut board = test_board();
+        let pad = board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        board.set_component_no(pad, 1);
+        let via = board.insert_escape_via(1, IntPoint::new(12000, 0), vec![1], 1, false, 0);
+        board.insert_trace(
+            Polyline::from_int_points(&[
+                IntPoint::new(0, 0),
+                IntPoint::new(6000, 3000),
+                IntPoint::new(12000, 0),
+            ]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        assert!(board.net_is_completely_connected(1));
+        assert!(!opt_via_location(&mut board, via, 3));
+        let ItemKind::Via(via_item) = &board.get_item(via).unwrap().kind else {
+            unreachable!()
+        };
+        assert_eq!(via_item.center, IntPoint::new(12000, 0));
+        assert!(via_item.is_escape_via);
+        assert_eq!(via_item.escape_smd_layer, Some(0));
     }
 
     #[test]

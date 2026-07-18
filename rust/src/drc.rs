@@ -45,7 +45,8 @@ pub(crate) fn drill_allowed(item: &crate::board::Item, padstacks: &crate::core::
 /// and the via/move insert gates:
 /// - same-net traces and areas never constrain; same-net drill pairs do,
 ///   at the `*_same_net` rule value when one exists, unless the attach
-///   exemption applies (attach-allowed via on a drillable same-net SMD pin);
+///   exemption applies (attach-allowed via on a drillable same-net SMD pin,
+///   or a marked escape via on its one recorded SMD layer);
 /// - two constraint areas do not clear against each other, keepouts skip
 ///   component pins, non-obstacle conduction areas do not participate, and
 ///   via keepouts constrain only vias;
@@ -72,8 +73,21 @@ pub(crate) fn required_clearance(
         let b_pin = is_pin(other);
         let attach =
             |it: &crate::board::Item| matches!(&it.kind, ItemKind::Via(v) if v.attach_allowed);
-        let exempt = (!a_pin && attach(item) && b_pin && drill_allowed(other, &board.padstacks))
-            || (!b_pin && attach(other) && a_pin && drill_allowed(item, &board.padstacks));
+        let escape_on = |it: &crate::board::Item| {
+            matches!(
+                &it.kind,
+                ItemKind::Via(v)
+                    if v.is_escape_via && v.escape_smd_layer == Some(layer)
+            )
+        };
+        let exempt = (!a_pin
+            && (attach(item) || escape_on(item))
+            && b_pin
+            && drill_allowed(other, &board.padstacks))
+            || (!b_pin
+                && (attach(other) || escape_on(other))
+                && a_pin
+                && drill_allowed(item, &board.padstacks));
         if exempt {
             return None;
         }
@@ -133,6 +147,55 @@ pub(crate) fn required_clearance(
             false,
         ) as f64
     }))
+}
+
+/// Clearance required when `new_class` belongs to an item that is about to
+/// be inserted.  Item ids are monotonically increasing, therefore the new
+/// item is always the higher-id side of the pair when the final DRC scans
+/// it.  Keeping this tiny adapter beside `required_clearance` prevents the
+/// search/room/shove code from accidentally querying the transposed cell of
+/// an asymmetric matrix.
+pub(crate) fn clearance_for_new_item(
+    board: &BasicBoard,
+    existing: &crate::board::Item,
+    new_class: usize,
+    layer: usize,
+) -> f64 {
+    board
+        .rules
+        .clearance_matrix
+        .get_value(new_class, existing.base.clearance_class, layer, false)
+        .max(0) as f64
+}
+
+/// The authoritative clearance-violation identity used by optimization and
+/// mutation gates.  `check_board` already deduplicates by item pair/layer;
+/// exposing that identity avoids the old shape-count heuristic, which could
+/// accept a board that merely exchanged one violation for another.
+pub(crate) fn violation_keys(
+    board: &BasicBoard,
+) -> std::collections::HashSet<(ItemId, ItemId, usize)> {
+    violation_snapshot(board).into_keys().collect()
+}
+
+/// Captures the authoritative severity of every existing violation. Identity
+/// alone is insufficient for transactional optimization: a candidate can
+/// keep the same pair/layer while moving the copper substantially closer.
+/// The positive deficit is stable across the final DRC and is compared before
+/// accepting a candidate board.
+pub(crate) fn violation_snapshot(
+    board: &BasicBoard,
+) -> std::collections::HashMap<(ItemId, ItemId, usize), f64> {
+    check_board(board)
+        .violations
+        .into_iter()
+        .map(|v| {
+            (
+                (v.first_item, v.second_item, v.layer),
+                (v.required_clearance - v.actual_distance).max(0.0),
+            )
+        })
+        .collect()
 }
 
 /// True when `id`'s copper keeps the required pairwise clearance to every
@@ -516,6 +579,47 @@ mod tests {
     }
 
     #[test]
+    fn escape_via_exception_is_limited_to_its_smd_layer() {
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true), Layer::new("B.Cu", true)]);
+        let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
+        let mut rules = BoardRules::new(stack.clone(), matrix);
+        rules.get_default_net_class();
+        let mut padstacks = Padstacks::new(2);
+        let shape = TileShape::Box(IntBox::from_coords(-300, -300, 300, 300));
+        let through = padstacks.add(
+            "through",
+            vec![Some(shape.clone()), Some(shape.clone())],
+            false,
+            false,
+        );
+        let front = padstacks.add("front", vec![Some(shape.clone()), None], false, false);
+        let back = padstacks.add("back", vec![None, Some(shape)], false, false);
+        let mut board = BasicBoard::new(stack, rules, padstacks);
+
+        let front_pin = board.insert_via(front, IntPoint::new(0, 0), vec![1], 1, false);
+        board.set_component_no(front_pin, 1);
+        let escape = board.insert_escape_via(through, IntPoint::new(0, 0), vec![1], 1, false, 0);
+        let ItemKind::Via(escape_item) = &board.get_item(escape).unwrap().kind else {
+            unreachable!()
+        };
+        assert!(escape_item.is_escape_via);
+        assert!(
+            !escape_item.attach_allowed,
+            "ViaInfo declaration is preserved"
+        );
+        assert!(
+            check_board(&board).violations.is_empty(),
+            "the marked F.Cu SMD contact is exempt"
+        );
+
+        let back_pin = board.insert_via(back, IntPoint::new(0, 0), vec![1], 1, false);
+        board.set_component_no(back_pin, 2);
+        let report = check_board(&board);
+        assert_eq!(report.violations.len(), 1);
+        assert_eq!(report.violations[0].layer, 1, "B.Cu remains constrained");
+    }
+
+    #[test]
     fn detects_a_violation_and_serializes() {
         let mut board = test_board();
         board.insert_trace(
@@ -540,6 +644,36 @@ mod tests {
         let json = report.to_kicad_json(&board, "test.dsn");
         assert!(json.contains("schemas.kicad.org/drc.v1.json"));
         assert!(json.contains("clearance"));
+    }
+
+    #[test]
+    fn violation_snapshot_distinguishes_same_pair_with_worse_clearance() {
+        let board_with_offset = |offset: i32| {
+            let mut board = test_board();
+            board.insert_trace(
+                Polyline::from_int_points(&[IntPoint::new(0, 0), IntPoint::new(5000, 0)]),
+                0,
+                100,
+                vec![1],
+                1,
+            );
+            board.insert_trace(
+                Polyline::from_int_points(&[
+                    IntPoint::new(0, offset),
+                    IntPoint::new(5000, offset),
+                ]),
+                0,
+                100,
+                vec![2],
+                1,
+            );
+            board
+        };
+        let mild = violation_snapshot(&board_with_offset(350));
+        let severe = violation_snapshot(&board_with_offset(250));
+        assert_eq!(mild.keys().collect::<Vec<_>>(), severe.keys().collect());
+        let key = *mild.keys().next().expect("one violation");
+        assert!(severe[&key] > mild[&key]);
     }
 
     #[test]
@@ -600,5 +734,31 @@ mod tests {
         );
         let report = check_board(&board);
         assert!(report.violations.is_empty());
+    }
+
+    #[test]
+    fn new_item_clearance_uses_final_id_order_for_asymmetric_matrix() {
+        let mut board = test_board();
+        assert!(board.rules.clearance_matrix.append_class("strict"));
+        let strict = board.rules.clearance_matrix.get_no("strict").unwrap();
+        // M(new strict, old default) is strict; the transposed cell is zero.
+        board.rules.clearance_matrix.set_value(strict, 1, 0, 1000);
+        board.rules.clearance_matrix.set_value(1, strict, 0, 0);
+        board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(0, 0), IntPoint::new(5000, 0)]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        let new_id = board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(0, 700), IntPoint::new(5000, 700)]),
+            0,
+            100,
+            vec![2],
+            strict,
+        );
+        assert!(!crate::drc::item_is_clear(&board, new_id));
+        assert_eq!(check_board(&board).violations.len(), 1);
     }
 }

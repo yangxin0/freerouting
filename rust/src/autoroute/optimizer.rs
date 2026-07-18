@@ -9,57 +9,6 @@ use crate::autoroute::batch::{route_net_with_ripup, BatchRequest};
 use crate::board::basic_board::{BasicBoard, ItemId};
 use crate::board::ItemKind;
 
-/// The clearance violations touching one net's route items (local DRC:
-/// the optimizer must never trade violations for length).
-fn net_violations(board: &BasicBoard, net_no: i32) -> usize {
-    let mut count = 0usize;
-    for (id, item) in board.items() {
-        if item.base.component_no != 0 || !item.base.contains_net(net_no) {
-            continue;
-        }
-        for (s, l) in item.tile_shapes(&board.padstacks) {
-            // the radius must also cover `*_same_net` rules, which live
-            // outside the matrix and can exceed its maximum
-            let search_radius = board
-                .rules
-                .clearance_matrix
-                .max_value(*l)
-                .max(board.rules.max_same_net_clearance())
-                .max(0) as f64;
-            for oid in board.overlapping_items(&s.offset(search_radius), Some(*l)) {
-                if oid == *id {
-                    continue;
-                }
-                let Some(other) = board.get_item(oid) else {
-                    continue;
-                };
-                // The authoritative DRC's pair predicate in the final DRC's
-                // (lower-id, higher-id) order: same same-net drill rule,
-                // same keepout and conduction exclusions — the optimizer's
-                // own violation gate must agree with the final DRC even on
-                // asymmetric matrices.
-                let required = if oid < *id {
-                    crate::drc::required_clearance(board, other, item, *l)
-                } else {
-                    crate::drc::required_clearance(board, item, other, *l)
-                };
-                let Some(cl) = required else {
-                    continue;
-                };
-                let check = s.offset(cl);
-                if other.tile_shapes(&board.padstacks).iter().any(|(os, ol)| {
-                    ol == l
-                        && os.intersection(&check).dimension() >= 2
-                        && crate::drc::violates(s.euclidean_distance_to(os), cl)
-                }) {
-                    count += 1;
-                }
-            }
-        }
-    }
-    count
-}
-
 /// The via count and trace length of one net's route items.
 fn net_route_cost(board: &BasicBoard, net_no: i32) -> (usize, f64) {
     let mut vias = 0usize;
@@ -123,6 +72,12 @@ fn complete_net_set(board: &BasicBoard) -> Vec<bool> {
         v[n as usize] = board.net_is_completely_connected(n);
     }
     v
+}
+
+fn preserves_live_complete_nets(live: &BasicBoard, candidate: &BasicBoard) -> bool {
+    let before = complete_net_set(live);
+    (1..=live.rules.nets.max_net_no())
+        .all(|net| !before[net as usize] || candidate.net_is_completely_connected(net))
 }
 
 fn rip_net_route_items(board: &mut BasicBoard, net_no: i32) {
@@ -198,7 +153,11 @@ pub fn optimize_nets_pass(
         }
         let was_complete = board.net_is_completely_connected(net_no);
         let (vias_before, len_before) = net_route_cost(board, net_no);
-        let violations_before = net_violations(board, net_no);
+        // Snapshot the authoritative, deduplicated DRC identities and their
+        // clearance deficits. A raw shape count can decrease while a distinct
+        // pair/layer violation is introduced, and identity alone would allow
+        // an existing violation to become more severe.
+        let violations_before = crate::drc::violation_snapshot(board);
         if was_complete && vias_before == 0 && len_before == 0.0 {
             continue; // nothing routed (single-pad net or pad-only)
         }
@@ -223,11 +182,9 @@ pub fn optimize_nets_pass(
             deadline: Some(crate::datastructures::TimeLimit::new(budget_ms)),
             ..*request
         };
-        crate::board::basic_board::set_birth_tag(1);
+        let _birth_tag = crate::board::basic_board::birth_tag_scope(1);
         if was_complete {
-            let net_request =
-                crate::autoroute::batch::request_for_net(board, net_no, &base_request);
-            let _ = crate::autoroute::batch::route_net(board, net_no, &net_request);
+            let _ = crate::autoroute::batch::route_net(board, net_no, &base_request);
         } else {
             // recovery attempt: in-search ripup with a strong penalty
             // (the plain reroute already failed during routing)
@@ -254,27 +211,28 @@ pub fn optimize_nets_pass(
                 Ordering::Equal => global_after.len_after + min_gain < gb.len_after,
             },
         };
-        // DRC acceptance is NOT only target-scoped: the reroute's ripup can
-        // move FOREIGN copper (shove substitutes, victim reroutes). A new
-        // violation must involve an item this step created, so auditing
-        // every post-watermark foreign item with the authoritative pair
-        // predicate closes the gap the target-net count missed.
-        let foreign_new_clear = board
-            .items()
-            .filter(|(id, it)| **id >= id_watermark && !it.base.contains_net(net_no))
-            .all(|(id, _)| crate::drc::item_is_clear(board, *id));
-        let candidate = global_improved
-            && net_violations(board, net_no) <= violations_before
-            && foreign_new_clear;
+        // DRC acceptance is board-wide. Reject every newly introduced
+        // pair/layer identity (including target items and foreign shove
+        // substitutes), and reject a larger clearance deficit for an existing
+        // identity. Pre-existing violations may remain equal or improve.
+        let violations_after = crate::drc::violation_snapshot(board);
+        let introduces_violation = violations_after.iter().any(|(key, severity)| {
+            key.0 >= id_watermark
+                || key.1 >= id_watermark
+                || violations_before.get(key).is_none_or(|before| {
+                    severity > &(before + before.max(1.0) * crate::drc::DISTANCE_EPS)
+                })
+        });
+        let candidate = global_improved && !introduces_violation;
         // Retained guard (stricter than Java's raw count): never accept a
-        // reroute that breaks a previously-complete net, even if the global
-        // airline count still nets out lower — catches the symmetric one-for-one
-        // swap where the target completes while a victim breaks.
+        // reroute that breaks ANY previously-complete net, including the
+        // target itself.  A target can be ripped before its replacement is
+        // found; excluding it here lets a one-for-one airline improvement
+        // commit a disconnected target.
         let before = complete_before.as_ref().unwrap();
         let broke_a_net = candidate
-            && (1..=board.rules.nets.max_net_no()).any(|m| {
-                m != net_no && before[m as usize] && !board.net_is_completely_connected(m)
-            });
+            && (1..=board.rules.nets.max_net_no())
+                .any(|m| before[m as usize] && !board.net_is_completely_connected(m));
         let keep = candidate && !broke_a_net;
         if keep {
             board.pop_snapshot();
@@ -463,14 +421,22 @@ pub fn optimize_route_multithreaded_with_strategy(
 
         struct Shared {
             master: BasicBoard,
+            /// Incremented after every greedy adoption. A worker may publish
+            /// only against the exact master generation it cloned; otherwise
+            /// a late result can overwrite an improvement adopted by another
+            /// worker and break a net that was not complete in its stale base.
+            generation: usize,
             next: usize,
+            retry: Vec<i32>,
             best: Option<(NetRouteResult, BasicBoard)>,
             results: Vec<NetRouteResult>,
             adopted: usize,
         }
         let shared = std::sync::Mutex::new(Shared {
             master: board.clone(),
+            generation: 0,
             next: 0,
+            retry: Vec::new(),
             best: None,
             results: Vec::new(),
             adopted: 0,
@@ -481,17 +447,22 @@ pub fn optimize_route_multithreaded_with_strategy(
                     if time_limit.is_some_and(|t| t.limit_exceeded()) {
                         return;
                     }
-                    let (net_no, mut clone) = {
+                    let (net_no, mut clone, base_generation) = {
                         let mut s = shared.lock().unwrap();
-                        if s.next >= order.len() {
-                            return;
-                        }
-                        let net_no = order[s.next];
-                        s.next += 1;
+                        let net_no = if let Some(net_no) = s.retry.pop() {
+                            net_no
+                        } else {
+                            if s.next >= order.len() {
+                                return;
+                            }
+                            let net_no = order[s.next];
+                            s.next += 1;
+                            net_no
+                        };
                         // GREEDY tasks copy the live master; GLOBAL tasks
                         // conceptually copy the pass-start board, which is
                         // the same object since GLOBAL never updates it
-                        (net_no, s.master.clone())
+                        (net_no, s.master.clone(), s.generation)
                     };
                     // Compare the clone's WHOLE-BOARD metrics before and after
                     // (Java `ItemRouteResult.improved`): accept only when the
@@ -503,14 +474,35 @@ pub fn optimize_route_multithreaded_with_strategy(
                     let result = global_route_result(&clone, net_no);
                     let improved = result.improved_over(&base);
                     let mut s = shared.lock().unwrap();
-                    s.results.push(result);
-                    if improved && s.best.as_ref().is_none_or(|(b, _)| result.improved_over(b)) {
-                        if pass_strategy == BoardUpdateStrategy::Greedy {
-                            s.master = clone.clone();
+                    if !improved {
+                        s.results.push(result);
+                        continue;
+                    }
+                    if pass_strategy == BoardUpdateStrategy::Greedy {
+                        // Do not publish a stale clone over a newer master.
+                        // Requeue the net so it is recomputed from that live
+                        // master; board mutations are not composable, and a
+                        // blind overwrite would lose orthogonal improvements.
+                        if base_generation != s.generation {
+                            s.retry.push(net_no);
+                            continue;
+                        }
+                        let live_result = global_route_result(&s.master, net_no);
+                        if result.improved_over(&live_result)
+                            && preserves_live_complete_nets(&s.master, &clone)
+                        {
+                            s.master = clone;
+                            s.generation += 1;
                             s.adopted += 1;
                         }
+                    } else if s
+                        .best
+                        .as_ref()
+                        .is_none_or(|(best, _)| result.improved_over(best))
+                    {
                         s.best = Some((result, clone));
                     }
+                    s.results.push(result);
                 });
             }
         });
@@ -620,4 +612,64 @@ pub fn optimize_route(
         }
     }
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::{Layer, LayerStructure};
+    use crate::core::Padstacks;
+    use crate::geometry::planar::{IntBox, IntPoint, Polyline, TileShape};
+    use crate::rules::{BoardRules, ClearanceMatrix};
+
+    #[test]
+    fn stale_greedy_candidate_cannot_break_a_live_complete_net() {
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true)]);
+        let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
+        let mut rules = BoardRules::new(stack.clone(), matrix);
+        rules.get_default_net_class();
+        let net_a = rules.nets.add("A", 1, false);
+        let net_b = rules.nets.add("B", 1, false);
+        let mut padstacks = Padstacks::new(1);
+        padstacks.add_shape_on_layers(
+            TileShape::Box(IntBox::from_coords(-300, -300, 300, 300)),
+            0,
+            0,
+        );
+        let mut live = BasicBoard::new(stack, rules, padstacks);
+        for (component, net, y) in [(1, net_a, 0), (2, net_b, 2_000)] {
+            let first = live.insert_via(1, IntPoint::new(0, y), vec![net], 1, false);
+            live.set_component_no(first, component * 2 - 1);
+            let second = live.insert_via(1, IntPoint::new(5_000, y), vec![net], 1, false);
+            live.set_component_no(second, component * 2);
+            live.insert_trace(
+                Polyline::from_int_points(&[IntPoint::new(0, y), IntPoint::new(5_000, y)]),
+                0,
+                100,
+                vec![net],
+                1,
+            );
+        }
+        assert!(live.net_is_completely_connected(net_a));
+        assert!(live.net_is_completely_connected(net_b));
+
+        // Model a worker cloned before another worker completed B: its stale
+        // result can still look globally attractive on vias/length, but it is
+        // not admissible over the current live master.
+        let mut stale_candidate = live.clone();
+        let b_route: Vec<_> = stale_candidate
+            .items()
+            .filter(|(_, item)| {
+                item.base.component_no == 0
+                    && item.base.contains_net(net_b)
+                    && matches!(item.kind, ItemKind::PolylineTrace(_))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in b_route {
+            stale_candidate.remove_item(id);
+        }
+        assert!(!stale_candidate.net_is_completely_connected(net_b));
+        assert!(!preserves_live_complete_nets(&live, &stale_candidate));
+    }
 }

@@ -6,6 +6,12 @@ use crate::board::basic_board::{BasicBoard, ItemId};
 use crate::board::shove_trace_algo::shove_aside;
 use crate::geometry::planar::{IntBox, IntPoint, IntVector, TileShape};
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ViaInsertionPolicy {
+    pub attach_allowed: bool,
+    pub escape_smd_layer: Option<usize>,
+}
+
 /// The via pad shapes of `padstack` translated to `location`, with their
 /// layers, plus the start-trace shape when the trace pen is wider than
 /// the pad (Java: the `start_trace_circle` handling).
@@ -18,6 +24,9 @@ fn forced_shapes(
     let Some(ps) = board.padstacks.get_by_no(via_padstack) else {
         return Vec::new();
     };
+    if !ps.has_shapes_at_transition_endpoints(ps.from_layer(), ps.to_layer()) {
+        return Vec::new();
+    }
     let mut result = Vec::new();
     for layer in ps.from_layer()..=ps.to_layer() {
         let Some(shape) = ps.get_shape(layer) else {
@@ -55,10 +64,37 @@ pub fn insert_forced_via(
     trace_half_width: i32,
     attach_allowed: bool,
 ) -> Option<ItemId> {
+    insert_forced_via_with_escape(
+        board,
+        via_padstack,
+        location,
+        net_nos,
+        cl_class,
+        trace_half_width,
+        ViaInsertionPolicy {
+            attach_allowed,
+            escape_smd_layer: None,
+        },
+    )
+}
+
+/// Escape-aware variant used only by the maze insertion path. The selected
+/// ViaInfo's attach bit stays unchanged; `escape_smd_layer` supplies the one
+/// layer-scoped same-net SMD exception when the search landed on a pin.
+pub(crate) fn insert_forced_via_with_escape(
+    board: &mut BasicBoard,
+    via_padstack: usize,
+    location: IntPoint,
+    net_nos: &[i32],
+    cl_class: usize,
+    trace_half_width: i32,
+    policy: ViaInsertionPolicy,
+) -> Option<ItemId> {
     let shapes = forced_shapes(board, via_padstack, location, trace_half_width);
     if shapes.is_empty() {
         return None;
     }
+    let watermark = board.next_item_id();
     board.generate_snapshot();
     for (shape, layer) in &shapes {
         let max_cl = board.rules.clearance_matrix.max_value(*layer).max(0) as f64;
@@ -88,17 +124,32 @@ pub fn insert_forced_via(
             return None;
         }
     }
-    let id = board.insert_via(
-        via_padstack,
-        location,
-        net_nos.to_vec(),
-        cl_class,
-        attach_allowed,
-    );
-    // final gate: the inserted via must satisfy the authoritative DRC
-    // pairwise rule — the corridor check above excludes ALL same-net items,
-    // so same-net drill rules (via↔via/pin spacing) were never enforced here
-    if !crate::drc::item_is_clear(board, id) {
+    let id = if let Some(layer) = policy.escape_smd_layer {
+        board.insert_escape_via(
+            via_padstack,
+            location,
+            net_nos.to_vec(),
+            cl_class,
+            policy.attach_allowed,
+            layer,
+        )
+    } else {
+        board.insert_via(
+            via_padstack,
+            location,
+            net_nos.to_vec(),
+            cl_class,
+            policy.attach_allowed,
+        )
+    };
+    // Validate the entire transaction.  Shoving may have inserted foreign
+    // substitute traces; checking only the via lets an invalid substitute
+    // escape into the committed board.
+    if !board
+        .item_ids_since(watermark)
+        .into_iter()
+        .all(|new_id| crate::drc::item_is_clear(board, new_id))
+    {
         if crate::debug::shove() {
             eprintln!("FORCED VIA violates drill clearance at {location:?}");
         }

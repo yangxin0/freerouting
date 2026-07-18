@@ -286,10 +286,10 @@ impl IntBox {
         }
         let dist = dist.round() as i32;
         IntBox::from_coords(
-            self.ll.x - dist,
-            self.ll.y - dist,
-            self.ur.x + dist,
-            self.ur.y + dist,
+            self.ll.x.saturating_sub(dist),
+            self.ll.y.saturating_sub(dist),
+            self.ur.x.saturating_add(dist),
+            self.ur.y.saturating_add(dist),
         )
     }
 
@@ -299,7 +299,12 @@ impl IntBox {
             return *self;
         }
         let dist = dist.round() as i32;
-        IntBox::from_coords(self.ll.x - dist, self.ll.y, self.ur.x + dist, self.ur.y)
+        IntBox::from_coords(
+            self.ll.x.saturating_sub(dist),
+            self.ll.y,
+            self.ur.x.saturating_add(dist),
+            self.ur.y,
+        )
     }
 
     /// Offsets only the vertical boundary.
@@ -308,7 +313,12 @@ impl IntBox {
             return *self;
         }
         let dist = dist.round() as i32;
-        IntBox::from_coords(self.ll.x, self.ll.y - dist, self.ur.x, self.ur.y + dist)
+        IntBox::from_coords(
+            self.ll.x,
+            self.ll.y.saturating_sub(dist),
+            self.ur.x,
+            self.ur.y.saturating_add(dist),
+        )
     }
 
     /// Shrinks the width and height of the box by `width` on each side; the

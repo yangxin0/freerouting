@@ -313,8 +313,26 @@ impl BoardRules {
         new_class
     }
 
+    /// Replays default inheritance for a forward-declared class at its actual
+    /// source position. The matrix entries created by an earlier
+    /// `class_class` scope are intentionally untouched.
+    pub fn reinitialize_net_class_from_default(&mut self, class_idx: usize) {
+        let default = self.get_default_net_class();
+        if class_idx == default || class_idx >= self.net_classes.count() {
+            return;
+        }
+        let source = self.net_classes.get(default).clone();
+        self.net_classes
+            .get_mut(class_idx)
+            .inherit_settings_from(&source);
+    }
+
     fn init_class_from_default(&mut self, new_class: usize, default: usize) {
-        let via_rule = self.default_via_rule_id();
+        // Inherit the default CLASS's rule, not merely via_rules[0]. A rules
+        // reader may predeclare a future named via rule to resolve forward
+        // references; that declaration must not become semantic default state
+        // for an earlier class.
+        let via_rule = self.net_classes.get(default).get_via_rule();
         let half_width = self.net_classes.get(default).get_trace_half_width(0);
         let clearance_class = self.net_classes.get(default).get_trace_clearance_class();
         let class = self.net_classes.get_mut(new_class);
@@ -331,6 +349,18 @@ impl BoardRules {
         let rule = self.via_rules.get(rule_id)?;
         let via_info_id = *rule.vias().first()?;
         Some(self.via_infos.get(via_info_id).get_padstack())
+    }
+
+    /// Whether the net class explicitly binds a via rule. This is distinct
+    /// from finding a usable via: an empty, dangling, or span-incompatible
+    /// bound rule means "no permitted via", not "use the caller fallback".
+    pub fn has_bound_via_rule(&self, net_no: i32) -> bool {
+        self.nets.get_by_no(net_no).is_some_and(|net| {
+            self.net_classes
+                .get(net.get_class())
+                .get_via_rule()
+                .is_some()
+        })
     }
 
     /// The via INFO routing `net_no` should use: the rule's first via
@@ -367,6 +397,34 @@ impl BoardRules {
         let rule = self.via_rules.get(rule_id)?;
         let via_info_id = *rule.vias().first()?;
         Some(self.via_infos.get(via_info_id).attach_smd_allowed())
+    }
+
+    /// Clearance class carried by the ViaInfo selected for a concrete
+    /// padstack.  Imported/pre-routed vias must use this instead of blindly
+    /// inheriting the trace class; via and trace clearances are independent
+    /// in Specctra.
+    pub fn via_clearance_class_for_padstack(
+        &self,
+        net_no: i32,
+        padstack_no: usize,
+    ) -> Option<usize> {
+        self.via_info_for_padstack(net_no, padstack_no)
+            .map(|info| info.get_clearance_class())
+    }
+
+    /// ViaInfo selected by a net's via rule for one concrete padstack.
+    pub fn via_info_for_padstack(
+        &self,
+        net_no: i32,
+        padstack_no: usize,
+    ) -> Option<&crate::rules::ViaInfo> {
+        let net = self.nets.get_by_no(net_no)?;
+        let rule_id = self.net_classes.get(net.get_class()).get_via_rule()?;
+        let rule = self.via_rules.get(rule_id)?;
+        rule.vias().iter().find_map(|&via_id| {
+            let info = self.via_infos.get(via_id);
+            (info.get_padstack() == padstack_no).then_some(info)
+        })
     }
 
     /// The index of the default via rule, if any.

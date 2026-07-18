@@ -36,6 +36,7 @@ pub fn shove_aside(
     cl_class: usize,
     forbidden: &[(TileShape, usize)],
 ) -> bool {
+    let watermark = board.next_item_id();
     board.generate_snapshot();
     // shove blocking vias out first (Java: ForcedPadAlgo.forced_pad
     // starts with MoveDrillItemAlgo.shove_vias)
@@ -50,8 +51,22 @@ pub fn shove_aside(
         forbidden,
         4,
     ) {
-        board.pop_snapshot();
-        true
+        // Recursive substitute insertion can create more items than the
+        // caller knows about (including pieces produced while shoving a
+        // nested victim).  Validate the complete transaction, not only the
+        // top-level victim, with the same predicate as final DRC.
+        let born = board.item_ids_since(watermark);
+        let valid = born
+            .iter()
+            .copied()
+            .all(|id| crate::drc::item_is_clear(board, id));
+        if valid {
+            board.pop_snapshot();
+            true
+        } else {
+            board.undo();
+            false
+        }
     } else {
         board.undo();
         false
@@ -161,7 +176,7 @@ fn shove_insert(
     }
     // cut all victims now; the substitutes reconnect them
     entries.cutout_traces(board, &obstacles);
-    while let Some((polyline, piece_layer, half_width, net_nos, piece_cl)) =
+    while let Some((polyline, piece_layer, half_width, net_nos, piece_cl, piece_cl_explicit)) =
         entries.next_substitute_trace_piece(board)
     {
         if polyline.is_empty() || polyline.corner_count() < 2 {
@@ -203,8 +218,15 @@ fn shove_insert(
                 return false;
             }
         }
-        crate::board::basic_board::set_birth_tag(2);
-        board.insert_trace(polyline, piece_layer, half_width, net_nos, piece_cl);
+        let _birth_tag = crate::board::basic_board::birth_tag_scope(2);
+        board.insert_trace_with_provenance(
+            polyline,
+            piece_layer,
+            half_width,
+            net_nos,
+            piece_cl,
+            piece_cl_explicit,
+        );
     }
     true
 }

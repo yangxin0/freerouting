@@ -11,6 +11,7 @@ pub mod move_drill_item;
 pub mod opt_via;
 pub mod shape_trace_entries;
 pub mod shove_trace_algo;
+pub mod validation;
 
 pub use angle_restriction::AngleRestriction;
 pub use basic_board::{BasicBoard, ItemId};
@@ -22,3 +23,4 @@ pub use item::{
 pub use layer::{Layer, LayerStructure};
 pub use shape_trace_entries::{cutout_trace, ShapeTraceEntries};
 pub use shove_trace_algo::shove_aside;
+pub use validation::{validate_board_references, BoardValidationError};

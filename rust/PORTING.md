@@ -4,8 +4,76 @@ Incremental port of the Java sources (`src/main/java/app/freerouting`, 484 files
 to the `rust/` crate. Updated by each `/loop` iteration; the next iteration
 should pick up the first unchecked item below.
 
-> **Authoritative status: see "Second-round audit (2026-07-16)" below — the
-> remediation is PARTIAL, not complete.** The per-iteration sections that
+## Contract consolidation (2026-07-17)
+
+This section is the current authoritative status. The round-by-round audit
+sections below are historical context and are not a current open-defect list.
+The audited contracts now have one canonical implementation path: shared,
+ordered network-scope appliers for DSN and `.rules`; strict RFC JSON parsing;
+final DRC and insertion gates using the same item-id matrix ordering; and
+snapshot transactions whose semantic progress is checked before commit.
+Via choices carry their own padstack, clearance, attach, and layer-span data.
+Layer transitions require pads at both endpoints while allowing a plated barrel
+to cross padless inner layers; landing on a layer without a pad fails closed.
+Escape-via exceptions are explicit and layer-scoped, and clearance-class
+provenance survives split, shove, pull-tight, combine, via move, and optimizer
+replacement. Mixed inherited/explicit traces are intentionally not combined;
+an ambiguous coincident via-move bridge is rejected transactionally.
+
+Rules export preserves class bindings, zero and per-layer matrix values, and
+document order; asymmetric matrices are rejected instead of silently changed.
+DSN, SES, and KiCad interchange paths preserve units, outlines, netless copper
+where the schema permits it, item classes, and explicit-vs-inherited state.
+Where a format has no representation, its checked writer fails closed instead
+of silently dropping state: SES omits SystemFixed copper already present in
+the base DSN and rejects explicit/incompatible clearance, attach, escape, or
+subnet metadata; KiCad carries a versioned extension for Freerouting-only
+state; and DSN refuses to splice wiring into a retained source after any
+non-wiring semantic mutation. KiCad also carries item fixed-state and obstacle
+names, while malformed legacy outline polygons are normalized on import.
+KiCad JSON carries a versioned Freerouting routing-metadata extension for
+per-layer widths, active layers, item clearance bindings, and class flags;
+legacy scalar JSON remains readable. CLI and API/MCP validation, routing
+budgets, and exit status are covered by end-to-end tests.
+
+The common invariant boundary is `board::validate_board_references`: every
+checked writer runs format-specific representability checks and then this
+format-neutral reference/geometry/numeric validation. A semantic integration
+test deliberately corrupts the `.rules` reload target before applying the
+sidecar and compares normalized DSN, rules, SES, and KiCad state, so a test
+cannot pass merely because the destination already contained the source rules.
+The fixture sweep is intentionally explicit about malformed input: five
+legacy DSNs define conflicting padstacks under one name, Issue179 contains an
+empty network-class declaration, and Issue721 is truncated; all are rejected
+rather than guessed or silently skipped.
+
+Verification on this tree:
+
+- `cargo test --all-targets --no-fail-fast`: 391 passed, 0 failed, 0 ignored
+- `cargo fmt --all -- --check`: clean
+- `cargo clippy --all-targets -- -D warnings`: clean
+
+Remaining differences are deliberate model/performance boundaries: the tile
+router retains the documented occupy-on-push maze tradeoff; the cost model
+still represents trace width as one scalar per layer and does not yet model
+all directional `layer_rule` costs; and the compact board model cannot
+represent every native KiCad component transform/pad taxonomy or multiple
+outline contours. These are separate model phases, not unverified claims
+about the audited contracts.
+
+The final format-hardening pass added focused regression coverage for these
+boundaries: KiCad board-level routing switches and fixed-state/name metadata
+round-trip through the checked writer; SES rejects route items whose class or
+via metadata would be reconstructed differently (while retaining ordinary
+component-pin vias); and DSN records a typed non-wiring import baseline and
+returns `StaleSource` for changed rules, outline, padstack, net, or static-item
+state while still allowing route-only edits. The 391 tests comprise 379
+library tests, three CLI unit tests, six CLI/DRC integration tests, and one
+each for cross-format semantics, replay, and the real-board fixture targets.
+
+> **Historical note: see "Second-round audit (2026-07-16)" below.** Its
+> partial-remediation wording predates the contract consolidation above. The
+> per-iteration sections that
 > follow are HISTORICAL and contain claims that later parity audits corrected.
 > A first remediation round fixed a batch of findings (maze rip-up no longer
 > deletes pins; the equivalence test snapshots pins and is layer-aware; DSN
@@ -21,7 +89,7 @@ should pick up the first unchecked item below.
 > and two non-clearance features (named via-rule registry, autoroute
 > `layer_rule`). Do not read the historical sections as current truth.
 
-## Status (as of iteration 118)
+## Historical status (as of iteration 118)
 
 - **Working end to end**: DSN import (planes, net classes, back-side /
   rotated placement, multi-layer up to 6 layers, 500+ net designs) →
@@ -827,9 +895,8 @@ the only genuinely open work items across the whole port:
    (library_out (padstack NAME (shape ...) ...)) for every via
    padstack referenced by session vias or the via rules; boxes as
    rect, octagons/simplices as polygon corner lists, per layer in
-   board units. Verified: J2 session re-imports through --import-ses
-   at 24/24 / 999.94. (Java's `(attach off)` flag has no Rust
-   padstack field — omitted.)
+   board units, including the `(attach off)` state. Verified: J2 session
+   re-imports through `--import-ses` at 24/24 / 999.94.
 4. [DONE iter 194] Ratsnest airlines with Java's NetIncompletes
    semantics — Kruskal's MST over the net items' representative
    points (via/pin centers, both trace endpoints, area centroids),
@@ -936,7 +1003,7 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 
 ## Phase 3 — routing engines
 
-- [x] interim grid A* router → `autoroute/simple_router.rs` (NOT a Java port: stand-in so the pipeline routes end to end; uses exact board obstacle queries, inserts polyline traces + layer-change vias)
+- [x] interim grid A* router → `autoroute/simple_router.rs` (NOT a Java port; retained only under `cfg(test)` as a legacy unit-test oracle. It is intentionally not a public routing API because its request model cannot express ordered ViaInfo candidates, active-layer masks, or candidate-specific via policy.)
 - [x] expansion-room object model → `autoroute/expansion_room.rs` (ExpansionRoom/Door/MazeSearchElement as arena RoomGraph; door section segmentation incl. 2-dim restraint lines; + TileShape::diagonal_corner_segment)
 - [x] free-space room completion → `autoroute/room_completion.rs` (ShapeSearchTree.complete_shape + restrain_shape with deterministic obstacle order; + TileShape distance_to_the_left / side_of_line / is_intersected_interior_by / half_plane; divide_large_room pending)
 - [x] AutorouteEngine core → `autoroute/engine.rs` (per-net room graph; complete rooms restrained against board + existing rooms; doors to touching rooms; target doors to own-net items; lazy frontier expansion per border edge — simplified vs SortedRoomNeighbours' sorted-edge-gap algorithm, documented)
@@ -953,7 +1020,9 @@ rules package complete (except GUI print_info methods, intentionally out of scop
 - [x] SES session writer → `io/ses_export.rs` (network_out wires + autoroute vias; validated by re-parsing)
 - [x] end-to-end integration → `tests/route_fixture.rs` (import interf_u fixture → route /ACK → export session with the routed wire)
 - [x] boundary import as outline keepout strips (BoardOutline tree-shape equivalent; routes verified to stay inside the outline bbox)
-- [x] DSN wiring import (pre-routed wires and vias, dsn_import.rs) — but DSN keepout-AREA import and the SES library_out padstack section are NOT ported; listed under OPEN ITEMS.
+- [x] DSN wiring import (pre-routed wires and vias, `dsn_import.rs`); DSN
+  keepout areas and the SES `library_out` padstack section are implemented
+  and checked (the old omission note is historical).
 - [x] CLI entry point (src/main.rs: the Java jar's full non-GUI surface; see the feature checklist)
 
 ## Benchmark log

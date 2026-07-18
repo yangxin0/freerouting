@@ -32,6 +32,11 @@ pub struct ItemBase {
     pub net_nos: Vec<i32>,
     /// Index in the clearance matrix.
     pub clearance_class: usize,
+    /// Whether the source file explicitly assigned this item's clearance
+    /// class instead of inheriting it from the net class. Sidecar rule
+    /// reconciliation must preserve explicit overrides even when their
+    /// numeric class happened to equal the old default.
+    pub clearance_class_explicit: bool,
     /// The component this item belongs to (0 = none).
     pub component_no: i32,
     pub fixed_state: FixedState,
@@ -47,6 +52,7 @@ impl ItemBase {
             id_no,
             net_nos,
             clearance_class,
+            clearance_class_explicit: false,
             component_no: 0,
             fixed_state: FixedState::Unfixed,
             birth: 0,
@@ -91,6 +97,14 @@ pub struct ViaItem {
     pub center: IntPoint,
     /// True if vias of the own net may overlap this via.
     pub attach_allowed: bool,
+    /// Router-created escape via sitting on a same-net SMD pin.  This is
+    /// deliberately separate from `attach_allowed`: the ViaInfo's declared
+    /// attach bit remains unchanged, while this marker grants one narrowly
+    /// scoped DRC exception on `escape_smd_layer`.
+    pub is_escape_via: bool,
+    /// The single SMD-pin layer on which an escape via may share copper.
+    /// `None` for every ordinary/imported via.
+    pub escape_smd_layer: Option<usize>,
 }
 
 /// A trace on a single layer described by a polyline
@@ -168,6 +182,32 @@ impl Item {
                 padstack,
                 center,
                 attach_allowed,
+                is_escape_via: false,
+                escape_smd_layer: None,
+            }),
+            cached_tile_shapes: std::sync::OnceLock::new(),
+            cached_bounding_box: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Constructs a routed escape via while preserving the ViaInfo's
+    /// declared `attach_allowed` value.  The exception is represented by its
+    /// own layer-scoped metadata rather than by widening that declaration.
+    pub fn new_escape_via(
+        base: ItemBase,
+        padstack: usize,
+        center: IntPoint,
+        attach_allowed: bool,
+        smd_layer: usize,
+    ) -> Self {
+        Item {
+            base,
+            kind: ItemKind::Via(ViaItem {
+                padstack,
+                center,
+                attach_allowed,
+                is_escape_via: true,
+                escape_smd_layer: Some(smd_layer),
             }),
             cached_tile_shapes: std::sync::OnceLock::new(),
             cached_bounding_box: std::sync::OnceLock::new(),

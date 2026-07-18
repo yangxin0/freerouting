@@ -285,11 +285,8 @@ fn ses_import_reconnects_a_routed_net() {
         std::fs::read_to_string(format!("{root}/{SMALL_FIXTURE}")).expect("fixture missing");
 
     // Route a board via the real batch path, export its SES, then import that
-    // SES onto a *fresh* import of the same design and confirm the wiring
-    // reconnects the bulk of the nets that were complete in the routed board.
-    // The round-trip is NOT exact: the unresolved connection-point issue (see
-    // the ignored `routed_nets_reach_pin_connection_points` test) can drop a net
-    // whose trace ended off the pin centre, so a small shortfall is tolerated.
+    // SES onto a fresh import of the same design and require exact completed-
+    // net identity, not merely an equal count that could hide an A-for-B swap.
     let mut routed = import_dsn(&content).expect("import failed");
     let request = BatchRequest {
         trace_half_width: routed.rules.get_min_trace_half_width().max(500),
@@ -312,12 +309,13 @@ fn ses_import_reconnects_a_routed_net() {
     let net_nos: Vec<i32> = (1..=routed.rules.nets.max_net_no()).collect();
     let limit = TimeLimit::new(30_000);
     batch_route_passes_with_time_limit(&mut routed, &request, 100, Some(&limit));
-    let routed_complete: usize = net_nos
+    let routed_complete: std::collections::BTreeSet<i32> = net_nos
         .iter()
         .filter(|n| routed.net_is_completely_connected(**n))
-        .count();
-    assert!(routed_complete > 0, "nothing routed to round-trip");
-    let ses = export_ses(&routed, "j2", routed.resolution);
+        .copied()
+        .collect();
+    assert!(!routed_complete.is_empty(), "nothing routed to round-trip");
+    let ses = export_ses(&routed, "j2", routed.resolution).expect("session export");
 
     // fresh board (no wiring) + the exported session
     let mut fresh = import_dsn(&content).expect("import failed");
@@ -327,10 +325,11 @@ fn ses_import_reconnects_a_routed_net() {
         summary.unknown_nets.is_empty(),
         "own session must not name unknown nets"
     );
-    let after: usize = net_nos
+    let after: std::collections::BTreeSet<i32> = net_nos
         .iter()
         .filter(|n| fresh.net_is_completely_connected(**n))
-        .count();
+        .copied()
+        .collect();
     // FULL electrical equivalence on reload: every net the routed board
     // completed must be complete again after the session round trip (the
     // former 90% allowance dated from before the pin-exit and

@@ -120,6 +120,26 @@ impl NetClass {
         &self.name
     }
 
+    /// Reinitializes all inherited routing settings from another class while
+    /// retaining this class's name. Rules readers use this for a class shell
+    /// created only to satisfy a forward `class_class` reference: the shell
+    /// must receive the defaults that are in force when its real declaration
+    /// is reached, not the defaults from the earlier forward-reference site.
+    pub fn inherit_settings_from(&mut self, source: &NetClass) {
+        self.trace_half_width_arr = source.trace_half_width_arr.clone();
+        self.active_routing_layer_arr = source.active_routing_layer_arr.clone();
+        self.layer_is_signal = source.layer_is_signal.clone();
+        self.default_item_clearance_classes = source.default_item_clearance_classes.clone();
+        self.is_ignored_by_autorouter = source.is_ignored_by_autorouter;
+        self.via_rule = source.via_rule;
+        self.trace_clearance_class = source.trace_clearance_class;
+        self.shove_fixed = source.shove_fixed;
+        self.pull_tight = source.pull_tight;
+        self.ignore_cycles_with_areas = source.ignore_cycles_with_areas;
+        self.minimum_trace_length = source.minimum_trace_length;
+        self.maximum_trace_length = source.maximum_trace_length;
+    }
+
     pub fn set_name(&mut self, name: impl Into<String>) {
         self.name = name.into();
     }

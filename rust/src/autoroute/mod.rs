@@ -1,19 +1,24 @@
 //! Port of `app.freerouting.autoroute` (incremental).
 //!
 //! The faithful maze expansion engine (AutorouteEngine, expansion rooms,
-//! MazeSearchAlgo) is ported step by step; `simple_router` provides an
-//! interim grid router so the pipeline is routable end to end meanwhile.
+//! MazeSearchAlgo) is the supported routing surface.  The old interim grid
+//! router remains only as a unit-test oracle: it accepts a caller-supplied
+//! padstack and cannot represent ordered ViaInfo candidates, active-layer
+//! masks, candidate-specific clearance/attach policy, or transactional DRC.
+//! Exporting it alongside the maze router therefore bypassed the routing
+//! contract even though no production caller used it.
 
 pub mod batch;
 pub mod drill_pages;
 pub mod engine;
 pub mod expansion_room;
 pub mod fanout;
-pub mod maze_search;
+mod maze_search;
 pub mod optimizer;
 pub mod pull_tight;
 pub mod room_completion;
-pub mod simple_router;
+#[cfg(test)]
+mod simple_router;
 pub mod sorted_room_neighbours;
 
 pub use batch::{
@@ -23,14 +28,10 @@ pub use batch::{
 pub use engine::{AutorouteEngine, TargetDoor};
 pub use expansion_room::{ExpansionDoor, ExpansionRoom, MazeSearchElement, RoomGraph, RoomKind};
 pub use fanout::{fanout_board, fanout_pin};
-pub use maze_search::{
-    find_connection, maze_route, maze_route_with_ripup, take_stats, MazeSearchResult,
-    RoutedConnection,
-};
+pub use maze_search::take_stats;
 pub use optimizer::{
     optimize_route, optimize_route_multithreaded, optimize_route_multithreaded_with_strategy,
     optimize_route_pass, optimize_vias, BoardUpdateStrategy, ItemSelectionStrategy,
 };
 pub use pull_tight::{combine_all_traces, pull_tight_all, pull_tight_trace, total_trace_length};
 pub use room_completion::{complete_shape, restrain_shape, IncompleteRoom};
-pub use simple_router::{RouteRequest, RouteResult, SimpleRouter};

@@ -8,6 +8,8 @@
 //! uncompensated default tree.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::sync::Arc;
 
 use crate::board::item::{Item, ItemBase, ItemKind};
 use crate::board::LayerStructure;
@@ -28,6 +30,26 @@ thread_local! {
 /// Sets the diagnostic birth tag for subsequently inserted items.
 pub fn set_birth_tag(tag: u8) {
     BIRTH_TAG.with(|t| t.set(tag));
+}
+
+/// Temporarily assigns a diagnostic birth tag and restores the caller's tag
+/// on drop. Routing stages are nested (fanout -> maze -> shove); a bare
+/// setter in one stage used to leak its tag into unrelated later inserts.
+pub struct BirthTagGuard(u8);
+
+pub fn birth_tag_scope(tag: u8) -> BirthTagGuard {
+    let previous = BIRTH_TAG.with(|t| {
+        let previous = t.get();
+        t.set(tag);
+        previous
+    });
+    BirthTagGuard(previous)
+}
+
+impl Drop for BirthTagGuard {
+    fn drop(&mut self) {
+        BIRTH_TAG.with(|t| t.set(self.0));
+    }
 }
 
 /// The watch region from FR_DEBUG_REGION="x1,y1,x2,y2" (diagnostics).
@@ -57,7 +79,7 @@ struct TreeShapeEntry {
     layer: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct BasicBoard {
     pub layer_structure: LayerStructure,
     pub rules: BoardRules,
@@ -78,6 +100,12 @@ pub struct BasicBoard {
     /// the boundary keepout strips, and fabricating it from the all-item
     /// bounding box grows the board by whatever copper overhangs it.
     pub outline: Option<(Vec<IntPoint>, i32)>,
+    /// Semantic state captured when `dsn_source` was retained.  DSN export
+    /// deliberately preserves that source verbatim outside of `wiring`, so
+    /// it must fail closed if any non-wiring state is edited afterwards.
+    /// Route traces/vias and derived caches are intentionally excluded by
+    /// [`DsnSemanticSnapshot::capture`].
+    dsn_semantic_baseline: Option<Arc<DsnSemanticSnapshot>>,
     /// The undoable item database.
     item_list: UndoableObjects<ItemId, Item>,
     /// The spatial index over all item shapes.
@@ -120,6 +148,198 @@ pub struct BasicBoard {
     >,
 }
 
+impl Clone for BasicBoard {
+    fn clone(&self) -> Self {
+        // The item database and search tree are immutable snapshots at this
+        // point, but the contact/inflation caches are derived from the live
+        // rules and geometry.  Cloning those RefCells would carry answers
+        // computed under the source board into a candidate transaction or an
+        // optimizer worker after its rules/items diverge.  Start every clone
+        // cold; the first query repopulates the cache against the clone's
+        // own state.
+        Self {
+            layer_structure: self.layer_structure.clone(),
+            rules: self.rules.clone(),
+            padstacks: self.padstacks.clone(),
+            resolution: self.resolution,
+            unit: self.unit.clone(),
+            dsn_source: self.dsn_source.clone(),
+            outline: self.outline.clone(),
+            dsn_semantic_baseline: self.dsn_semantic_baseline.clone(),
+            item_list: self.item_list.clone(),
+            search_tree: self.search_tree.clone(),
+            tree_entries: self.tree_entries.clone(),
+            plane_items: self.plane_items.clone(),
+            next_id_no: self.next_id_no,
+            change_log: self.change_log.clone(),
+            change_epoch: self.change_epoch,
+            contact_cache: std::cell::RefCell::new(Default::default()),
+            contact_cache_log: std::cell::Cell::new((0, 0)),
+            inflation_cache: std::cell::RefCell::new(Default::default()),
+        }
+    }
+}
+
+/// A deterministic, category-separated representation of the parts of a
+/// board which are emitted from the retained DSN source.  Keeping categories
+/// separate lets the exporter report *which* semantic contract was broken,
+/// while avoiding a hash collision and avoiding any dependence on derived
+/// board caches.
+#[derive(Debug, Clone, PartialEq)]
+struct DsnSemanticSnapshot {
+    /// The retained source is public for historical API compatibility. Keep
+    /// an exact shared copy in the baseline so callers cannot replace the
+    /// source text behind the semantic snapshot and make the exporter splice
+    /// a different document with the current board's wiring.
+    source: Option<Arc<str>>,
+    resolution: i32,
+    unit: String,
+    layers: String,
+    outline: String,
+    rules: String,
+    nets: String,
+    library: DsnPadstackSnapshot,
+    static_items: Vec<(ItemId, ItemBase, ItemKind)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DsnPadstackSnapshot {
+    board_layer_count: usize,
+    padstacks: Vec<DsnPadstackEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DsnPadstackEntry {
+    name: String,
+    no: usize,
+    attach_allowed: bool,
+    placed_absolute: bool,
+    shapes: Vec<Option<TileShape>>,
+}
+
+impl DsnSemanticSnapshot {
+    fn capture(board: &BasicBoard) -> Self {
+        let mut rules = String::new();
+        // ClearanceMatrix's Debug representation contains its ordered rows,
+        // names, values and layer structure.  Unlike BoardRules as a whole,
+        // it contains no hash map whose iteration order could drift.
+        let _ = write!(rules, "matrix={:?};", board.rules.clearance_matrix);
+        let _ = write!(rules, "layers={:?};", board.rules.layer_structure());
+        let _ = write!(
+            rules,
+            "misc={:?},{:?},{:?},{:?},{:?},{:?},{:?};",
+            board.rules.get_trace_angle_restriction(),
+            board.rules.get_ignore_conduction(),
+            board.rules.get_min_trace_half_width(),
+            board.rules.get_max_trace_half_width(),
+            board.rules.get_pin_edge_to_turn_dist(),
+            board.rules.get_use_slow_autoroute_algorithm(),
+            board.rules.via_at_smd_allowed,
+        );
+        let mut same_net: Vec<_> = board.rules.same_net_clearances().collect();
+        same_net.sort_by_key(|(a, b, _)| (*a, *b));
+        let _ = write!(rules, "same_net={same_net:?};");
+        for index in 0..board.rules.net_classes.count() {
+            let _ = write!(
+                rules,
+                "net_class[{index}]={:?};",
+                board.rules.net_classes.get(index)
+            );
+        }
+        for index in 0..board.rules.via_infos.count() {
+            let _ = write!(
+                rules,
+                "via_info[{index}]={:?};",
+                board.rules.via_infos.get(index)
+            );
+        }
+        for (index, via_rule) in board.rules.via_rules.iter().enumerate() {
+            let _ = write!(rules, "via_rule[{index}]={via_rule:?};");
+        }
+
+        let mut nets = String::new();
+        for net in board.rules.nets.iter() {
+            let _ = write!(nets, "{net:?};");
+        }
+
+        let mut padstacks = Vec::with_capacity(board.padstacks.count());
+        for number in 1..=board.padstacks.count() {
+            let Some(padstack) = board.padstacks.get_by_no(number) else {
+                continue;
+            };
+            // Include every slot, including empty intermediate layers.  A
+            // via's transition semantics depend on the shape vector, not
+            // just on its first/last occupied layer.
+            let shapes = (0..padstack.board_layer_count())
+                .map(|layer| padstack.get_shape(layer).cloned())
+                .collect();
+            padstacks.push(DsnPadstackEntry {
+                name: padstack.name.clone(),
+                no: padstack.no,
+                attach_allowed: padstack.attach_allowed,
+                placed_absolute: padstack.placed_absolute,
+                shapes,
+            });
+        }
+
+        let mut static_items = Vec::new();
+        // `items()` is backed by an ordered map, so this is deterministic.
+        // Traces and component-less vias are regenerated by the wiring
+        // exporter and are intentionally absent.  Component vias (pins) and
+        // all obstacle/conduction areas are part of the retained static DSN.
+        for (id, item) in board.items() {
+            let is_static = matches!(item.kind, ItemKind::ObstacleArea(_))
+                || (item.base.component_no != 0 && matches!(item.kind, ItemKind::Via(_)));
+            if is_static {
+                static_items.push((*id, item.base.clone(), item.kind.clone()));
+            }
+        }
+
+        DsnSemanticSnapshot {
+            source: board.dsn_source.as_deref().map(Arc::<str>::from),
+            resolution: board.resolution,
+            unit: board.unit.clone(),
+            layers: format!("{:?}", board.layer_structure),
+            outline: format!("{:?}", board.outline),
+            rules,
+            nets,
+            library: DsnPadstackSnapshot {
+                board_layer_count: board.padstacks.board_layer_count,
+                padstacks,
+            },
+            static_items,
+        }
+    }
+
+    fn first_difference(&self, current: &Self) -> Option<&'static str> {
+        if self.source != current.source {
+            return Some("retained DSN source changed");
+        }
+        if self.resolution != current.resolution || self.unit != current.unit {
+            return Some("resolution/unit changed");
+        }
+        if self.layers != current.layers {
+            return Some("layer structure changed");
+        }
+        if self.outline != current.outline {
+            return Some("board outline changed");
+        }
+        if self.rules != current.rules {
+            return Some("routing rules or pad/via rules changed");
+        }
+        if self.nets != current.nets {
+            return Some("net definitions changed");
+        }
+        if self.library != current.library {
+            return Some("padstack library changed");
+        }
+        if self.static_items != current.static_items {
+            return Some("static pins or obstacle areas changed");
+        }
+        None
+    }
+}
+
 impl BasicBoard {
     pub fn new(layer_structure: LayerStructure, rules: BoardRules, padstacks: Padstacks) -> Self {
         BasicBoard {
@@ -130,6 +350,7 @@ impl BasicBoard {
             unit: "um".to_string(),
             dsn_source: None,
             outline: None,
+            dsn_semantic_baseline: None,
             item_list: UndoableObjects::new(),
             search_tree: MinAreaTree::new(),
             tree_entries: BTreeMap::new(),
@@ -141,6 +362,26 @@ impl BasicBoard {
             change_epoch: 0,
             inflation_cache: Default::default(),
         }
+    }
+
+    /// Captures the non-wiring state against which the retained DSN source is
+    /// safe to reuse.  This is called by the DSN importer only after the
+    /// complete document (including its original wiring) has been loaded.
+    pub(crate) fn capture_dsn_semantic_baseline(&mut self) {
+        self.dsn_semantic_baseline = Some(Arc::new(DsnSemanticSnapshot::capture(self)));
+    }
+
+    /// Returns a precise reason when the board no longer matches the static
+    /// portion of its retained DSN source.  A missing baseline is treated as
+    /// stale rather than guessed-safe: callers that construct a board by
+    /// hand must use a format-specific exporter instead of setting
+    /// `dsn_source` themselves.
+    pub(crate) fn dsn_source_staleness(&self) -> Option<String> {
+        let Some(baseline) = &self.dsn_semantic_baseline else {
+            return Some("the import baseline is missing".to_string());
+        };
+        let current = DsnSemanticSnapshot::capture(self);
+        baseline.first_difference(&current).map(str::to_string)
     }
 
     /// The tile shapes of an item inflated by `margin`, with their
@@ -216,6 +457,15 @@ impl BasicBoard {
         self.next_id_no + 1
     }
 
+    /// Returns all currently-live items created at or after `watermark`.
+    /// Item ids are monotonic and never reused, so this is a cheap and
+    /// unambiguous transaction watermark for shove/route/optimizer gates.
+    pub fn item_ids_since(&self, watermark: ItemId) -> Vec<ItemId> {
+        self.items()
+            .filter_map(|(id, _)| (*id >= watermark).then_some(*id))
+            .collect()
+    }
+
     /// Inserts an item, assigning it a fresh id. Returns the id.
     pub fn insert_item(&mut self, mut item: Item) -> ItemId {
         let id = self.new_id_no();
@@ -247,12 +497,32 @@ impl BasicBoard {
         net_nos: Vec<i32>,
         clearance_class: usize,
     ) -> ItemId {
-        let item = Item::new_polyline_trace(
-            ItemBase::new(0, net_nos, clearance_class),
-            half_width,
-            layer,
+        self.insert_trace_with_provenance(
             polyline,
-        );
+            layer,
+            half_width,
+            net_nos,
+            clearance_class,
+            false,
+        )
+    }
+
+    /// Inserts a trace while retaining whether its clearance class was an
+    /// explicit item-level override in the source document.  Replacement
+    /// algorithms use this instead of inserting and mutating the bit later,
+    /// so a failed snapshot transaction cannot expose a half-updated item.
+    pub fn insert_trace_with_provenance(
+        &mut self,
+        polyline: Polyline,
+        layer: usize,
+        half_width: i32,
+        net_nos: Vec<i32>,
+        clearance_class: usize,
+        clearance_class_explicit: bool,
+    ) -> ItemId {
+        let mut base = ItemBase::new(0, net_nos, clearance_class);
+        base.clearance_class_explicit = clearance_class_explicit;
+        let item = Item::new_polyline_trace(base, half_width, layer, polyline);
         self.insert_item(item)
     }
 
@@ -284,13 +554,126 @@ impl BasicBoard {
         clearance_class: usize,
         attach_allowed: bool,
     ) -> ItemId {
-        let item = Item::new_via(
-            ItemBase::new(0, net_nos, clearance_class),
+        self.insert_via_with_provenance(
             padstack,
             center,
+            net_nos,
+            clearance_class,
             attach_allowed,
-        );
+            false,
+        )
+    }
+
+    /// Inserts a via while retaining its item-level clearance provenance.
+    pub fn insert_via_with_provenance(
+        &mut self,
+        padstack: usize,
+        center: IntPoint,
+        net_nos: Vec<i32>,
+        clearance_class: usize,
+        attach_allowed: bool,
+        clearance_class_explicit: bool,
+    ) -> ItemId {
+        let mut base = ItemBase::new(0, net_nos, clearance_class);
+        base.clearance_class_explicit = clearance_class_explicit;
+        let item = Item::new_via(base, padstack, center, attach_allowed);
         self.insert_item(item)
+    }
+
+    /// Inserts a router-created escape via on one same-net SMD layer while
+    /// preserving the selected ViaInfo's declared attach bit.
+    pub fn insert_escape_via(
+        &mut self,
+        padstack: usize,
+        center: IntPoint,
+        net_nos: Vec<i32>,
+        clearance_class: usize,
+        attach_allowed: bool,
+        smd_layer: usize,
+    ) -> ItemId {
+        self.insert_escape_via_with_provenance(
+            padstack,
+            center,
+            net_nos,
+            clearance_class,
+            attach_allowed,
+            smd_layer,
+            false,
+        )
+    }
+
+    /// Inserts an escape via while retaining its item-level clearance
+    /// provenance.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_escape_via_with_provenance(
+        &mut self,
+        padstack: usize,
+        center: IntPoint,
+        net_nos: Vec<i32>,
+        clearance_class: usize,
+        attach_allowed: bool,
+        smd_layer: usize,
+        clearance_class_explicit: bool,
+    ) -> ItemId {
+        let mut base = ItemBase::new(0, net_nos, clearance_class);
+        base.clearance_class_explicit = clearance_class_explicit;
+        let item = Item::new_escape_via(base, padstack, center, attach_allowed, smd_layer);
+        self.insert_item(item)
+    }
+
+    /// Returns the unique SMD layer that permits a rule-preserving escape via
+    /// at `center`, or `None` when the net/site is not the router's narrow
+    /// pure-SMD case. This is the canonical reconstruction predicate shared by
+    /// maze insertion and interchange readers.
+    pub fn pure_smd_escape_layer(
+        &self,
+        net_no: i32,
+        via_padstack: usize,
+        center: IntPoint,
+    ) -> Option<usize> {
+        if self.layer_structure.layer_count() <= 1 {
+            return None;
+        }
+        let padstack = self.padstacks.get_by_no(via_padstack)?;
+        let mut result = None;
+        for layer in padstack.from_layer()..=padstack.to_layer() {
+            let Some(raw_shape) = padstack.get_shape(layer) else {
+                continue;
+            };
+            let shape =
+                raw_shape.translate_by(crate::geometry::planar::IntVector::new(center.x, center.y));
+            for id in self.overlapping_items(&shape, Some(layer)) {
+                let Some(pin) = self.get_item(id) else {
+                    continue;
+                };
+                if let ItemKind::ObstacleArea(area) = &pin.kind {
+                    if area.is_conduction {
+                        return None;
+                    }
+                }
+                if pin.base.component_no == 0
+                    || !pin.base.contains_net(net_no)
+                    || !matches!(pin.kind, ItemKind::Via(_))
+                    || pin.first_layer(&self.padstacks) != pin.last_layer(&self.padstacks)
+                {
+                    continue;
+                }
+                let overlaps =
+                    pin.tile_shapes(&self.padstacks)
+                        .iter()
+                        .any(|(pin_shape, pin_layer)| {
+                            *pin_layer == layer && pin_shape.intersection(&shape).dimension() >= 2
+                        });
+                if !overlaps {
+                    continue;
+                }
+                if result.is_some_and(|existing| existing != layer) {
+                    return None;
+                }
+                result = Some(layer);
+            }
+        }
+        result
     }
 
     /// Convenience: inserts a keepout or conduction area.
@@ -490,6 +873,13 @@ impl BasicBoard {
                     // they receive clearance cutouts in fabrication (Java:
                     // ConductionArea is no obstacle for foreign items)
                     if let ItemKind::ObstacleArea(a) = &item.kind {
+                        // A via-only keepout constrains drill placement, not
+                        // traces.  `is_blocked` is used by trace routing and
+                        // pull-tight, so do not turn the keepout into a
+                        // foreign-copper wall here.
+                        if a.via_only {
+                            return false;
+                        }
                         if a.is_conduction && !a.is_obstacle {
                             return false;
                         }
@@ -516,8 +906,18 @@ impl BasicBoard {
             return Vec::new();
         };
         let search_shape = TileShape::Box(point.surrounding_box());
-        let first_layer = item.first_layer(&self.padstacks);
-        let last_layer = item.last_layer(&self.padstacks);
+        // Use the actual populated padstack layers, not only the declared
+        // first/last span.  A sparse blind/buried via may have no copper on
+        // an intermediate layer; treating its span as continuous creates a
+        // false electrical contact at that layer.
+        let item_layers: Vec<usize> = item
+            .tile_shapes(&self.padstacks)
+            .iter()
+            .map(|(_, layer)| *layer)
+            .collect();
+        if item_layers.is_empty() {
+            return Vec::new();
+        }
         let mut result = Vec::new();
         for other_id in self.overlapping_items(&search_shape, None) {
             if other_id == id {
@@ -526,9 +926,11 @@ impl BasicBoard {
             let Some(other) = self.get_item(other_id) else {
                 continue;
             };
-            // shares a layer?
-            if other.last_layer(&self.padstacks) < first_layer
-                || other.first_layer(&self.padstacks) > last_layer
+            // shares an actual populated layer?
+            if !other
+                .tile_shapes(&self.padstacks)
+                .iter()
+                .any(|(_, layer)| item_layers.contains(layer))
             {
                 continue;
             }
@@ -558,9 +960,11 @@ impl BasicBoard {
                         }) && other
                             .tile_shapes(&self.padstacks)
                             .iter()
-                            .any(|(s, _)| s.contains(point)))
+                            .any(|(s, layer)| item_layers.contains(layer) && s.contains(point)))
                 }
-                ItemKind::ObstacleArea(a) => a.is_conduction && a.area.contains(point),
+                ItemKind::ObstacleArea(a) => {
+                    a.is_conduction && item_layers.contains(&a.layer) && a.area.contains(point)
+                }
             };
             if touches {
                 result.push(other_id);
@@ -928,6 +1332,11 @@ impl BasicBoard {
     }
 
     /// True if all connectable items of `net_no` form one connected set.
+    ///
+    /// A declared net with no physical item is *not* electrically complete.
+    /// Treating the empty set as connected lets an incomplete import pass the
+    /// router/DRC success gates (and was the source of several false-success
+    /// reports in the API path).
     pub fn net_is_completely_connected(&self, net_no: i32) -> bool {
         let net_items: Vec<ItemId> = self
             .items()
@@ -935,7 +1344,7 @@ impl BasicBoard {
             .map(|(id, _)| *id)
             .collect();
         let Some(&first) = net_items.first() else {
-            return true;
+            return false;
         };
         let connected = self.get_connected_set(first, net_no);
         net_items.iter().all(|id| connected.contains(id))
@@ -972,6 +1381,40 @@ impl BasicBoard {
     pub fn set_birth(&mut self, id: ItemId, birth: u8) {
         if let Some(item) = self.item_list.get_mut(&id) {
             item.base.birth = birth;
+        }
+    }
+
+    /// Changes only an item's design-rule classification. Geometry and tree
+    /// leaves stay valid, but clearance-inflation and expansion-room caches
+    /// must be invalidated. Used when a `.rules` sidecar reclassifies nets
+    /// after their DSN items have already been instantiated.
+    pub fn set_item_clearance_class(&mut self, id: ItemId, clearance_class: usize) {
+        if self
+            .get_item(id)
+            .is_none_or(|item| item.base.clearance_class == clearance_class)
+        {
+            return;
+        }
+        self.item_list.save_for_undo(&id);
+        if let Some(item) = self.item_list.get_mut(&id) {
+            item.base.clearance_class = clearance_class;
+        }
+        self.inflation_cache.borrow_mut().remove(&id);
+        self.log_metadata_change(id);
+    }
+
+    /// Records that an item's clearance class came from an explicit
+    /// item-level file scope rather than its net-class default.
+    pub fn set_item_clearance_class_explicit(&mut self, id: ItemId, explicit: bool) {
+        if self
+            .get_item(id)
+            .is_none_or(|item| item.base.clearance_class_explicit == explicit)
+        {
+            return;
+        }
+        self.item_list.save_for_undo(&id);
+        if let Some(item) = self.item_list.get_mut(&id) {
+            item.base.clearance_class_explicit = explicit;
         }
     }
 
@@ -1078,12 +1521,27 @@ impl BasicBoard {
         let layer = t.layer;
         let net_nos = item.base.net_nos.clone();
         let clearance_class = item.base.clearance_class;
+        let clearance_class_explicit = item.base.clearance_class_explicit;
         // splitting is normalization, not a route change: the pieces keep
         // the protected state (Java Trace.split keeps the fixed state)
         let fixed_state = item.base.fixed_state;
         self.remove_item(id);
-        let a = self.insert_trace(first, layer, half_width, net_nos.clone(), clearance_class);
-        let b = self.insert_trace(second, layer, half_width, net_nos, clearance_class);
+        let a = self.insert_trace_with_provenance(
+            first,
+            layer,
+            half_width,
+            net_nos.clone(),
+            clearance_class,
+            clearance_class_explicit,
+        );
+        let b = self.insert_trace_with_provenance(
+            second,
+            layer,
+            half_width,
+            net_nos,
+            clearance_class,
+            clearance_class_explicit,
+        );
         self.set_fixed_state(a, fixed_state);
         self.set_fixed_state(b, fixed_state);
         true
@@ -1149,6 +1607,16 @@ impl BasicBoard {
                 if other_t.layer != t.layer
                     || other_t.half_width != t.half_width
                     || other.base.net_nos != base.net_nos
+                    // A combined trace has one clearance class.  Merging
+                    // unlike classes would silently downgrade the stricter
+                    // segment (and could make a later DRC violation depend
+                    // on which endpoint happened to survive).
+                    || other.base.clearance_class != base.clearance_class
+                    // An inherited and an explicit segment cannot be merged:
+                    // one replacement item cannot preserve both sidecar
+                    // behaviours when a net class changes later.
+                    || other.base.clearance_class_explicit
+                        != base.clearance_class_explicit
                     || other.base.is_user_fixed()
                     || base.is_user_fixed()
                     // never absorb a trace with a DIFFERENT protection level:
@@ -1167,16 +1635,18 @@ impl BasicBoard {
                 let layer = t.layer;
                 let net_nos = base.net_nos.clone();
                 let clearance_class = base.clearance_class;
+                let clearance_class_explicit = base.clearance_class_explicit;
                 // Java combines into `this`, keeping its fixed state
                 let fixed_state = base.fixed_state;
                 self.remove_item(current);
                 self.remove_item(other_id);
-                current = self.insert_trace(
+                current = self.insert_trace_with_provenance(
                     combined_polyline,
                     layer,
                     half_width,
                     net_nos,
                     clearance_class,
+                    clearance_class_explicit,
                 );
                 self.set_fixed_state(current, fixed_state);
                 combined = true;
@@ -1291,6 +1761,64 @@ mod tests {
     }
 
     #[test]
+    fn sparse_through_via_can_be_reconstructed_as_an_smd_escape() {
+        let stack = LayerStructure::new(vec![
+            Layer::new("F.Cu", true),
+            Layer::new("In1.Cu", true),
+            Layer::new("B.Cu", true),
+        ]);
+        let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
+        let mut rules = BoardRules::new(stack.clone(), matrix);
+        let class = rules.get_default_net_class();
+        let net = rules.nets.add("N", class, false);
+        let shape = TileShape::Box(IntBox::from_coords(-400, -400, 400, 400));
+        let mut padstacks = Padstacks::new(3);
+        let sparse = padstacks.add(
+            "sparse",
+            vec![Some(shape.clone()), None, Some(shape.clone())],
+            false,
+            false,
+        );
+        let smd = padstacks.add("smd", vec![Some(shape), None, None], false, false);
+        let mut board = BasicBoard::new(stack, rules, padstacks);
+        let pin = board.insert_via(smd, IntPoint::new(0, 0), vec![net], 1, false);
+        board.set_component_no(pin, 1);
+
+        assert_eq!(
+            board.pure_smd_escape_layer(net, sparse, IntPoint::new(0, 0)),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn sparse_via_does_not_contact_trace_on_empty_intermediate_layer() {
+        let stack = LayerStructure::new(vec![
+            Layer::new("F.Cu", true),
+            Layer::new("In1.Cu", true),
+            Layer::new("B.Cu", true),
+        ]);
+        let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
+        let mut rules = BoardRules::new(stack.clone(), matrix);
+        let class = rules.get_default_net_class();
+        let net = rules.nets.add("N", class, false);
+        let mut padstacks = Padstacks::new(3);
+        let shape = TileShape::Box(IntBox::from_coords(-400, -400, 400, 400));
+        let sparse = padstacks.add(
+            "sparse",
+            vec![Some(shape.clone()), None, Some(shape)],
+            true,
+            false,
+        );
+        let mut board = BasicBoard::new(stack, rules, padstacks);
+        let via = board.insert_via(sparse, IntPoint::new(0, 0), vec![net], 1, false);
+        let trace = board.insert_trace(trace_polyline(&[(0, 0), (5000, 0)]), 1, 100, vec![net], 1);
+
+        assert!(board.get_normal_contacts(trace).is_empty());
+        assert!(board.get_normal_contacts(via).is_empty());
+        assert!(!board.net_is_completely_connected(net));
+    }
+
+    #[test]
     fn split_preserves_fixed_state() {
         let mut board = test_board();
         let trace = board.insert_trace(trace_polyline(&[(0, 0), (10000, 0)]), 0, 100, vec![1], 1);
@@ -1307,6 +1835,28 @@ mod tests {
                 .all(|(_, i)| i.base.fixed_state == crate::board::FixedState::UserFixed),
             "split pieces must keep the protected state"
         );
+    }
+
+    #[test]
+    fn split_preserves_clearance_provenance() {
+        let mut board = test_board();
+        let original = board.insert_trace_with_provenance(
+            trace_polyline(&[(0, 0), (10000, 0)]),
+            0,
+            100,
+            vec![1],
+            1,
+            true,
+        );
+        assert!(board.split_traces_at(IntPoint::new(5000, 0), 0, 1));
+        let pieces: Vec<_> = board
+            .items()
+            .filter(|(_, i)| {
+                i.base.id_no != original && matches!(i.kind, ItemKind::PolylineTrace(_))
+            })
+            .collect();
+        assert_eq!(pieces.len(), 2);
+        assert!(pieces.iter().all(|(_, i)| i.base.clearance_class_explicit));
     }
 
     #[test]
@@ -1465,6 +2015,10 @@ mod tests {
     #[test]
     fn connectivity_contacts_and_connected_sets() {
         let mut board = test_board();
+        assert!(
+            !board.net_is_completely_connected(1),
+            "a net with no physical item must not pass the completion gate"
+        );
         // net 1: pin-like via at (0,0), trace to (5000,0), via there,
         // trace on layer 1 onwards
         let via_a = board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
@@ -1569,6 +2123,27 @@ mod tests {
         assert_eq!(board.get_normal_contacts(trace), vec![plane]);
         assert!(!board.is_tail(trace));
         assert!(board.net_is_completely_connected(7));
+    }
+
+    #[test]
+    fn via_only_keepout_does_not_block_trace_queries() {
+        use crate::geometry::planar::{PolygonShape, PolylineArea};
+        let mut board = test_board();
+        let area = PolylineArea::new(
+            PolygonShape::from_int_points(&[
+                IntPoint::new(1000, 1000),
+                IntPoint::new(3000, 1000),
+                IntPoint::new(3000, 3000),
+                IntPoint::new(1000, 3000),
+            ]),
+            Vec::new(),
+        );
+        let id = board.insert_area(area, 0, "via keepout", Vec::new(), 1, false);
+        board.set_area_via_only(id, true);
+        assert!(
+            !board.is_blocked(&query_box(1500, 1500, 1600, 1600), 0, 1),
+            "via-only keepouts constrain drills, not trace routing"
+        );
     }
 
     #[test]
@@ -1806,6 +2381,43 @@ mod tests {
             1,
         );
         assert_eq!(board.combine_trace(t5), t5);
+    }
+
+    #[test]
+    fn combine_does_not_drop_a_trace_clearance_class() {
+        let mut board = test_board();
+        assert!(board.rules.clearance_matrix.append_class("strict"));
+        let strict = board.rules.clearance_matrix.get_no("strict").unwrap();
+        let first = board.insert_trace(
+            trace_polyline(&[(0, 0), (4000, 0)]),
+            0,
+            100,
+            vec![1],
+            strict,
+        );
+        let second =
+            board.insert_trace(trace_polyline(&[(4000, 0), (8000, 0)]), 0, 100, vec![1], 1);
+        assert_eq!(board.combine_trace(first), first);
+        assert!(board.get_item(first).is_some());
+        assert!(board.get_item(second).is_some());
+    }
+
+    #[test]
+    fn combine_does_not_merge_mixed_clearance_provenance() {
+        let mut board = test_board();
+        let first = board.insert_trace_with_provenance(
+            trace_polyline(&[(0, 0), (4000, 0)]),
+            0,
+            100,
+            vec![1],
+            1,
+            true,
+        );
+        let second =
+            board.insert_trace(trace_polyline(&[(4000, 0), (8000, 0)]), 0, 100, vec![1], 1);
+        assert_eq!(board.combine_trace(first), first);
+        assert!(board.get_item(first).is_some());
+        assert!(board.get_item(second).is_some());
     }
 
     #[test]

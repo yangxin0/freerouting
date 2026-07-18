@@ -46,6 +46,7 @@ struct BacktrackNode {
     parent: Option<usize>,
     /// The room entered at this step (diagnostics).
     room: Option<RoomId>,
+    via_choice: Option<ViaChoice>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -67,6 +68,7 @@ struct QueueEntry {
     room_to_enter: RoomId,
     parent: Option<usize>,
     location: FloatPoint,
+    via_choice: Option<ViaChoice>,
 }
 
 impl Eq for QueueEntry {}
@@ -84,7 +86,7 @@ impl Ord for QueueEntry {
     }
 }
 
-pub struct MazeSearchResult {
+pub(crate) struct MazeSearchResult {
     /// The corners of the found connection with their layers, from start
     /// to destination. Consecutive corners on different layers are joined
     /// by a via.
@@ -92,10 +94,16 @@ pub struct MazeSearchResult {
     /// The room entered at each corner (diagnostics; aligned with
     /// `corners`, `None` for the appended destination point).
     pub rooms: Vec<Option<RoomId>>,
+    /// Via candidate used to reach each corner (only layer-changing corners
+    /// carry a value).  Keeping this through backtracking prevents insertion
+    /// from silently replacing a blind/buried candidate with the request's
+    /// fallback through-via.
+    pub(crate) via_choices: Vec<Option<ViaChoice>>,
 }
 
 /// Parameters of a maze routing request.
-pub struct MazeRouteRequest {
+#[derive(Debug, Clone)]
+pub(crate) struct MazeRouteRequest {
     pub net_no: i32,
     pub start_item: ItemId,
     pub dest_item: ItemId,
@@ -132,6 +140,180 @@ pub struct MazeRouteRequest {
     /// completes at the FIRST successful drill — the goal of a fanout is
     /// reaching another layer through a via, not a destination item.
     pub is_fanout: bool,
+}
+
+/// A concrete ViaInfo candidate for one layer transition.  Via rules are
+/// ordered preferences, but the usable candidate depends on the actual
+/// `from_layer..to_layer` transition; keeping this value local to the maze
+/// avoids collapsing blind/buried and through vias into one board-wide pick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ViaChoice {
+    padstack: usize,
+    clearance_class: usize,
+    attach_allowed: bool,
+}
+
+/// Search-only permission for placing one concrete ViaRule candidate on a
+/// same-net drillable SMD pad.  `MazeRouteRequest::via_attach_allowed` is a
+/// summary of the request's fallback/full-span via; a mixed rule can select
+/// a different attach-enabled blind or buried candidate for this transition.
+/// Pure-SMD escape is an independent relaxation and does not alter the
+/// inserted via's declared attach bit.
+fn search_attach_allowed_for_choice(choice: ViaChoice, pure_smd_relax: bool) -> bool {
+    // `via_attach_allowed` on the request describes only its selected
+    // fallback ViaInfo.  A bound rule can expose several candidates with
+    // different attach bits; allowing the request-wide bit to leak into a
+    // candidate lets an attach-disabled blind/buried via search through an
+    // SMD pin and leaves insertion with a route that can never be replayed.
+    // Fallback candidates copy their bit into `choice`, so the candidate is
+    // the sole rule-level authority here.  Pure-SMD escape is an independent
+    // search relaxation and is intentionally retained.
+    choice.attach_allowed || pure_smd_relax
+}
+
+fn via_choice_supports_transition(
+    board: &BasicBoard,
+    choice: ViaChoice,
+    from_layer: usize,
+    to_layer: usize,
+) -> bool {
+    let Some(padstack) = board.padstacks.get_by_no(choice.padstack) else {
+        return false;
+    };
+    let low = from_layer.min(to_layer);
+    let high = from_layer.max(to_layer);
+    padstack.from_layer() <= low
+        && padstack.to_layer() >= high
+        && padstack.has_shapes_at_transition_endpoints(from_layer, to_layer)
+}
+
+fn via_choices_for_transition(
+    board: &BasicBoard,
+    request: &MazeRouteRequest,
+    from_layer: usize,
+    to_layer: usize,
+) -> Vec<ViaChoice> {
+    let low = from_layer.min(to_layer);
+    let high = from_layer.max(to_layer);
+    let mut choices = Vec::new();
+    if let Some(net) = board.rules.nets.get_by_no(request.net_no) {
+        let class = board.rules.net_classes.get(net.get_class());
+        if let Some(rule_id) = class.get_via_rule() {
+            if let Some(rule) = board.rules.via_rules.get(rule_id) {
+                for &via_id in rule.vias() {
+                    let info = board.rules.via_infos.get(via_id);
+                    let padstack = info.get_padstack();
+                    let Some(ps) = board.padstacks.get_by_no(padstack) else {
+                        continue;
+                    };
+                    let choice = ViaChoice {
+                        padstack,
+                        clearance_class: if info.get_clearance_class() == 0 {
+                            request.clearance_class
+                        } else {
+                            info.get_clearance_class()
+                        },
+                        attach_allowed: info.attach_smd_allowed(),
+                    };
+                    if ps.from_layer() <= low
+                        && ps.to_layer() >= high
+                        && via_choice_supports_transition(board, choice, from_layer, to_layer)
+                    {
+                        choices.push(choice);
+                    }
+                }
+            }
+        }
+    }
+    if choices.is_empty() && !board.rules.has_bound_via_rule(request.net_no) {
+        if let Some(ps) = board.padstacks.get_by_no(request.via_padstack) {
+            let choice = ViaChoice {
+                padstack: request.via_padstack,
+                clearance_class: request.via_class(),
+                attach_allowed: request.via_attach_allowed,
+            };
+            if ps.from_layer() <= low
+                && ps.to_layer() >= high
+                && via_choice_supports_transition(board, choice, from_layer, to_layer)
+            {
+                choices.push(choice);
+            }
+        }
+    }
+    choices.dedup();
+    choices
+}
+
+fn via_choices_for_layer(
+    board: &BasicBoard,
+    request: &MazeRouteRequest,
+    layer: usize,
+) -> Vec<ViaChoice> {
+    let layer_count = board.layer_structure.layer_count();
+    let mut choices = Vec::new();
+    // Preserve the ordering of the selected ViaRule across all possible
+    // destination layers.  Gathering by destination first changes a rule
+    // such as blind, buried, through into a layer-dependent order, which is
+    // observably different from Java's ordered ViaInfo preference.
+    if let Some(net) = board.rules.nets.get_by_no(request.net_no) {
+        let class = board.rules.net_classes.get(net.get_class());
+        if let Some(rule_id) = class.get_via_rule() {
+            if let Some(rule) = board.rules.via_rules.get(rule_id) {
+                for &via_id in rule.vias() {
+                    let info = board.rules.via_infos.get(via_id);
+                    let padstack = info.get_padstack();
+                    let Some(ps) = board.padstacks.get_by_no(padstack) else {
+                        continue;
+                    };
+                    if ps.from_layer() > layer
+                        || ps.to_layer() < layer
+                        || ps.get_shape(layer).is_none()
+                        || !(0..layer_count).any(|target| {
+                            target != layer
+                                && board.rules.is_active_routing_layer(request.net_no, target)
+                                && ps.has_shapes_at_transition_endpoints(layer, target)
+                        })
+                    {
+                        continue;
+                    }
+                    let choice = ViaChoice {
+                        padstack,
+                        clearance_class: if info.get_clearance_class() == 0 {
+                            request.clearance_class
+                        } else {
+                            info.get_clearance_class()
+                        },
+                        attach_allowed: info.attach_smd_allowed(),
+                    };
+                    if !choices.contains(&choice) {
+                        choices.push(choice);
+                    }
+                }
+            }
+        }
+    }
+    if choices.is_empty() && !board.rules.has_bound_via_rule(request.net_no) {
+        // Boards without a bound ViaRule retain the request's concrete
+        // fallback, but only when its padstack can actually leave this layer.
+        if let Some(ps) = board.padstacks.get_by_no(request.via_padstack) {
+            if ps.from_layer() <= layer
+                && ps.to_layer() >= layer
+                && ps.get_shape(layer).is_some()
+                && (0..layer_count).any(|target| {
+                    target != layer
+                        && board.rules.is_active_routing_layer(request.net_no, target)
+                        && ps.has_shapes_at_transition_endpoints(layer, target)
+                })
+            {
+                choices.push(ViaChoice {
+                    padstack: request.via_padstack,
+                    clearance_class: request.via_class(),
+                    attach_allowed: request.via_attach_allowed,
+                });
+            }
+        }
+    }
+    choices
 }
 
 impl MazeRouteRequest {
@@ -174,7 +356,7 @@ impl MazeRouteRequest {
 /// every consumer — the inline insertion of `maze_route_with_engine` and the
 /// `insert_connection` path alike — sees connection points that reload as
 /// genuine connections rather than dangling tracks (finding #2).
-pub fn find_connection(
+pub(crate) fn find_connection(
     board: &BasicBoard,
     engine: &mut AutorouteEngine,
     request: &MazeRouteRequest,
@@ -184,12 +366,14 @@ pub fn find_connection(
         if let Some(c) = pin_exit_corner(board, request.net_no, first, l) {
             result.corners.insert(0, (c, l));
             result.rooms.insert(0, None);
+            result.via_choices.insert(0, None);
         }
     }
     if let Some(&(last, l)) = result.corners.last() {
         if let Some(c) = pin_exit_corner(board, request.net_no, last, l) {
             result.corners.push((c, l));
             result.rooms.push(None);
+            result.via_choices.push(None);
         }
     }
     Some(result)
@@ -251,11 +435,15 @@ fn find_connection_inner(
 
     let mut nodes: Vec<BacktrackNode> = Vec::new();
     let mut open: BinaryHeap<Reverse<QueueEntry>> = BinaryHeap::new();
-    let mut drilled: HashSet<(i32, i32, usize)> = HashSet::default();
+    // A location/layer may be reachable through more than one ViaInfo with
+    // the same padstack but different clearance or attach policy.  Keep the
+    // complete candidate in the settled-state key so one candidate cannot
+    // suppress a later, semantically distinct candidate.
+    let mut drilled: HashSet<(i32, i32, usize, ViaChoice)> = HashSet::default();
     // via_free memo: neighbouring room pops re-list the same frontier
     // drill points; the exact 4-layer clearance check ran per pop and
     // reached tens of millions of tree queries per pass
-    let mut via_ok: crate::datastructures::FxHashMap<(i32, i32), bool> =
+    let mut via_ok: crate::datastructures::FxHashMap<(i32, i32, ViaChoice), bool> =
         crate::datastructures::FxHashMap::default();
 
     // create and seed the start rooms on every ACTIVE layer of the start
@@ -319,6 +507,7 @@ fn find_connection_inner(
                     return Some(MazeSearchResult {
                         corners: vec![(start_point, *layer), (dest_point, *layer)],
                         rooms: vec![Some(room), None],
+                        via_choices: vec![None, None],
                     });
                 }
             }
@@ -329,6 +518,7 @@ fn find_connection_inner(
                 layer: *layer,
                 parent: None,
                 room: Some(room),
+                via_choice: None,
             });
             seed_room(
                 engine,
@@ -390,6 +580,7 @@ fn find_connection_inner(
             layer,
             parent: entry.parent,
             room: Some(room),
+            via_choice: entry.via_choice,
         });
 
         // fanout completes at the first drill (Java: MazeSearchAlgo
@@ -397,15 +588,22 @@ fn find_connection_inner(
         if request.is_fanout && matches!(entry.step, Step::Drill) {
             let mut corners: Vec<(FloatPoint, usize)> = Vec::new();
             let mut rooms: Vec<Option<RoomId>> = Vec::new();
+            let mut via_choices: Vec<Option<ViaChoice>> = Vec::new();
             let mut curr = Some(node_id);
             while let Some(i) = curr {
                 corners.push((nodes[i].location, nodes[i].layer));
                 rooms.push(nodes[i].room);
+                via_choices.push(nodes[i].via_choice);
                 curr = nodes[i].parent;
             }
             corners.reverse();
             rooms.reverse();
-            return Some(MazeSearchResult { corners, rooms });
+            via_choices.reverse();
+            return Some(MazeSearchResult {
+                corners,
+                rooms,
+                via_choices,
+            });
         }
 
         engine.expand_room(board, room);
@@ -419,14 +617,17 @@ fn find_connection_inner(
             // backtrack through the node chain
             let mut corners: Vec<(FloatPoint, usize)> = Vec::new();
             let mut rooms: Vec<Option<RoomId>> = Vec::new();
+            let mut via_choices: Vec<Option<ViaChoice>> = Vec::new();
             let mut curr = Some(node_id);
             while let Some(i) = curr {
                 corners.push((nodes[i].location, nodes[i].layer));
                 rooms.push(nodes[i].room);
+                via_choices.push(nodes[i].via_choice);
                 curr = nodes[i].parent;
             }
             corners.reverse();
             rooms.reverse();
+            via_choices.reverse();
             let arrival_shape = engine.graph.room(room).shape.clone();
             let dest_point = destination_point(
                 board,
@@ -437,7 +638,12 @@ fn find_connection_inner(
             );
             corners.push((dest_point, layer));
             rooms.push(None);
-            return Some(MazeSearchResult { corners, rooms });
+            via_choices.push(None);
+            return Some(MazeSearchResult {
+                corners,
+                rooms,
+                via_choices,
+            });
         }
 
         seed_room(
@@ -497,8 +703,8 @@ fn seed_room(
     entered_through: Option<DoorId>,
     offset: f64,
     open: &mut BinaryHeap<Reverse<QueueEntry>>,
-    drilled: &mut HashSet<(i32, i32, usize)>,
-    via_ok: &mut crate::datastructures::FxHashMap<(i32, i32), bool>,
+    drilled: &mut HashSet<(i32, i32, usize, ViaChoice)>,
+    via_ok: &mut crate::datastructures::FxHashMap<(i32, i32, ViaChoice), bool>,
     estimate_to_dest: &dyn Fn(FloatPoint, usize) -> f64,
 ) {
     let layer = engine.graph.room(room).layer;
@@ -585,93 +791,116 @@ fn seed_room(
                 room_to_enter: other,
                 parent: Some(parent),
                 location: midpoint,
+                via_choice: None,
             }));
         }
     }
     // drill expansion (Java: ExpansionDrill candidates from DrillPages):
     // try the entry location plus a grid of sample points within the room
-    let Some(padstack) = board.padstacks.get_by_no(request.via_padstack) else {
-        return;
-    };
-    let from = padstack.from_layer();
-    let to = padstack.to_layer();
-    if layer < from || layer > to {
-        return;
-    }
-    let mut drill_points: Vec<IntPoint> = vec![location.round()];
-    {
-        // drill pages (Java: DrillPageArray): cached convex free areas;
-        // candidates are the page drills whose free area intersects the
-        // current room
-        let room_shape = engine.graph.room(room).shape.clone();
-        let bb = room_shape.bounding_box();
-        if engine.drill_pages.is_none() {
-            engine.drill_pages = Some(crate::autoroute::drill_pages::DrillPageArray::new(
-                board,
-                request.via_padstack,
-            ));
-        }
-        let via_margin = padstack
-            .get_shape(from)
-            .map(|s| (s.bounding_box().max_width() / 2.0) as i32)
-            .unwrap_or(1000)
-            + board.rules.clearance_matrix.max_value(layer).max(0);
-        let pages = engine.drill_pages.as_mut().unwrap();
-        pages.sync_board_changes(board);
-        for drill in pages.drills_overlapping(
-            board,
-            &bb,
-            request.net_no,
-            via_margin,
-            request.via_attach_allowed,
-        ) {
-            if drill_points.len() >= 17 {
-                break;
-            }
-            if room_shape.contains(&crate::geometry::planar::Point::Int(drill.location)) {
-                drill_points.push(drill.location);
-            }
-        }
-    }
-    for drill_point in drill_points {
-        let free = *via_ok
-            .entry((drill_point.x, drill_point.y))
-            .or_insert_with(|| via_free(board, request, drill_point));
-        if !free {
+    let pure_smd_relax = crate::autoroute::batch::pure_smd_search_relaxation(board, request.net_no);
+    for choice in via_choices_for_layer(board, request, layer) {
+        // The selected full-span ViaInfo on the request is only a fallback
+        // summary.  A ViaRule may offer an attach-enabled blind/buried via
+        // alongside an attach-disabled through via, so drill-page and
+        // pairwise-site search must use the concrete candidate's bit.  The
+        // pure-SMD relaxation remains an independent search-only permission.
+        let search_attach_relax = search_attach_allowed_for_choice(choice, pure_smd_relax);
+        let Some(padstack) = board.padstacks.get_by_no(choice.padstack) else {
+            continue;
+        };
+        let from = padstack.from_layer();
+        let to = padstack.to_layer();
+        if layer < from || layer > to || padstack.get_shape(layer).is_none() {
             continue;
         }
-        let drill_cost = base_cost + location.distance(drill_point.to_float());
-        for next_layer in from..=to {
-            if next_layer == layer {
+        let mut drill_points: Vec<IntPoint> = vec![location.round()];
+        {
+            // drill pages (Java: DrillPageArray): cached convex free areas;
+            // candidates are the page drills whose free area intersects the
+            // current room
+            let room_shape = engine.graph.room(room).shape.clone();
+            let bb = room_shape.bounding_box();
+            let via_margin = (from..=to)
+                .filter_map(|l| padstack.get_shape(l))
+                .map(|s| (s.bounding_box().max_width() / 2.0) as i32)
+                .max()
+                .unwrap_or(1000)
+                + (from..=to)
+                    .map(|l| board.rules.clearance_matrix.max_value(l).max(0))
+                    .max()
+                    .unwrap_or(0);
+            let pages = engine
+                .drill_pages
+                .entry(choice.padstack)
+                .or_insert_with(|| {
+                    crate::autoroute::drill_pages::DrillPageArray::new(board, choice.padstack)
+                });
+            pages.sync_board_changes(board);
+            for drill in pages.drills_overlapping(
+                board,
+                &bb,
+                request.net_no,
+                via_margin,
+                search_attach_relax,
+            ) {
+                if drill_points.len() >= 17 {
+                    break;
+                }
+                if room_shape.contains(&crate::geometry::planar::Point::Int(drill.location)) {
+                    drill_points.push(drill.location);
+                }
+            }
+        }
+        let mut candidate_request = request.clone();
+        candidate_request.via_padstack = choice.padstack;
+        candidate_request.via_clearance_class = choice.clearance_class;
+        candidate_request.via_attach_allowed = choice.attach_allowed;
+        for drill_point in drill_points {
+            let free = *via_ok
+                .entry((drill_point.x, drill_point.y, choice))
+                .or_insert_with(|| {
+                    via_free(board, &candidate_request, drill_point, search_attach_relax)
+                });
+            if !free {
                 continue;
             }
-            // net-class active-layer gate (Java AutorouteControl.layer_active
-            // from `(circuit (use_layer ...))`): the via may still span the
-            // disabled layer, but the search never routes onto it
-            if !board
-                .rules
-                .is_active_routing_layer(request.net_no, next_layer)
-            {
-                continue;
-            }
-            if !drilled.insert((drill_point.x, drill_point.y, next_layer)) {
-                continue;
-            }
-            // find or create the room on the target layer containing the
-            // point
-            let target_rooms = engine.rooms_containing(drill_point, next_layer, board);
-            for target_room in target_rooms {
-                let ripup_cost =
-                    request.ripup_penalty * engine.rippable_items(target_room).len() as f64;
-                let cost = drill_cost + request.via_cost + ripup_cost;
-                open.push(Reverse(QueueEntry {
-                    cost,
-                    estimate: cost + estimate_to_dest(drill_point.to_float(), next_layer),
-                    step: Step::Drill,
-                    room_to_enter: target_room,
-                    parent: Some(parent),
-                    location: drill_point.to_float(),
-                }));
+            let drill_cost = base_cost + location.distance(drill_point.to_float());
+            for next_layer in from..=to {
+                if next_layer == layer {
+                    continue;
+                }
+                if !padstack.has_shapes_at_transition_endpoints(layer, next_layer) {
+                    continue;
+                }
+                // net-class active-layer gate (Java AutorouteControl.layer_active
+                // from `(circuit (use_layer ...))`): the via may still span the
+                // disabled layer, but the search never routes onto it
+                if !board
+                    .rules
+                    .is_active_routing_layer(request.net_no, next_layer)
+                {
+                    continue;
+                }
+                if !drilled.insert((drill_point.x, drill_point.y, next_layer, choice)) {
+                    continue;
+                }
+                // find or create the room on the target layer containing the
+                // point
+                let target_rooms = engine.rooms_containing(drill_point, next_layer, board);
+                for target_room in target_rooms {
+                    let ripup_cost =
+                        request.ripup_penalty * engine.rippable_items(target_room).len() as f64;
+                    let cost = drill_cost + request.via_cost + ripup_cost;
+                    open.push(Reverse(QueueEntry {
+                        cost,
+                        estimate: cost + estimate_to_dest(drill_point.to_float(), next_layer),
+                        step: Step::Drill,
+                        room_to_enter: target_room,
+                        parent: Some(parent),
+                        location: drill_point.to_float(),
+                        via_choice: Some(choice),
+                    }));
+                }
             }
         }
     }
@@ -685,18 +914,20 @@ fn seed_room(
 /// value when one exists, the ordinary matrix value otherwise. The search
 /// (`via_free`) and the insert gate (`via_site_is_clear`) share this rule,
 /// so the maze never picks a site the insert then rejects.
-fn via_site_clearance(
+fn via_site_clearance_with_attach(
     board: &BasicBoard,
     request: &MazeRouteRequest,
     other: &crate::board::Item,
     layer: usize,
+    attach_allowed: bool,
+    escape_smd_layer: Option<usize>,
 ) -> Option<f64> {
     let mut same_net_required: Option<f64> = None;
     if other.base.contains_net(request.net_no) {
         if !crate::drc::is_drill(&other.kind) {
             return None;
         }
-        if request.via_attach_allowed
+        if (attach_allowed || escape_smd_layer == Some(layer))
             && crate::drc::is_pin(other)
             && crate::drc::drill_allowed(other, &board.padstacks)
         {
@@ -739,10 +970,18 @@ fn via_site_clearance(
 }
 
 /// True if a via at `point` keeps its clearance on all layers it spans.
-fn via_free(board: &BasicBoard, request: &MazeRouteRequest, point: IntPoint) -> bool {
+fn via_free(
+    board: &BasicBoard,
+    request: &MazeRouteRequest,
+    point: IntPoint,
+    search_attach_allowed: bool,
+) -> bool {
     let Some(padstack) = board.padstacks.get_by_no(request.via_padstack) else {
         return false;
     };
+    if !padstack.has_shapes_at_transition_endpoints(padstack.from_layer(), padstack.to_layer()) {
+        return false;
+    }
     for layer in padstack.from_layer()..=padstack.to_layer() {
         let Some(shape) = padstack.get_shape(layer) else {
             continue;
@@ -773,7 +1012,14 @@ fn via_free(board: &BasicBoard, request: &MazeRouteRequest, point: IntPoint) -> 
             {
                 continue;
             }
-            let Some(pairwise) = via_site_clearance(board, request, item, layer) else {
+            let Some(pairwise) = via_site_clearance_with_attach(
+                board,
+                request,
+                item,
+                layer,
+                search_attach_allowed,
+                None,
+            ) else {
                 continue;
             };
             let check = via_shape.offset(pairwise);
@@ -918,8 +1164,7 @@ fn destination_point(
 }
 
 /// A successfully inserted connection.
-pub struct RoutedConnection {
-    pub new_items: Vec<ItemId>,
+pub(crate) struct RoutedConnection {
     /// The nets of the rippable items removed to make room (empty without
     /// ripup).
     pub ripped_nets: Vec<i32>,
@@ -929,7 +1174,7 @@ pub struct RoutedConnection {
 /// polyline traces joined by vias, ripping the rippable foreign items the
 /// connection passes through when `ripup_penalty` > 0. Returns the
 /// inserted item ids and the ripped nets.
-pub fn maze_route_with_ripup(
+pub(crate) fn maze_route_with_ripup(
     board: &mut BasicBoard,
     request: &MazeRouteRequest,
 ) -> Option<RoutedConnection> {
@@ -965,7 +1210,7 @@ pub fn maze_route_with_ripup(
 /// (own-net items never restrain rooms; items ripped in between only make
 /// the kept rooms conservative). The engine must be fresh whenever the
 /// board changes outside this net's routing (e.g. after an undo).
-pub fn maze_route_with_engine(
+pub(crate) fn maze_route_with_engine(
     board: &mut BasicBoard,
     engine: &mut AutorouteEngine,
     request: &MazeRouteRequest,
@@ -1100,16 +1345,13 @@ pub fn maze_route_with_engine(
                                 // stale-looking: capture exact shapes for
                                 // offline reproduction
                                 let margin = request.trace_half_width
-                                    + board
-                                        .rules
-                                        .clearance_matrix
-                                        .get_value(
-                                            item.base.clearance_class,
-                                            request.clearance_class,
-                                            la,
-                                            true,
-                                        )
-                                        .max(0);
+                                    + crate::drc::clearance_for_new_item(
+                                        board,
+                                        item,
+                                        request.clearance_class,
+                                        la,
+                                    ) as i32
+                                    + crate::rules::clearance_matrix::CLEARANCE_SAFETY_MARGIN;
                                 eprintln!(
                                     "  LEAKGEOM room {:?} margin {margin} item-shapes {:?}",
                                     engine.graph.room(room).shape.to_simplex(),
@@ -1146,16 +1388,12 @@ pub fn maze_route_with_engine(
                         continue;
                     }
                 }
-                let cl = board
-                    .rules
-                    .clearance_matrix
-                    .get_value(
-                        item.base.clearance_class,
-                        request.clearance_class,
-                        r.layer,
-                        false,
-                    )
-                    .max(0) as f64;
+                let cl = crate::drc::clearance_for_new_item(
+                    board,
+                    item,
+                    request.clearance_class,
+                    r.layer,
+                );
                 for (os, ol) in item.tile_shapes(&board.padstacks) {
                     if *ol != r.layer {
                         continue;
@@ -1215,7 +1453,7 @@ pub fn maze_route_with_engine(
         // the pending connection's own shapes (not yet on the board):
         // shove substitutes must avoid them
         let mut forbidden: Vec<(TileShape, usize)> = Vec::new();
-        for window in result.corners.windows(2) {
+        for (window_index, window) in result.corners.windows(2).enumerate() {
             let ((a, layer_a), (b, layer_b)) = (window[0], window[1]);
             let (pa, pb) = (a.round(), b.round());
             // the travel pa→pb always runs on layer_a (when b is a drill
@@ -1229,19 +1467,30 @@ pub fn maze_route_with_engine(
                 }
             }
             if layer_a != layer_b {
-                if let Some(padstack) = board.padstacks.get_by_no(request.via_padstack) {
-                    for layer in padstack.from_layer()..=padstack.to_layer() {
-                        if let Some(shape) = padstack.get_shape(layer) {
-                            let max_cl =
-                                board.rules.clearance_matrix.max_value(layer).max(0) as f64;
-                            forbidden.push((
-                                shape
-                                    .translate_by(crate::geometry::planar::IntVector::new(
-                                        pb.x, pb.y,
-                                    ))
-                                    .offset(max_cl + 1.0),
-                                layer,
-                            ));
+                let choice = result
+                    .via_choices
+                    .get(window_index + 1)
+                    .and_then(|c| *c)
+                    .or_else(|| {
+                        via_choices_for_transition(board, request, layer_a, layer_b)
+                            .into_iter()
+                            .next()
+                    });
+                if let Some(choice) = choice {
+                    if let Some(padstack) = board.padstacks.get_by_no(choice.padstack) {
+                        for layer in padstack.from_layer()..=padstack.to_layer() {
+                            if let Some(shape) = padstack.get_shape(layer) {
+                                let max_cl =
+                                    board.rules.clearance_matrix.max_value(layer).max(0) as f64;
+                                forbidden.push((
+                                    shape
+                                        .translate_by(crate::geometry::planar::IntVector::new(
+                                            pb.x, pb.y,
+                                        ))
+                                        .offset(max_cl + 1.0),
+                                    layer,
+                                ));
+                            }
                         }
                     }
                 }
@@ -1263,7 +1512,7 @@ pub fn maze_route_with_engine(
                 }
             }
         }
-        for window in result.corners.windows(2) {
+        for (window_index, window) in result.corners.windows(2).enumerate() {
             let ((a, layer_a), (b, layer_b)) = (window[0], window[1]);
             let (pa, pb) = (a.round(), b.round());
             // rip the travel corridor on layer_a for EVERY pair: when b
@@ -1302,22 +1551,35 @@ pub fn maze_route_with_engine(
             if layer_a != layer_b {
                 // the via footprint at the layer change (the via sits at
                 // the DRILL node pb, not at the corner before it)
-                if let Some(padstack) = board.padstacks.get_by_no(request.via_padstack) {
-                    for layer in padstack.from_layer()..=padstack.to_layer() {
-                        if let Some(shape) = padstack.get_shape(layer) {
-                            let max_cl =
-                                board.rules.clearance_matrix.max_value(layer).max(0) as f64;
-                            let q = shape
-                                .translate_by(crate::geometry::planar::IntVector::new(pb.x, pb.y))
-                                .offset(max_cl + 1.0);
-                            for id in board.overlapping_items(&q, Some(layer)) {
-                                if board.get_item(id).is_some_and(|item| {
-                                    crate::autoroute::room_completion::is_rippable(
-                                        item,
-                                        request.net_no,
-                                    )
-                                }) {
-                                    to_rip.push(id);
+                let choice = result
+                    .via_choices
+                    .get(window_index + 1)
+                    .and_then(|c| *c)
+                    .or_else(|| {
+                        via_choices_for_transition(board, request, layer_a, layer_b)
+                            .into_iter()
+                            .next()
+                    });
+                if let Some(choice) = choice {
+                    if let Some(padstack) = board.padstacks.get_by_no(choice.padstack) {
+                        for layer in padstack.from_layer()..=padstack.to_layer() {
+                            if let Some(shape) = padstack.get_shape(layer) {
+                                let max_cl =
+                                    board.rules.clearance_matrix.max_value(layer).max(0) as f64;
+                                let q = shape
+                                    .translate_by(crate::geometry::planar::IntVector::new(
+                                        pb.x, pb.y,
+                                    ))
+                                    .offset(max_cl + 1.0);
+                                for id in board.overlapping_items(&q, Some(layer)) {
+                                    if board.get_item(id).is_some_and(|item| {
+                                        crate::autoroute::room_completion::is_rippable(
+                                            item,
+                                            request.net_no,
+                                        )
+                                    }) {
+                                        to_rip.push(id);
+                                    }
                                 }
                             }
                         }
@@ -1343,15 +1605,16 @@ pub fn maze_route_with_engine(
     // rooms are reused across a net's connections: make the new items
     // reachable as destinations
     engine.register_new_targets(board, &new_items);
-    Some(RoutedConnection {
-        new_items,
-        ripped_nets,
-    })
+    Some(RoutedConnection { ripped_nets })
 }
 
 /// Runs the maze search and inserts the found connection as per-layer
 /// polyline traces joined by vias. Returns the inserted item ids.
-pub fn maze_route(board: &mut BasicBoard, request: &MazeRouteRequest) -> Option<Vec<ItemId>> {
+#[cfg(test)]
+pub(crate) fn maze_route(
+    board: &mut BasicBoard,
+    request: &MazeRouteRequest,
+) -> Option<Vec<ItemId>> {
     let mut engine = AutorouteEngine::new_with_clearance(
         request.net_no,
         false,
@@ -1452,10 +1715,12 @@ fn restrict_corners(
         return MazeSearchResult {
             corners: result.corners.clone(),
             rooms: result.rooms.clone(),
+            via_choices: result.via_choices.clone(),
         };
     }
     let mut corners: Vec<(FloatPoint, usize)> = Vec::new();
     let mut rooms: Vec<Option<RoomId>> = Vec::new();
+    let mut via_choices: Vec<Option<ViaChoice>> = Vec::new();
     for k in 0..result.corners.len() {
         let (b, lb) = result.corners[k];
         if let Some(&(a, la)) = corners.last().filter(|_| k > 0) {
@@ -1488,13 +1753,19 @@ fn restrict_corners(
                     // the drill point itself
                     corners.push((rounded, la));
                     rooms.push(result.rooms[k - 1]);
+                    via_choices.push(None);
                 }
             }
         }
         corners.push((b, lb));
         rooms.push(result.rooms[k]);
+        via_choices.push(result.via_choices[k]);
     }
-    MazeSearchResult { corners, rooms }
+    MazeSearchResult {
+        corners,
+        rooms,
+        via_choices,
+    }
 }
 
 /// Inserts the found connection as per-layer polyline traces joined by
@@ -1502,10 +1773,26 @@ fn restrict_corners(
 /// True when a via of the request's padstack at `p` keeps the exact
 /// pairwise clearance to every foreign item (mitered pre-filter +
 /// Euclidean confirm, like the DRC).
+#[cfg(test)]
 fn via_site_is_clear(board: &BasicBoard, request: &MazeRouteRequest, p: IntPoint) -> bool {
+    via_site_is_clear_with_escape(board, request, p, None)
+}
+
+fn via_site_is_clear_with_escape(
+    board: &BasicBoard,
+    request: &MazeRouteRequest,
+    p: IntPoint,
+    escape_smd_layer: Option<usize>,
+) -> bool {
     let Some(ps) = board.padstacks.get_by_no(request.via_padstack) else {
-        return true;
+        // A missing padstack is malformed board state, not an empty via.
+        // Failing closed prevents the insert path from treating an invalid
+        // candidate as clearance-free.
+        return false;
     };
+    if !ps.has_shapes_at_transition_endpoints(ps.from_layer(), ps.to_layer()) {
+        return false;
+    }
     let matrix = &board.rules.clearance_matrix;
     for layer in ps.from_layer()..=ps.to_layer() {
         let Some(shape) = ps.get_shape(layer) else {
@@ -1521,7 +1808,14 @@ fn via_site_is_clear(board: &BasicBoard, request: &MazeRouteRequest, p: IntPoint
             let Some(other) = board.get_item(other_id) else {
                 continue;
             };
-            let Some(cl) = via_site_clearance(board, request, other, layer) else {
+            let Some(cl) = via_site_clearance_with_attach(
+                board,
+                request,
+                other,
+                layer,
+                request.via_attach_allowed,
+                escape_smd_layer,
+            ) else {
                 continue;
             };
             if other.tile_shapes(&board.padstacks).iter().any(|(os, ol)| {
@@ -1534,6 +1828,39 @@ fn via_site_is_clear(board: &BasicBoard, request: &MazeRouteRequest, p: IntPoint
         }
     }
     true
+}
+
+fn via_site_is_clear_for_choice(
+    board: &BasicBoard,
+    request: &MazeRouteRequest,
+    p: IntPoint,
+    choice: ViaChoice,
+    escape_smd_layer: Option<usize>,
+) -> bool {
+    let mut candidate = request.clone();
+    candidate.via_padstack = choice.padstack;
+    candidate.via_clearance_class = choice.clearance_class;
+    candidate.via_attach_allowed = choice.attach_allowed;
+    via_site_is_clear_with_escape(board, &candidate, p, escape_smd_layer)
+}
+
+/// Returns the one SMD layer that justifies a pure-SMD escape via at `p`.
+/// The selected ViaInfo must have attach disabled, the net must consist of
+/// original single-layer component pins, and the pending via copper must
+/// actually overlap one of those pins. A single marker cannot represent two
+/// different SMD layers, so an ambiguous stacked-pad site is rejected.
+fn escape_smd_layer_for_choice(
+    board: &BasicBoard,
+    request: &MazeRouteRequest,
+    p: IntPoint,
+    choice: ViaChoice,
+) -> Option<usize> {
+    if choice.attach_allowed
+        || !crate::autoroute::batch::pure_smd_search_relaxation(board, request.net_no)
+    {
+        return None;
+    }
+    board.pure_smd_escape_layer(request.net_no, choice.padstack, p)
 }
 
 /// True when a trace run of the request's width keeps the exact
@@ -1596,12 +1923,37 @@ fn trace_run_is_clear(
     true
 }
 
+/// Inserts one found connection as an atomic board transaction.  The maze
+/// insertion may invoke forced-via and shove helpers, which can modify items
+/// that predate this call.  A birth-ID cleanup is insufficient for those
+/// victims; the board snapshot covers every nested mutation and restores the
+/// exact pre-call state on any late failure.
 fn insert_connection(
     board: &mut BasicBoard,
     request: &MazeRouteRequest,
     result: &MazeSearchResult,
 ) -> Option<Vec<ItemId>> {
-    crate::board::basic_board::set_birth_tag(1);
+    board.generate_snapshot();
+    let inserted = insert_connection_inner(board, request, result);
+    match inserted {
+        Some(items) => {
+            board.pop_snapshot();
+            Some(items)
+        }
+        None => {
+            board.undo();
+            None
+        }
+    }
+}
+
+fn insert_connection_inner(
+    board: &mut BasicBoard,
+    request: &MazeRouteRequest,
+    result: &MazeSearchResult,
+) -> Option<Vec<ItemId>> {
+    let _birth_tag = crate::board::basic_board::birth_tag_scope(1);
+    let watermark = board.next_item_id();
 
     let mut new_items = Vec::new();
     // Correct the two endpoints so the connection begins and ends exactly at the
@@ -1613,17 +1965,20 @@ fn insert_connection(
     // convex same-net pad, so `trace_run_is_clear` (which skips same-net items)
     // always accepts it.
     let mut corners = result.corners.clone();
+    let mut via_choices = result.via_choices.clone();
     if crate::debug::maze() {
         eprintln!("FOUND net {} corners {:?}", request.net_no, corners);
     }
     if let Some(&(first, l)) = corners.first() {
         if let Some(c) = pin_exit_corner(board, request.net_no, first, l) {
             corners.insert(0, (c, l));
+            via_choices.insert(0, None);
         }
     }
     if let Some(&(last, l)) = corners.last() {
         if let Some(c) = pin_exit_corner(board, request.net_no, last, l) {
             corners.push((c, l));
+            via_choices.push(None);
         }
     }
     let mut run: Vec<IntPoint> = Vec::new();
@@ -1735,7 +2090,7 @@ fn insert_connection(
             }
             true
         };
-    for (corner, layer) in &corners {
+    for (corner_index, (corner, layer)) in corners.iter().enumerate() {
         let p = corner.round();
         if *layer != run_layer {
             // the drill NODE's location is the via site: the travel from
@@ -1748,9 +2103,6 @@ fn insert_connection(
                 run.push(p);
             }
             if !flush(board, &mut run, run_layer, &mut new_items) {
-                for id in new_items {
-                    board.remove_item(id);
-                }
                 return None;
             }
             // Drill-page-validated sites are inserted plainly (the vast
@@ -1760,40 +2112,75 @@ fn insert_connection(
             // site goes through Java's forced-via path instead (checked,
             // shoves conflicting items free) and fails the insert when
             // even that cannot clear it.
-            if via_site_is_clear(board, request, p) {
-                // the via carries the selected ViaInfo's clearance class,
-                // not the trace request's — a strict via must not be
-                // inserted under a weaker clearance
-                new_items.push(board.insert_via(
-                    request.via_padstack,
-                    p,
-                    vec![request.net_no],
-                    request.via_class(),
-                    request.via_attach_allowed,
-                ));
-            } else {
-                match crate::board::forced_via::insert_forced_via(
+            let mut choices = Vec::new();
+            if let Some(choice) = via_choices
+                .get(corner_index)
+                .and_then(|c| *c)
+                .filter(|choice| via_choice_supports_transition(board, *choice, run_layer, *layer))
+            {
+                choices.push(choice);
+            }
+            for choice in via_choices_for_transition(board, request, run_layer, *layer) {
+                if !choices.contains(&choice) {
+                    choices.push(choice);
+                }
+            }
+            if choices.is_empty() {
+                return None;
+            }
+            let mut inserted_via = None;
+            for choice in choices {
+                if !via_choice_supports_transition(board, choice, run_layer, *layer) {
+                    continue;
+                }
+                // The via carries the selected ViaInfo's clearance class,
+                // not the trace request's.  Try later rule candidates when
+                // an earlier candidate is blocked at this concrete site.
+                let escape_smd_layer = escape_smd_layer_for_choice(board, request, p, choice);
+                if via_site_is_clear_for_choice(board, request, p, choice, escape_smd_layer) {
+                    inserted_via = Some(if let Some(layer) = escape_smd_layer {
+                        board.insert_escape_via(
+                            choice.padstack,
+                            p,
+                            vec![request.net_no],
+                            choice.clearance_class,
+                            choice.attach_allowed,
+                            layer,
+                        )
+                    } else {
+                        board.insert_via(
+                            choice.padstack,
+                            p,
+                            vec![request.net_no],
+                            choice.clearance_class,
+                            choice.attach_allowed,
+                        )
+                    });
+                    break;
+                }
+                if let Some(id) = crate::board::forced_via::insert_forced_via_with_escape(
                     board,
-                    request.via_padstack,
+                    choice.padstack,
                     p,
                     &[request.net_no],
-                    request.via_class(),
+                    choice.clearance_class,
                     request.trace_half_width,
-                    request.via_attach_allowed,
+                    crate::board::forced_via::ViaInsertionPolicy {
+                        attach_allowed: choice.attach_allowed,
+                        escape_smd_layer,
+                    },
                 ) {
-                    Some(id) => new_items.push(id),
-                    None => {
-                        // an illegal via site fails the whole insert; the
-                        // caller's transaction removes the partial items
-                        if crate::debug::maze() {
-                            eprintln!("VIA SITE BLOCKED net {} at {p:?}", request.net_no);
-                        }
-                        for id in new_items {
-                            board.remove_item(id);
-                        }
-                        return None;
-                    }
+                    inserted_via = Some(id);
+                    break;
                 }
+            }
+            if let Some(id) = inserted_via {
+                new_items.push(id);
+            } else {
+                if crate::debug::maze() {
+                    eprintln!("VIA SITE BLOCKED net {} at {p:?}", request.net_no);
+                }
+                return None;
             }
             run = vec![p];
             run_layer = *layer;
@@ -1803,9 +2190,6 @@ fn insert_connection(
         }
     }
     if !flush(board, &mut run, run_layer, &mut new_items) {
-        for id in new_items {
-            board.remove_item(id);
-        }
         return None;
     }
     if new_items.is_empty() {
@@ -1865,18 +2249,17 @@ fn insert_connection(
         while board.split_traces_at(point, layer, request.net_no) {}
     }
 
-    // NOTE: routed traces can stop anywhere INSIDE a target pad rather than at
-    // the pin's connection point (its drill center). Rust's lenient in-pad
-    // containment rule counts that as connected, but a reloaded SES treats an
-    // off-centre end as a dangling track, so the output is not electrically
-    // equivalent to Java's (which lands the trace at the connection point).
-    // This is NOT fixed here. Two post-processing attempts failed: a connecting
-    // stub is deleted by cycle removal (the pad contacts both its ends, so
-    // `trace_is_cycle` sees a redundant path), and rebuilding the trace with the
-    // centre as a terminal corner produces degenerate ~sub-grid segments that
-    // break the polyline offset machinery. A correct fix must terminate the maze
-    // connection at the drill connection point during the search itself; that is
-    // a larger router change and remains open.
+    // Shoves and normalization can create additional items after the direct
+    // trace/via ids were collected.  Validate the complete birth set with
+    // the same pair predicate used by the final DRC.
+    if !board
+        .item_ids_since(watermark)
+        .into_iter()
+        .all(|id| crate::drc::item_is_clear(board, id))
+    {
+        return None;
+    }
+
     Some(new_items)
 }
 
@@ -1934,6 +2317,54 @@ mod tests {
         let items = maze_route(&mut board, &request(a, b)).expect("route failed");
         assert!(!items.is_empty());
         assert!(board.net_is_completely_connected(1));
+    }
+
+    #[test]
+    fn missing_via_padstack_is_not_clear() {
+        let board = test_board();
+        let mut req = request(0, 0);
+        req.via_padstack = usize::MAX;
+        assert!(
+            !via_site_is_clear(&board, &req, IntPoint::new(0, 0)),
+            "a malformed via candidate must fail closed"
+        );
+    }
+
+    #[test]
+    fn failed_insert_restores_victim_changed_by_nested_shove() {
+        let mut board = test_board();
+        let victim_id = board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(-10_000, 0), IntPoint::new(10_000, 0)]),
+            0,
+            100,
+            vec![2],
+            1,
+        );
+        let victim_before = board.get_item(victim_id).cloned().unwrap();
+        let ids_before: Vec<_> = board.items().map(|(id, _)| *id).collect();
+
+        // The first run intersects the victim and successfully shoves it
+        // aside.  The subsequent layer transition has no valid padstack, so
+        // insertion fails after that nested mutation.
+        let result = MazeSearchResult {
+            corners: vec![
+                (FloatPoint::new(-1_000.0, 0.0), 0),
+                (FloatPoint::new(1_000.0, 0.0), 0),
+                (FloatPoint::new(1_000.0, 0.0), 1),
+            ],
+            rooms: vec![None, None, None],
+            via_choices: vec![None, None, None],
+        };
+        let mut req = request(0, 0);
+        req.via_padstack = usize::MAX;
+        assert!(
+            insert_connection(&mut board, &req, &result).is_none(),
+            "the malformed later via must fail"
+        );
+
+        assert_eq!(board.get_item(victim_id), Some(&victim_before));
+        let ids_after: Vec<_> = board.items().map(|(id, _)| *id).collect();
+        assert_eq!(ids_after, ids_before, "failed insertion leaked new items");
     }
 
     #[test]
@@ -2016,6 +2447,7 @@ mod tests {
                 (FloatPoint::new(100.0, 500.0), 1),
             ],
             rooms: vec![None, None, None],
+            via_choices: vec![None, None, None],
         };
         let restricted = restrict_corners(
             &engine,
@@ -2040,6 +2472,440 @@ mod tests {
             })
             .expect("an extra corner must be inserted for the approach");
         assert_eq!(extra.1, 0, "the extra corner runs on the old layer");
+    }
+
+    #[test]
+    fn via_rule_candidates_are_selected_per_layer_transition() {
+        use crate::board::{Layer, LayerStructure};
+        use crate::core::Padstacks;
+        use crate::rules::{BoardRules, ClearanceMatrix, ViaInfo, ViaRule};
+        let stack =
+            LayerStructure::new((0..4).map(|i| Layer::new(format!("L{i}"), true)).collect());
+        let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
+        let mut rules = BoardRules::new(stack.clone(), matrix);
+        rules.get_default_net_class();
+        let net = rules.nets.add("N", 1, false);
+        let mut pads = Padstacks::new(4);
+        let shape = TileShape::Box(IntBox::from_coords(-100, -100, 100, 100));
+        let blind = pads.add_shape_on_layers(shape.clone(), 0, 1);
+        let buried = pads.add_shape_on_layers(shape.clone(), 1, 2);
+        let through = pads.add_shape_on_layers(shape, 0, 3);
+        let blind_info = rules
+            .via_infos
+            .add(ViaInfo::new("blind", blind, 1, false))
+            .unwrap();
+        let buried_info = rules
+            .via_infos
+            .add(ViaInfo::new("buried", buried, 1, false))
+            .unwrap();
+        let through_info = rules
+            .via_infos
+            .add(ViaInfo::new("through", through, 1, false))
+            .unwrap();
+        let mut rule = ViaRule::new("mixed");
+        rule.append_via(blind_info);
+        rule.append_via(buried_info);
+        rule.append_via(through_info);
+        rules.via_rules.push(rule);
+        rules.net_classes.get_mut(0).set_via_rule(Some(0));
+        let board = BasicBoard::new(stack, rules, pads);
+        let request = MazeRouteRequest {
+            net_no: net,
+            start_item: 0,
+            dest_item: 0,
+            start_items: Vec::new(),
+            dest_items: Vec::new(),
+            trace_half_width: 50,
+            clearance_class: 1,
+            via_padstack: through,
+            via_clearance_class: 1,
+            via_attach_allowed: false,
+            via_cost: 100.0,
+            max_expansions: 10,
+            ripup_penalty: 0.0,
+            deadline: None,
+            is_fanout: false,
+        };
+        let a = via_choices_for_transition(&board, &request, 0, 1);
+        assert_eq!(a.first().map(|v| v.padstack), Some(blind));
+        let b = via_choices_for_transition(&board, &request, 1, 2);
+        assert_eq!(b.first().map(|v| v.padstack), Some(buried));
+        assert!(via_choices_for_transition(&board, &request, 0, 3)
+            .iter()
+            .any(|v| v.padstack == through));
+        let layer_one = via_choices_for_layer(&board, &request, 1);
+        assert_eq!(
+            layer_one
+                .iter()
+                .map(|choice| choice.padstack)
+                .collect::<Vec<_>>(),
+            vec![blind, buried, through],
+            "all destination layers must retain ViaRule priority"
+        );
+    }
+
+    #[test]
+    fn mixed_via_rule_uses_each_candidates_attach_permission_during_search() {
+        // The request's fallback is an attach-disabled through via, while
+        // the rule's first candidate is an attach-enabled blind via.  The
+        // blind candidate is legal on the same-net SMD pin; the through
+        // candidate is not.  This is the distinction lost when drill-page
+        // search used only request.via_attach_allowed for every candidate.
+        use crate::rules::{ViaInfo, ViaRule};
+
+        let stack =
+            LayerStructure::new((0..3).map(|i| Layer::new(format!("L{i}"), true)).collect());
+        let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
+        let mut rules = BoardRules::new(stack.clone(), matrix);
+        let class_idx = rules.get_default_net_class();
+        let net_no = rules.nets.add("N", class_idx, false);
+        let shape = TileShape::Box(IntBox::from_coords(-300, -300, 300, 300));
+        let mut padstacks = Padstacks::new(3);
+        let blind = padstacks.add(
+            "blind",
+            vec![Some(shape.clone()), Some(shape.clone()), None],
+            false,
+            false,
+        );
+        let through = padstacks.add(
+            "through",
+            vec![
+                Some(shape.clone()),
+                Some(shape.clone()),
+                Some(shape.clone()),
+            ],
+            false,
+            false,
+        );
+        let smd = padstacks.add("smd", vec![Some(shape), None, None], false, false);
+        let blind_info = rules
+            .via_infos
+            .add(ViaInfo::new("blind_info", blind, 1, true))
+            .unwrap();
+        let through_info = rules
+            .via_infos
+            .add(ViaInfo::new("through_info", through, 1, false))
+            .unwrap();
+        let mut rule = ViaRule::new("mixed_attach");
+        rule.append_via(blind_info);
+        rule.append_via(through_info);
+        rules.via_rules.push(rule);
+        rules.net_classes.get_mut(class_idx).set_via_rule(Some(0));
+        let mut board = BasicBoard::new(stack, rules, padstacks);
+        let pin = board.insert_via(smd, IntPoint::new(0, 0), vec![net_no], 1, false);
+        board.set_component_no(pin, 1);
+
+        let request = MazeRouteRequest {
+            net_no,
+            start_item: pin,
+            dest_item: pin,
+            start_items: Vec::new(),
+            dest_items: Vec::new(),
+            trace_half_width: 100,
+            clearance_class: 1,
+            via_padstack: through,
+            via_clearance_class: 1,
+            via_attach_allowed: false,
+            via_cost: 100.0,
+            max_expansions: 100,
+            ripup_penalty: 0.0,
+            deadline: None,
+            is_fanout: false,
+        };
+        let blind_choice = ViaChoice {
+            padstack: blind,
+            clearance_class: 1,
+            attach_allowed: true,
+        };
+        let through_choice = ViaChoice {
+            padstack: through,
+            clearance_class: 1,
+            attach_allowed: false,
+        };
+        let mut blind_request = request.clone();
+        blind_request.via_padstack = blind;
+        blind_request.via_clearance_class = blind_choice.clearance_class;
+        blind_request.via_attach_allowed = blind_choice.attach_allowed;
+        // Simulate a request whose selected full-span fallback permits SMD
+        // attachment.  That summary must not leak into the rule's
+        // attach-disabled through candidate below.
+        let mut through_request = request;
+        through_request.via_padstack = through;
+        through_request.via_clearance_class = through_choice.clearance_class;
+        through_request.via_attach_allowed = true;
+
+        assert!(via_free(
+            &board,
+            &blind_request,
+            IntPoint::new(0, 0),
+            search_attach_allowed_for_choice(blind_choice, false),
+        ));
+        assert!(!via_free(
+            &board,
+            &through_request,
+            IntPoint::new(0, 0),
+            search_attach_allowed_for_choice(through_choice, false),
+        ));
+        // The rule itself exposes both candidates, despite the request's
+        // attach-disabled full-span fallback.
+        let choices = via_choices_for_layer(&board, &blind_request, 0);
+        assert_eq!(choices, vec![blind_choice, through_choice]);
+    }
+
+    #[test]
+    fn duplicate_padstack_via_infos_keep_distinct_attach_semantics() {
+        use crate::rules::{ViaInfo, ViaRule};
+
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true), Layer::new("B.Cu", true)]);
+        let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
+        let mut rules = BoardRules::new(stack.clone(), matrix);
+        assert!(rules.clearance_matrix.append_class("strict_via"));
+        let strict_via = rules.clearance_matrix.get_no("strict_via").unwrap();
+        let class_idx = rules.get_default_net_class();
+        let net_no = rules.nets.add("N", class_idx, false);
+        let shape = TileShape::Box(IntBox::from_coords(-300, -300, 300, 300));
+        let mut padstacks = Padstacks::new(2);
+        let through = padstacks.add(
+            "through",
+            vec![Some(shape.clone()), Some(shape.clone())],
+            false,
+            false,
+        );
+        let smd = padstacks.add("smd", vec![Some(shape), None], false, false);
+        let attach_off = rules
+            .via_infos
+            .add(ViaInfo::new("through_off", through, 1, false))
+            .unwrap();
+        let attach_on = rules
+            .via_infos
+            .add(ViaInfo::new("through_on_strict", through, strict_via, true))
+            .unwrap();
+        let mut rule = ViaRule::new("same_padstack_different_policy");
+        rule.append_via(attach_off);
+        rule.append_via(attach_on);
+        rules.via_rules.push(rule);
+        rules.net_classes.get_mut(class_idx).set_via_rule(Some(0));
+        let mut board = BasicBoard::new(stack, rules, padstacks);
+        let pin = board.insert_via(smd, IntPoint::new(0, 0), vec![net_no], 1, false);
+        board.set_component_no(pin, 1);
+
+        let request = MazeRouteRequest {
+            net_no,
+            start_item: pin,
+            dest_item: pin,
+            start_items: Vec::new(),
+            dest_items: Vec::new(),
+            trace_half_width: 100,
+            clearance_class: 1,
+            via_padstack: through,
+            via_clearance_class: 1,
+            via_attach_allowed: false,
+            via_cost: 100.0,
+            max_expansions: 100,
+            ripup_penalty: 0.0,
+            deadline: None,
+            is_fanout: false,
+        };
+        let off_choice = ViaChoice {
+            padstack: through,
+            clearance_class: 1,
+            attach_allowed: false,
+        };
+        let on_choice = ViaChoice {
+            clearance_class: strict_via,
+            attach_allowed: true,
+            ..off_choice
+        };
+
+        assert_eq!(
+            via_choices_for_transition(&board, &request, 0, 1),
+            vec![off_choice, on_choice],
+            "ViaInfo policy must not be deduplicated by padstack number"
+        );
+        assert!(!via_site_is_clear_for_choice(
+            &board,
+            &request,
+            IntPoint::new(0, 0),
+            off_choice,
+            None,
+        ));
+        assert!(via_site_is_clear_for_choice(
+            &board,
+            &request,
+            IntPoint::new(0, 0),
+            on_choice,
+            None,
+        ));
+    }
+
+    #[test]
+    fn bound_empty_or_incompatible_via_rule_fails_closed() {
+        use crate::rules::{ViaInfo, ViaRule};
+
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true), Layer::new("B.Cu", true)]);
+        let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
+        let mut rules = BoardRules::new(stack.clone(), matrix);
+        let class_idx = rules.get_default_net_class();
+        let net_no = rules.nets.add("N", class_idx, false);
+        let shape = TileShape::Box(IntBox::from_coords(-100, -100, 100, 100));
+        let mut padstacks = Padstacks::new(2);
+        let through = padstacks.add_shape_on_layers(shape.clone(), 0, 1);
+        let front_only = padstacks.add_shape_on_layers(shape, 0, 0);
+        let request = MazeRouteRequest {
+            net_no,
+            start_item: 0,
+            dest_item: 0,
+            start_items: Vec::new(),
+            dest_items: Vec::new(),
+            trace_half_width: 50,
+            clearance_class: 1,
+            via_padstack: through,
+            via_clearance_class: 1,
+            via_attach_allowed: false,
+            via_cost: 100.0,
+            max_expansions: 10,
+            ripup_penalty: 0.0,
+            deadline: None,
+            is_fanout: false,
+        };
+
+        rules.via_rules.push(ViaRule::new("empty"));
+        rules.net_classes.get_mut(class_idx).set_via_rule(Some(0));
+        let mut board = BasicBoard::new(stack, rules, padstacks);
+        assert!(via_choices_for_layer(&board, &request, 0).is_empty());
+        assert!(via_choices_for_transition(&board, &request, 0, 1).is_empty());
+
+        let blind_info = board
+            .rules
+            .via_infos
+            .add(ViaInfo::new("front_only", front_only, 1, false))
+            .unwrap();
+        board.rules.via_rules[0].append_via(blind_info);
+        assert!(
+            via_choices_for_transition(&board, &request, 0, 1).is_empty(),
+            "a bound incompatible rule must not widen to the through fallback"
+        );
+
+        board
+            .rules
+            .net_classes
+            .get_mut(class_idx)
+            .set_via_rule(None);
+        assert_eq!(
+            via_choices_for_transition(&board, &request, 0, 1)
+                .first()
+                .map(|choice| choice.padstack),
+            Some(through),
+            "only an unbound class may use the request fallback"
+        );
+    }
+
+    #[test]
+    fn sparse_via_can_cross_but_not_land_on_a_layer_without_a_pad() {
+        use crate::rules::{ViaInfo, ViaRule};
+
+        let stack = LayerStructure::new(vec![
+            Layer::new("F.Cu", true),
+            Layer::new("In1.Cu", true),
+            Layer::new("B.Cu", true),
+        ]);
+        let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
+        let mut rules = BoardRules::new(stack.clone(), matrix);
+        let class_idx = rules.get_default_net_class();
+        let net_no = rules.nets.add("N", class_idx, false);
+        let shape = TileShape::Box(IntBox::from_coords(-300, -300, 300, 300));
+        let mut padstacks = Padstacks::new(3);
+        let gapped = padstacks.add(
+            "gapped",
+            vec![Some(shape.clone()), None, Some(shape.clone())],
+            false,
+            false,
+        );
+        let front = padstacks.add("front", vec![Some(shape.clone()), None, None], false, false);
+        let middle = padstacks.add("middle", vec![None, Some(shape), None], false, false);
+        let via_info = rules
+            .via_infos
+            .add(ViaInfo::new("gapped", gapped, 1, false))
+            .unwrap();
+        let mut via_rule = ViaRule::new("gapped_rule");
+        via_rule.append_via(via_info);
+        rules.via_rules.push(via_rule);
+        rules.net_classes.get_mut(class_idx).set_via_rule(Some(0));
+        let mut board = BasicBoard::new(stack, rules, padstacks);
+        let start = board.insert_via(front, IntPoint::new(0, 0), vec![net_no], 1, false);
+        let dest = board.insert_via(middle, IntPoint::new(8_000, 0), vec![net_no], 1, false);
+        let request = MazeRouteRequest {
+            net_no,
+            start_item: start,
+            dest_item: dest,
+            start_items: Vec::new(),
+            dest_items: Vec::new(),
+            trace_half_width: 100,
+            clearance_class: 1,
+            via_padstack: gapped,
+            via_clearance_class: 1,
+            via_attach_allowed: false,
+            via_cost: 100.0,
+            max_expansions: 20_000,
+            ripup_penalty: 0.0,
+            deadline: None,
+            is_fanout: false,
+        };
+        let choice = ViaChoice {
+            padstack: gapped,
+            clearance_class: 1,
+            attach_allowed: false,
+        };
+
+        assert!(
+            via_choices_for_layer(&board, &request, 0)
+                .iter()
+                .any(|candidate| candidate.padstack == gapped),
+            "the plated barrel may cross the padless inner layer"
+        );
+        assert!(
+            via_choices_for_layer(&board, &request, 1).is_empty(),
+            "a layer without via copper cannot be a drill source"
+        );
+        assert!(
+            via_choices_for_transition(&board, &request, 0, 1).is_empty(),
+            "a layer without via copper cannot be a drill destination"
+        );
+        assert!(
+            via_choices_for_transition(&board, &request, 0, 2)
+                .iter()
+                .any(|candidate| candidate.padstack == gapped),
+            "missing inner annular copper does not break an endpoint-to-endpoint barrel"
+        );
+
+        // A stale search result must not bypass the transition gate during
+        // replay. This used to insert the malformed via and let a trace end
+        // at its centre on a layer where the via has no copper.
+        let forged = MazeSearchResult {
+            corners: vec![
+                (FloatPoint::new(4_000.0, 0.0), 0),
+                (FloatPoint::new(4_000.0, 0.0), 1),
+            ],
+            rooms: vec![None, None],
+            via_choices: vec![None, Some(choice)],
+        };
+        let ids_before: Vec<_> = board.items().map(|(id, _)| *id).collect();
+        assert!(insert_connection(&mut board, &request, &forged).is_none());
+        assert_eq!(
+            board.items().map(|(id, _)| *id).collect::<Vec<_>>(),
+            ids_before,
+            "rejected replay leaked route items"
+        );
+
+        assert!(!board.net_is_completely_connected(net_no));
+        assert!(
+            maze_route(&mut board, &request).is_none(),
+            "the maze must not route onto missing via copper"
+        );
+        assert!(
+            !board.net_is_completely_connected(net_no),
+            "the malformed via must not create false connectivity"
+        );
     }
 
     #[test]

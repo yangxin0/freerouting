@@ -57,6 +57,9 @@ fn needs_fanout(board: &BasicBoard, pin_id: ItemId) -> Option<i32> {
 /// Fans out one pin: routes from the pin in fanout mode and inserts the
 /// found escape (trace + via). Returns true when a via was placed.
 pub fn fanout_pin(board: &mut BasicBoard, pin_id: ItemId, request: &BatchRequest) -> bool {
+    if request.validate(board).is_err() {
+        return false;
+    }
     let Some(net_no) = needs_fanout(board, pin_id) else {
         return false;
     };
@@ -98,7 +101,7 @@ pub fn fanout_pin(board: &mut BasicBoard, pin_id: ItemId, request: &BatchRequest
         clearance_class,
         net_request.trace_half_width,
     );
-    crate::board::basic_board::set_birth_tag(1);
+    let _birth_tag = crate::board::basic_board::birth_tag_scope(1);
     maze_route_with_engine(board, &mut engine, &maze_request).is_some()
 }
 
@@ -114,6 +117,9 @@ pub fn fanout_board(
     max_passes: usize,
     time_limit: Option<&crate::datastructures::TimeLimit>,
 ) -> usize {
+    if request.validate(board).is_err() {
+        return 0;
+    }
     let center = {
         let bb = board.bounding_box();
         (

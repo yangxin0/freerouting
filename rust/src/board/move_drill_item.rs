@@ -31,10 +31,16 @@ pub fn try_shove_via_points(
     else {
         return Vec::new();
     };
+    // The old via is removed and reinserted at the candidate location, so
+    // the replacement receives a higher item id than the pending trace that
+    // owns `cl_class`.  Match the final DRC's (new via, existing trace)
+    // orientation; using (trace, old via) is observably wrong for an
+    // asymmetric clearance matrix and can either miss legal shove points or
+    // propose points that the final gate must reject.
     let clearance = board
         .rules
         .clearance_matrix
-        .get_value(cl_class, via.base.clearance_class, layer, false)
+        .get_value(via.base.clearance_class, cl_class, layer, false)
         .max(0) as f64;
     // enlarge by half the via extent + clearance (+2 tolerance, like
     // Java's empirical diagonal-shove constant)
@@ -60,9 +66,11 @@ pub fn move_via(
     let ItemKind::Via(via) = &item.kind else {
         return false;
     };
-    if item.base.is_shove_fixed() || item.base.component_no != 0 {
+    if item.base.is_shove_fixed() || item.base.component_no != 0 || via.is_escape_via {
         return false; // pins and (shove-)fixed vias never move (Java:
-                      // MoveDrillItemAlgo.check gates on is_shove_fixed)
+                      // MoveDrillItemAlgo.check gates on is_shove_fixed).
+                      // Escape vias also stay pinned to the SMD contact
+                      // that justifies their layer-scoped DRC exception.
     }
     // like Java: only vias connected exclusively to traces may move
     for contact in board.get_normal_contacts(via_id) {
@@ -83,6 +91,11 @@ pub fn move_via(
     let old_center = via.center;
     let net_nos = item.base.net_nos.clone();
     let cl_class = item.base.clearance_class;
+    let via_clearance_class_explicit = item.base.clearance_class_explicit;
+    // Everything inserted after this point is part of the move transaction:
+    // moving a via can shove foreign traces and create substitute pieces in
+    // addition to the replacement via and its bridge stubs.
+    let watermark = board.next_item_id();
 
     // Record the traces contacting the via so we can bridge them to the new
     // position after the move. Java's `DrillItem.move_by` translates the via
@@ -92,7 +105,11 @@ pub fn move_via(
     // disconnected. Java bridges center-to-center because its contacts are
     // always center-exact; here a contact endpoint may sit anywhere inside
     // the pad, so the bridge departs from the ACTUAL trace endpoint.
-    let mut bridge_contacts: Vec<(IntPoint, usize, i32, usize)> = Vec::new(); // (endpoint, layer, half_width, clearance_class)
+    let mut bridge_contacts: Vec<(IntPoint, usize, i32, usize, bool, Vec<i32>)> = Vec::new();
+    // (endpoint, layer, half_width, clearance_class, explicit provenance,
+    // shared net set). A multi-net trace must keep every net it shared with
+    // the moved via; carrying only the first one silently disconnects the
+    // secondary net after a via move.
     let mut contact_traces: Vec<(ItemId, i32)> = Vec::new(); // (trace, shared net)
     for contact in board.get_normal_contacts(via_id) {
         if let Some(c) = board.get_item(contact) {
@@ -106,8 +123,27 @@ pub fn move_via(
                 } else {
                     last.round()
                 };
-                bridge_contacts.push((endpoint, t.layer, t.half_width, c.base.clearance_class));
-                if let Some(&net) = c.base.net_nos.iter().find(|n| net_nos.contains(n)) {
+                let mut shared_nets: Vec<i32> = c
+                    .base
+                    .net_nos
+                    .iter()
+                    .copied()
+                    .filter(|net| net_nos.contains(net))
+                    .collect();
+                shared_nets.sort_unstable();
+                shared_nets.dedup();
+                if shared_nets.is_empty() {
+                    continue;
+                }
+                bridge_contacts.push((
+                    endpoint,
+                    t.layer,
+                    t.half_width,
+                    c.base.clearance_class,
+                    c.base.clearance_class_explicit,
+                    shared_nets.clone(),
+                ));
+                for net in shared_nets {
                     contact_traces.push((contact, net));
                 }
             }
@@ -117,15 +153,45 @@ pub fn move_via(
     // the same layer with identical width/class, and one bridge each
     // suffices — a coincident duplicate bridge is wasteful and can itself
     // create a zero-area overlap.
-    bridge_contacts.sort_unstable_by_key(|(p, l, hw, cl)| (p.x, p.y, *l, *hw, *cl));
-    bridge_contacts.dedup();
+    bridge_contacts
+        .sort_unstable_by_key(|(p, l, hw, cl, _, nets)| (p.x, p.y, *l, *hw, *cl, nets.clone()));
+    // Keep one geometric bridge only when its source semantics are identical.
+    // One coincident bridge cannot represent both an inherited class and an
+    // explicit item override; refuse that ambiguous move instead of rewriting
+    // either source's provenance.
+    let mut deduped: Vec<(IntPoint, usize, i32, usize, bool, Vec<i32>)> =
+        Vec::with_capacity(bridge_contacts.len());
+    for contact in bridge_contacts {
+        if let Some(last) = deduped.last_mut() {
+            if last.0 == contact.0
+                && last.1 == contact.1
+                && last.2 == contact.2
+                && last.3 == contact.3
+            {
+                if last.4 != contact.4 {
+                    return false;
+                }
+                // Same geometry/provenance can serve the union of all
+                // shared nets. This avoids duplicate coincident bridges
+                // while retaining multi-net electrical connectivity.
+                for net in &contact.5 {
+                    if !last.5.contains(net) {
+                        last.5.push(*net);
+                    }
+                }
+                last.5.sort_unstable();
+                continue;
+            }
+        }
+        deduped.push(contact);
+    }
+    let bridge_contacts = deduped;
     // every needed bridge must satisfy the board's angle restriction — a
     // 45°/90° board must not gain a free-angle stub from a via move
     let restriction = board.rules.get_trace_angle_restriction();
-    if bridge_contacts
-        .iter()
-        .any(|(p, _, _, _)| *p != new_center && !restriction.segment_is_compliant(*p, new_center))
-    {
+    if bridge_contacts.iter().any(|(p, _, _, _, _, _)| {
+        *p != new_center && !restriction.segment_is_compliant(*p, new_center)
+    }) {
         return false;
     }
 
@@ -173,17 +239,20 @@ pub fn move_via(
             return false;
         }
     }
-    let new_via = board.insert_via(
+    let new_via = board.insert_via_with_provenance(
         padstack,
         new_center,
         net_nos.clone(),
         cl_class,
         attach_allowed,
+        via_clearance_class_explicit,
     );
     // Bridge each previously-contacting trace from its endpoint to the new
     // center, preserving connectivity (Java: DrillItem.move_by insert_trace).
     let mut new_items = vec![new_via];
-    for (endpoint, layer, half_width, trace_cl_class) in bridge_contacts {
+    for (endpoint, layer, half_width, trace_cl_class, trace_cl_explicit, bridge_nets) in
+        bridge_contacts
+    {
         if endpoint == new_center {
             continue;
         }
@@ -191,12 +260,13 @@ pub fn move_via(
         if bridge.is_empty() {
             continue;
         }
-        new_items.push(board.insert_trace(
+        new_items.push(board.insert_trace_with_provenance(
             bridge,
             layer,
             half_width,
-            net_nos.clone(),
+            bridge_nets,
             trace_cl_class,
+            trace_cl_explicit,
         ));
     }
     // a same-net trace running THROUGH the new center must be split there,
@@ -207,9 +277,10 @@ pub fn move_via(
     // authoritative DRC pairwise rule (incl. same-net drill rules) — the
     // shove corridor above ignores same-net items and never checked the
     // bridge stubs at all
-    if !new_items
-        .iter()
-        .all(|&id| crate::drc::item_is_clear(board, id))
+    if !board
+        .item_ids_since(watermark)
+        .into_iter()
+        .all(|id| crate::drc::item_is_clear(board, id))
     {
         board.undo();
         return false;
@@ -352,10 +423,39 @@ mod tests {
     }
 
     #[test]
+    fn via_shove_projection_uses_reinserted_via_matrix_orientation() {
+        let mut board = test_board();
+        assert!(board.rules.clearance_matrix.append_class("strict"));
+        let strict = board.rules.clearance_matrix.get_no("strict").unwrap();
+        // The moved via is the new/high-id side of the pair.  Make the
+        // correct cell large and the transposed cell zero so the projection
+        // visibly changes.
+        board.rules.clearance_matrix.set_value(strict, 1, 0, 1_000);
+        board.rules.clearance_matrix.set_value(1, strict, 0, 0);
+        let via = board.insert_via(
+            1,
+            crate::geometry::planar::IntPoint::new(0, 0),
+            vec![2],
+            strict,
+            false,
+        );
+        let obstacle = TileShape::Box(IntBox::from_coords(-1_000, -1_000, 1_000, 1_000));
+        let candidates = try_shove_via_points(&board, &obstacle, 0, via, 1, false);
+        assert!(!candidates.is_empty());
+        // The via pad is 800 units wide and the correct clearance is 1,000;
+        // projections must therefore be on the ~2,100-unit expanded border,
+        // not the ~1,100-unit border produced by the transposed zero cell.
+        assert!(candidates
+            .iter()
+            .all(|p| p.x.abs() >= 2_000 || p.y.abs() >= 2_000));
+    }
+
+    #[test]
     fn moved_via_stays_connected_to_its_trace() {
         use crate::geometry::planar::IntPoint;
         let mut board = test_board();
         let via = board.insert_via(1, IntPoint::new(0, 0), vec![2], 1, false);
+        board.set_item_clearance_class_explicit(via, true);
         // a same-net trace contacting the via at its center
         let trace = board.insert_trace(
             Polyline::from_int_points(&[IntPoint::new(0, 0), IntPoint::new(0, 6000)]),
@@ -364,6 +464,7 @@ mod tests {
             vec![2],
             1,
         );
+        board.set_item_clearance_class_explicit(trace, true);
         let corridor = TileShape::Box(IntBox::from_coords(-5000, -700, 5000, 700));
         assert!(shove_vias(&mut board, &corridor, 0, &[1], 1, 2));
         // the original via id is gone (it was reinserted at a new position)
@@ -379,6 +480,60 @@ mod tests {
         assert!(
             reaches_via,
             "moved via must stay connected to its trace via the bridge"
+        );
+        assert!(
+            board.items().any(|(_, item)| {
+                matches!(item.kind, ItemKind::Via(_))
+                    && item.base.contains_net(2)
+                    && item.base.clearance_class_explicit
+            }),
+            "the replacement via must retain explicit clearance provenance"
+        );
+        assert!(
+            board.items().any(|(_, item)| {
+                matches!(item.kind, ItemKind::PolylineTrace(_))
+                    && item.base.contains_net(2)
+                    && item.base.clearance_class_explicit
+            }),
+            "the bridge trace must retain explicit clearance provenance"
+        );
+    }
+
+    #[test]
+    fn move_refuses_ambiguous_coincident_bridge_provenance() {
+        let mut board = test_board();
+        let via = board.insert_via(1, IntPoint::new(0, 0), vec![2], 1, false);
+        let inherited = board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(0, 0), IntPoint::new(0, 6_000)]),
+            0,
+            100,
+            vec![2],
+            1,
+        );
+        let explicit = board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(0, 0), IntPoint::new(0, 6_000)]),
+            0,
+            100,
+            vec![2],
+            1,
+        );
+        board.set_item_clearance_class_explicit(explicit, true);
+
+        assert!(!move_via(&mut board, via, IntPoint::new(3_000, 0), 2));
+        assert!(board.get_item(via).is_some());
+        assert!(
+            !board
+                .get_item(inherited)
+                .unwrap()
+                .base
+                .clearance_class_explicit
+        );
+        assert!(
+            board
+                .get_item(explicit)
+                .unwrap()
+                .base
+                .clearance_class_explicit
         );
     }
 
@@ -449,6 +604,34 @@ mod tests {
         let corridor = TileShape::Box(IntBox::from_coords(-5000, -700, 5000, 700));
         assert!(shove_vias(&mut board, &corridor, 0, &[1], 1, 2));
         assert!(board.get_item(pin).is_some(), "pins must never be moved");
+    }
+
+    #[test]
+    fn escape_vias_never_move_off_their_smd_contact() {
+        let mut board = test_board();
+        let via = board.insert_escape_via(
+            1,
+            crate::geometry::planar::IntPoint::new(0, 0),
+            vec![2],
+            1,
+            false,
+            0,
+        );
+        assert!(!move_via(
+            &mut board,
+            via,
+            crate::geometry::planar::IntPoint::new(0, 3000),
+            2,
+        ));
+        let ItemKind::Via(via_item) = &board.get_item(via).unwrap().kind else {
+            unreachable!()
+        };
+        assert_eq!(
+            via_item.center,
+            crate::geometry::planar::IntPoint::new(0, 0)
+        );
+        assert!(via_item.is_escape_via);
+        assert_eq!(via_item.escape_smd_layer, Some(0));
     }
 
     #[allow(unused_imports)]

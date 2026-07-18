@@ -7,6 +7,7 @@ use freerouting::autoroute::{
     batch_route_passes_with_time_limit, pull_tight_all, total_trace_length, BatchRequest,
 };
 use freerouting::datastructures::TimeLimit;
+use freerouting::io::json::Json;
 use freerouting::io::{export_ses, import_dsn};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -37,11 +38,173 @@ Options:
                      viaCosts, timeLimitSeconds, angleRestriction, threads)
   -h, --help         show this help";
 
+#[derive(Default)]
+struct RouterProfile {
+    max_passes: Option<usize>,
+    via_costs: Option<f64>,
+    time_limit_seconds: Option<u64>,
+    angle_restriction: Option<String>,
+    threads: Option<usize>,
+}
+
+fn profile_exact_u64(profile: &Json, key: &str) -> Result<Option<u64>, String> {
+    let Some(value) = profile.get(key) else {
+        return Ok(None);
+    };
+    if matches!(value, Json::Null) {
+        return Ok(None);
+    }
+    value
+        .as_exact_u64()
+        .map(Some)
+        .ok_or_else(|| format!("profile field {key} must be a non-negative integer"))
+}
+
+fn load_profile(path: &str) -> Result<RouterProfile, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("cannot read profile {path}: {e}"))?;
+    let profile = freerouting::io::json::parse_json(&text)
+        .map_err(|e| format!("cannot parse profile {path}: {e}"))?;
+    if !matches!(profile, Json::Obj(_)) {
+        return Err(format!("profile {path} must contain a JSON object"));
+    }
+
+    let max_passes = profile_exact_u64(&profile, "maxPasses")?
+        .map(|value| {
+            usize::try_from(value)
+                .map_err(|_| "profile field maxPasses is out of range".to_string())
+        })
+        .transpose()?;
+    let time_limit_seconds = profile_exact_u64(&profile, "timeLimitSeconds")?;
+    let threads = profile_exact_u64(&profile, "threads")?
+        .map(|value| {
+            usize::try_from(value).map_err(|_| "profile field threads is out of range".to_string())
+        })
+        .transpose()?;
+    if threads == Some(0) {
+        return Err("profile field threads must be at least 1".to_string());
+    }
+
+    let via_costs = match profile.get("viaCosts") {
+        None | Some(Json::Null) => None,
+        Some(value) => {
+            let costs = value
+                .as_f64()
+                .ok_or_else(|| "profile field viaCosts must be a number".to_string())?;
+            if costs <= 0.0 {
+                return Err("profile field viaCosts must be greater than 0".to_string());
+            }
+            Some(costs)
+        }
+    };
+    let angle_restriction = match profile.get("angleRestriction") {
+        None | Some(Json::Null) => None,
+        Some(value) => {
+            let angle = value
+                .as_str()
+                .ok_or_else(|| "profile field angleRestriction must be a string".to_string())?;
+            parse_angle_restriction(angle)
+                .map_err(|e| format!("profile field angleRestriction: {e}"))?;
+            Some(angle.to_string())
+        }
+    };
+
+    Ok(RouterProfile {
+        max_passes,
+        via_costs,
+        time_limit_seconds,
+        angle_restriction,
+        threads,
+    })
+}
+
+fn parse_angle_restriction(value: &str) -> Result<freerouting::board::AngleRestriction, String> {
+    match value {
+        "none" | "any" => Ok(freerouting::board::AngleRestriction::None),
+        "45" => Ok(freerouting::board::AngleRestriction::FortyfiveDegree),
+        "90" => Ok(freerouting::board::AngleRestriction::NinetyDegree),
+        _ => Err(format!(
+            "invalid angle restriction {value:?}; expected none, 45, or 90"
+        )),
+    }
+}
+
+fn parse_usize_flag(value: Option<&str>, flag: &str) -> Result<Option<usize>, String> {
+    value
+        .map(|raw| {
+            raw.parse::<usize>()
+                .map_err(|_| format!("{flag} requires a non-negative integer, got {raw:?}"))
+        })
+        .transpose()
+}
+
+fn parse_u64_flag(value: Option<&str>, flag: &str) -> Result<Option<u64>, String> {
+    value
+        .map(|raw| {
+            raw.parse::<u64>()
+                .map_err(|_| format!("{flag} requires a non-negative integer, got {raw:?}"))
+        })
+        .transpose()
+}
+
+fn validate_argument_shape(args: &[String]) -> Result<(), String> {
+    const VALUE_FLAGS: &[&str] = &[
+        "-de",
+        "-do",
+        "-mp",
+        "-tl",
+        "--angle",
+        "--drc-report",
+        "--export-dsn",
+        "--import-ses",
+        "--threads",
+        "--rules",
+        "--export-rules",
+        "--api-server",
+        "--ratsnest",
+        "--export-json",
+        "--profile",
+        "--opt-strategy",
+        "--opt-selection",
+        "--hybrid-ratio",
+    ];
+    const SWITCH_FLAGS: &[&str] = &["--strip-wiring", "--fanout", "-h", "--help"];
+
+    let mut seen = std::collections::HashSet::new();
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].as_str();
+        if !seen.insert(flag) {
+            return Err(format!("{flag} was specified more than once"));
+        }
+        if SWITCH_FLAGS.contains(&flag) {
+            index += 1;
+            continue;
+        }
+        if VALUE_FLAGS.contains(&flag) {
+            let Some(value) = args.get(index + 1) else {
+                return Err(format!("{flag} requires a value"));
+            };
+            if VALUE_FLAGS.contains(&value.as_str()) || SWITCH_FLAGS.contains(&value.as_str()) {
+                return Err(format!("{flag} requires a value"));
+            }
+            index += 2;
+            continue;
+        }
+        return Err(format!("unknown argument {flag:?}"));
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") || args.is_empty() {
         println!("{USAGE}");
         return ExitCode::SUCCESS;
+    }
+    if let Err(e) = validate_argument_shape(&args) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
     }
     let flag_value = |flag: &str| -> Option<&str> {
         args.iter()
@@ -49,10 +212,21 @@ fn main() -> ExitCode {
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
     };
-    if let Some(port) = flag_value("--api-server").and_then(|v| v.parse::<u16>().ok()) {
-        let seconds: u64 = flag_value("-tl")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(300);
+    if let Some(raw_port) = flag_value("--api-server") {
+        let port = match raw_port.parse::<u16>() {
+            Ok(port) => port,
+            Err(_) => {
+                eprintln!("error: --api-server requires a port in 0..=65535, got {raw_port:?}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let seconds = match parse_u64_flag(flag_value("-tl"), "-tl") {
+            Ok(seconds) => seconds.unwrap_or(300),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
         return match freerouting::api::serve(port, seconds) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -72,47 +246,114 @@ fn main() -> ExitCode {
     // like the Java jar, passes are effectively unlimited by default and
     // the wall clock (-tl) is the real bound; a JSON profile (Java:
     // RouterSettings) provides defaults that explicit flags override
-    let profile = flag_value("--profile")
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|t| freerouting::io::json::parse_json(&t).ok());
-    let prof_num = |key: &str| -> Option<f64> {
-        profile
-            .as_ref()
-            .and_then(|p| p.get(key))
-            .and_then(|v| v.as_f64())
-    };
-    let prof_str = |key: &str| -> Option<String> {
-        profile
-            .as_ref()
-            .and_then(|p| p.get(key))
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
+    let profile = match flag_value("--profile") {
+        Some(path) => match load_profile(path) {
+            Ok(profile) => profile,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => RouterProfile::default(),
     };
     // Java `RouterSettings`: default maxPasses is 9999 and `-mp 0` means
     // "no limit" (mapped to Integer.MAX_VALUE), with the wall clock as the
     // real bound. Previously `-mp 0` collapsed to a single pass.
     let max_passes: usize = {
-        let raw = flag_value("-mp")
-            .and_then(|v| v.parse::<usize>().ok())
-            .or(prof_num("maxPasses").map(|v| v as usize))
-            .unwrap_or(9999);
+        let cli_value = match parse_usize_flag(flag_value("-mp"), "-mp") {
+            Ok(value) => value,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let raw = cli_value.or(profile.max_passes).unwrap_or(9999);
         if raw == 0 {
             usize::MAX
         } else {
             raw
         }
     };
-    let limit_s: u64 = flag_value("-tl")
-        .and_then(|v| v.parse().ok())
-        .or(prof_num("timeLimitSeconds").map(|v| v as u64))
-        .unwrap_or(300);
+    let limit_s = match parse_u64_flag(flag_value("-tl"), "-tl") {
+        Ok(value) => value.or(profile.time_limit_seconds).unwrap_or(300),
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let strip_wiring = args.iter().any(|a| a == "--strip-wiring");
     let angle_mode = flag_value("--angle")
         .map(str::to_string)
-        .or(prof_str("angleRestriction"))
+        .or(profile.angle_restriction)
         .unwrap_or_else(|| "45".to_string());
-    let profile_via_costs = prof_num("viaCosts");
-    let profile_threads = prof_num("threads").map(|v| v as usize);
+    let angle_restriction = match parse_angle_restriction(&angle_mode) {
+        Ok(value) => value,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let profile_via_costs = profile.via_costs;
+    let profile_threads = profile.threads;
+    // Validate every optimizer option before importing or routing. An invalid
+    // explicit setting must not be discovered only after an expensive routing
+    // pass has already changed the board.
+    let default_threads = std::thread::available_parallelism()
+        .map(|n| n.get().saturating_sub(1).max(1))
+        .unwrap_or(1);
+    let opt_threads = match parse_usize_flag(flag_value("--threads"), "--threads") {
+        Ok(value) => value.or(profile_threads).unwrap_or(default_threads),
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if opt_threads == 0 {
+        eprintln!("error: --threads must be at least 1");
+        return ExitCode::FAILURE;
+    }
+    let strategy = match flag_value("--opt-strategy") {
+        None | Some("greedy") => freerouting::autoroute::BoardUpdateStrategy::Greedy,
+        Some("global") => freerouting::autoroute::BoardUpdateStrategy::GlobalOptimal,
+        Some("hybrid") => freerouting::autoroute::BoardUpdateStrategy::Hybrid,
+        Some(value) => {
+            eprintln!(
+                "error: invalid --opt-strategy {value:?}; expected greedy, global, or hybrid"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let selection = match flag_value("--opt-selection") {
+        None | Some("prioritized") => freerouting::autoroute::ItemSelectionStrategy::Prioritized,
+        Some("sequential") => freerouting::autoroute::ItemSelectionStrategy::Sequential,
+        Some("random") => freerouting::autoroute::ItemSelectionStrategy::Random,
+        Some(value) => {
+            eprintln!(
+                "error: invalid --opt-selection {value:?}; expected prioritized, sequential, or random"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let hybrid_ratio = match flag_value("--hybrid-ratio") {
+        None => (1, 1),
+        Some(value) => {
+            let parsed = value.split_once(':').and_then(|(optimal, greedy)| {
+                Some((
+                    optimal.parse::<usize>().ok()?,
+                    greedy.parse::<usize>().ok()?,
+                ))
+            });
+            match parsed {
+                Some((optimal, greedy)) if optimal > 0 && greedy > 0 => (optimal, greedy),
+                _ => {
+                    eprintln!(
+                        "error: --hybrid-ratio requires two positive integers as N:M, got {value:?}"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    };
 
     let mut content = match std::fs::read_to_string(design) {
         Ok(c) => c,
@@ -145,13 +386,7 @@ fn main() -> ExitCode {
             }
         }
     };
-    board
-        .rules
-        .set_trace_angle_restriction(match angle_mode.as_str() {
-            "none" | "any" => freerouting::board::AngleRestriction::None,
-            "90" => freerouting::board::AngleRestriction::NinetyDegree,
-            _ => freerouting::board::AngleRestriction::FortyfiveDegree,
-        });
+    board.rules.set_trace_angle_restriction(angle_restriction);
     println!(
         "imported {design} in {:?}: {} layers, {} nets, {} items",
         t0.elapsed(),
@@ -265,29 +500,7 @@ fn main() -> ExitCode {
     // creation) gives the optimizer whatever remains of `-tl` after routing,
     // so total wall time stays bounded by `-tl` instead of stacking a second
     // budget on top.
-    // Java default thread count is availableProcessors() - 1.
-    let default_threads = std::thread::available_parallelism()
-        .map(|n| n.get().saturating_sub(1).max(1))
-        .unwrap_or(1);
-    let opt_threads: usize = flag_value("--threads")
-        .and_then(|v| v.parse().ok())
-        .or(profile_threads)
-        .unwrap_or(default_threads);
-    // Java defaults: GREEDY board updates with PRIORITIZED selection
-    let strategy = match flag_value("--opt-strategy").unwrap_or("greedy") {
-        "global" => freerouting::autoroute::BoardUpdateStrategy::GlobalOptimal,
-        "hybrid" => freerouting::autoroute::BoardUpdateStrategy::Hybrid,
-        _ => freerouting::autoroute::BoardUpdateStrategy::Greedy,
-    };
-    let selection = match flag_value("--opt-selection").unwrap_or("prioritized") {
-        "sequential" => freerouting::autoroute::ItemSelectionStrategy::Sequential,
-        "random" => freerouting::autoroute::ItemSelectionStrategy::Random,
-        _ => freerouting::autoroute::ItemSelectionStrategy::Prioritized,
-    };
-    let hybrid_ratio = flag_value("--hybrid-ratio")
-        .and_then(|v| v.split_once(':'))
-        .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))
-        .unwrap_or((1, 1));
+    // Java defaults: GREEDY board updates with PRIORITIZED selection.
     let improved = if std::env::var_os("FR_NO_OPT").is_some() {
         0
     } else {
@@ -335,44 +548,80 @@ fn main() -> ExitCode {
                 report.violations.len(),
                 report.unconnected.len()
             ),
-            Err(e) => eprintln!("error: cannot write {report_path}: {e}"),
+            Err(e) => {
+                eprintln!("error: cannot write {report_path}: {e}");
+                return ExitCode::FAILURE;
+            }
         }
     }
     if let Some(dsn_path) = flag_value("--export-dsn") {
         match freerouting::io::export_dsn(&board) {
-            Some(text) => match std::fs::write(dsn_path, &text) {
+            Ok(text) => match std::fs::write(dsn_path, &text) {
                 Ok(()) => println!("design written to {dsn_path} ({} bytes)", text.len()),
-                Err(e) => eprintln!("error: cannot write {dsn_path}: {e}"),
+                Err(e) => {
+                    eprintln!("error: cannot write {dsn_path}: {e}");
+                    return ExitCode::FAILURE;
+                }
             },
-            None => eprintln!("error: no DSN source retained; cannot export"),
+            Err(e) => {
+                eprintln!("error: cannot serialize {dsn_path}: {e}");
+                return ExitCode::FAILURE;
+            }
         }
     }
     if let Some(rules_out) = flag_value("--export-rules") {
-        let text = freerouting::io::write_rules(&board, design);
+        let text = match freerouting::io::write_rules(&board, design) {
+            Ok(text) => text,
+            Err(e) => {
+                eprintln!("error: cannot serialize {rules_out}: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
         match std::fs::write(rules_out, &text) {
             Ok(()) => println!("rules written to {rules_out}"),
-            Err(e) => eprintln!("error: cannot write {rules_out}: {e}"),
+            Err(e) => {
+                eprintln!("error: cannot write {rules_out}: {e}");
+                return ExitCode::FAILURE;
+            }
         }
     }
     if let Some(rn_path) = flag_value("--ratsnest") {
         let json = freerouting::ratsnest::ratsnest_json(&board);
         match std::fs::write(rn_path, &json) {
             Ok(()) => println!("ratsnest written to {rn_path}"),
-            Err(e) => eprintln!("error: cannot write {rn_path}: {e}"),
+            Err(e) => {
+                eprintln!("error: cannot write {rn_path}: {e}");
+                return ExitCode::FAILURE;
+            }
         }
     }
     if let Some(json_path) = flag_value("--export-json") {
-        let text = freerouting::io::export_kicad_json(&board);
+        let text = match freerouting::io::export_kicad_json_checked(&board) {
+            Ok(text) => text,
+            Err(e) => {
+                eprintln!("error: cannot serialize {json_path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
         match std::fs::write(json_path, &text) {
             Ok(()) => println!("board JSON written to {json_path} ({} bytes)", text.len()),
-            Err(e) => eprintln!("error: cannot write {json_path}: {e}"),
+            Err(e) => {
+                eprintln!("error: cannot write {json_path}: {e}");
+                return ExitCode::FAILURE;
+            }
         }
     }
     let design_name = std::path::Path::new(design)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(design);
-    let ses = export_ses(&board, design_name, board.resolution);
+    let ses = match export_ses(&board, design_name, board.resolution) {
+        Ok(ses) => ses,
+        Err(e) => {
+            eprintln!("error: cannot serialize {output}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     if let Err(e) = std::fs::write(&output, &ses) {
         eprintln!("error: cannot write {output}: {e}");
         return ExitCode::FAILURE;
@@ -401,5 +650,97 @@ fn main() -> ExitCode {
         ExitCode::from(3)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn cli_shape_rejects_unknown_duplicate_and_missing_arguments() {
+        assert!(
+            validate_argument_shape(&strings(&["-de", "board.dsn", "--fanout", "-mp", "0",]))
+                .is_ok()
+        );
+
+        for args in [
+            strings(&["-de"]),
+            strings(&["-de", "--fanout"]),
+            strings(&["-de", "a.dsn", "--fanot"]),
+            strings(&["-de", "a.dsn", "-de", "b.dsn"]),
+            strings(&["a.dsn"]),
+        ] {
+            assert!(
+                validate_argument_shape(&args).is_err(),
+                "accepted malformed argument list {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_flags_and_angles_reject_lossy_or_unknown_values() {
+        assert_eq!(parse_usize_flag(Some("0"), "-mp").unwrap(), Some(0));
+        assert_eq!(parse_u64_flag(Some("300"), "-tl").unwrap(), Some(300));
+        for value in ["-1", "1.5", "NaN", "999999999999999999999999999"] {
+            assert!(parse_usize_flag(Some(value), "-mp").is_err());
+            assert!(parse_u64_flag(Some(value), "-tl").is_err());
+        }
+        for value in ["none", "any", "45", "90"] {
+            assert!(parse_angle_restriction(value).is_ok());
+        }
+        assert!(parse_angle_restriction("forty-five").is_err());
+    }
+
+    #[test]
+    fn profile_fields_are_checked_instead_of_silently_defaulted() {
+        let path = std::env::temp_dir().join(format!(
+            "freerouting-cli-profile-validation-{}.json",
+            std::process::id()
+        ));
+        let write = |text: &str| std::fs::write(&path, text).expect("write profile");
+
+        write(
+            r#"{
+                "maxPasses": 0,
+                "viaCosts": 12.5,
+                "timeLimitSeconds": 30,
+                "angleRestriction": "90",
+                "threads": 2,
+                "futureJavaSetting": true
+            }"#,
+        );
+        let profile = load_profile(path.to_str().unwrap()).expect("valid profile");
+        assert_eq!(profile.max_passes, Some(0));
+        assert_eq!(profile.via_costs, Some(12.5));
+        assert_eq!(profile.time_limit_seconds, Some(30));
+        assert_eq!(profile.angle_restriction.as_deref(), Some("90"));
+        assert_eq!(profile.threads, Some(2));
+
+        for invalid in [
+            "[]",
+            r#"{"maxPasses": 1.5}"#,
+            r#"{"maxPasses": -1}"#,
+            r#"{"maxPasses": "2"}"#,
+            r#"{"timeLimitSeconds": 1e2}"#,
+            r#"{"threads": 0}"#,
+            r#"{"threads": 2.0}"#,
+            r#"{"viaCosts": 0}"#,
+            r#"{"viaCosts": "50"}"#,
+            r#"{"angleRestriction": 45}"#,
+            r#"{"angleRestriction": "diagonal"}"#,
+            "{",
+        ] {
+            write(invalid);
+            assert!(
+                load_profile(path.to_str().unwrap()).is_err(),
+                "accepted invalid profile {invalid}"
+            );
+        }
+        let _ = std::fs::remove_file(path);
     }
 }

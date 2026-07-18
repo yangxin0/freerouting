@@ -27,7 +27,13 @@ pub fn escape(s: &str) -> String {
 pub enum Json {
     Null,
     Bool(bool),
-    Num(f64),
+    /// Keep the source lexeme alongside the convenient floating-point view.
+    /// Geometry/settings consumers use `as_f64`; protocol code that needs an
+    /// exact integer (for example an API job id) must use the lexeme instead.
+    Num {
+        value: f64,
+        raw: String,
+    },
     Str(String),
     Arr(Vec<Json>),
     Obj(HashMap<String, Json>),
@@ -42,9 +48,34 @@ impl Json {
     }
     pub fn as_f64(&self) -> Option<f64> {
         match self {
-            Json::Num(n) => Some(*n),
+            Json::Num { value, .. } => Some(*value),
             _ => None,
         }
+    }
+
+    /// Returns the original JSON number spelling, when this value is numeric.
+    pub fn number_lexeme(&self) -> Option<&str> {
+        match self {
+            Json::Num { raw, .. } => Some(raw),
+            _ => None,
+        }
+    }
+
+    /// Parses a JSON number as an exact non-negative integer. This deliberately
+    /// rejects decimal/exponent spellings and overflow instead of first
+    /// converting through `f64`, which cannot distinguish adjacent integers
+    /// above 2^53.
+    pub fn as_exact_u64(&self) -> Option<u64> {
+        let raw = self.number_lexeme()?;
+        if raw.is_empty()
+            || raw.starts_with('-')
+            || raw.starts_with('+')
+            || (raw.len() > 1 && raw.starts_with('0'))
+            || !raw.bytes().all(|b| b.is_ascii_digit())
+        {
+            return None;
+        }
+        raw.parse().ok()
     }
     pub fn as_str(&self) -> Option<&str> {
         match self {
@@ -133,17 +164,58 @@ impl<'a> Parser<'a> {
     }
     fn number(&mut self) -> Result<Json, String> {
         let start = self.pos;
-        while self
-            .peek()
-            .is_some_and(|c| c.is_ascii_digit() || matches!(c, b'-' | b'+' | b'.' | b'e' | b'E'))
-        {
+        if self.peek() == Some(b'-') {
             self.pos += 1;
         }
-        std::str::from_utf8(&self.bytes[start..self.pos])
+        match self.peek() {
+            Some(b'0') => {
+                self.pos += 1;
+                if self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                    return Err(format!("leading zero in number at byte {start}"));
+                }
+            }
+            Some(b'1'..=b'9') => {
+                self.pos += 1;
+                while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                    self.pos += 1;
+                }
+            }
+            _ => return Err(format!("bad number at byte {start}")),
+        }
+        if self.peek() == Some(b'.') {
+            self.pos += 1;
+            let fraction_start = self.pos;
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                self.pos += 1;
+            }
+            if self.pos == fraction_start {
+                return Err(format!("missing fraction digits at byte {start}"));
+            }
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.pos += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.pos += 1;
+            }
+            let exponent_start = self.pos;
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                self.pos += 1;
+            }
+            if self.pos == exponent_start {
+                return Err(format!("missing exponent digits at byte {start}"));
+            }
+        }
+        let raw = std::str::from_utf8(&self.bytes[start..self.pos])
+            .map_err(|_| format!("bad number at byte {start}"))?;
+        let value = raw
+            .parse::<f64>()
             .ok()
-            .and_then(|s| s.parse().ok())
-            .map(Json::Num)
-            .ok_or_else(|| format!("bad number at byte {start}"))
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| format!("number out of range at byte {start}"))?;
+        Ok(Json::Num {
+            value,
+            raw: raw.to_string(),
+        })
     }
     fn string(&mut self) -> Result<String, String> {
         self.expect(b'"')?;
@@ -215,6 +287,9 @@ impl<'a> Parser<'a> {
                     self.pos += 1;
                 }
                 Some(_) => {
+                    if self.bytes[self.pos] < 0x20 {
+                        return Err(format!("unescaped control character at byte {}", self.pos));
+                    }
                     // consume one UTF-8 scalar
                     let s = &self.bytes[self.pos..];
                     let ch_len = match s[0] {
@@ -270,7 +345,14 @@ impl<'a> Parser<'a> {
             self.skip_ws();
             self.expect(b':')?;
             let val = self.value()?;
-            out.insert(key, val);
+            // Duplicate members are ambiguous once the object is represented
+            // by a map: silently keeping the last value lets an attacker or a
+            // malformed interchange document override routing metadata that
+            // an earlier consumer already interpreted.  Reject them at the
+            // parser boundary instead of depending on insertion order.
+            if out.insert(key.clone(), val).is_some() {
+                return Err(format!("duplicate object key {key:?}"));
+            }
             self.skip_ws();
             match self.peek() {
                 Some(b',') => {
@@ -302,6 +384,13 @@ mod tests {
     }
 
     #[test]
+    fn rejects_duplicate_object_keys() {
+        let error = parse_json(r#"{"unit": "MM", "unit": "MIL"}"#)
+            .expect_err("duplicate keys must not be last-write-wins");
+        assert!(error.contains("duplicate object key"), "{error}");
+    }
+
+    #[test]
     fn string_escapes_follow_rfc_8259() {
         // all simple escapes decode; \uXXXX surrogate PAIRS combine into
         // one scalar (each half decoded separately became '?'); unknown
@@ -325,5 +414,28 @@ mod tests {
             parse_json(r#"{"s": "\uDE00"}"#).is_err(),
             "lone low surrogate"
         );
+    }
+
+    #[test]
+    fn preserves_exact_integer_lexemes() {
+        let value = parse_json("9007199254740993").unwrap();
+        assert_eq!(value.as_exact_u64(), Some(9_007_199_254_740_993));
+        assert_eq!(value.as_f64(), Some(9_007_199_254_740_992.0));
+        assert_eq!(parse_json("1.0").unwrap().as_exact_u64(), None);
+        assert_eq!(parse_json("1e0").unwrap().as_exact_u64(), None);
+        assert_eq!(parse_json("-1").unwrap().as_exact_u64(), None);
+    }
+
+    #[test]
+    fn rejects_numbers_outside_the_json_grammar() {
+        for invalid in ["+1", "01", "-01", ".5", "1.", "1e", "1e+", "1e400"] {
+            assert!(
+                parse_json(invalid).is_err(),
+                "accepted invalid number {invalid}"
+            );
+        }
+        for valid in ["0", "-0", "12", "-12.5", "1e3", "1E-3", "1.0e+3"] {
+            assert!(parse_json(valid).is_ok(), "rejected valid number {valid}");
+        }
     }
 }

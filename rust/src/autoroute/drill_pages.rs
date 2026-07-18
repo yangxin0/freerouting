@@ -48,6 +48,7 @@ struct DrillPage {
 /// (Java: `DrillPageArray`).
 #[derive(Debug)]
 pub struct DrillPageArray {
+    via_padstack: usize,
     page_width: i32,
     bounding: IntBox,
     pages: crate::datastructures::FxHashMap<(i32, i32), DrillPage>,
@@ -62,10 +63,16 @@ impl DrillPageArray {
         let via_extent = board
             .padstacks
             .get_by_no(via_padstack)
-            .and_then(|p| p.get_shape(p.from_layer()))
-            .map(|s| s.bounding_box().max_width() as i32)
+            .map(|p| {
+                (p.from_layer()..=p.to_layer())
+                    .filter_map(|l| p.get_shape(l))
+                    .map(|s| s.bounding_box().max_width() as i32)
+                    .max()
+                    .unwrap_or(2000)
+            })
             .unwrap_or(2000);
         DrillPageArray {
+            via_padstack,
             page_width: (5 * via_extent).max(10_000),
             bounding: board.bounding_box(),
             pages: crate::datastructures::FxHashMap::default(),
@@ -151,8 +158,14 @@ impl DrillPageArray {
                     net_attach: false,
                 });
                 if page.base_drills.is_none() || page.base_margin != via_margin {
-                    let (drills, nets) =
-                        calculate_page_drills(board, page.shape, -1, via_margin, false);
+                    let (drills, nets) = calculate_page_drills(
+                        board,
+                        page.shape,
+                        self.via_padstack,
+                        -1,
+                        via_margin,
+                        false,
+                    );
                     page.base_drills = Some(drills);
                     page.nets_present = nets;
                     page.net_drills = None;
@@ -173,7 +186,12 @@ impl DrillPageArray {
                         page.net_attach = attach_smd;
                         page.net_drills = Some(
                             calculate_page_drills(
-                                board, page.shape, net_no, via_margin, attach_smd,
+                                board,
+                                page.shape,
+                                self.via_padstack,
+                                net_no,
+                                via_margin,
+                                attach_smd,
                             )
                             .0,
                         );
@@ -200,10 +218,16 @@ impl DrillPageArray {
 fn calculate_page_drills(
     board: &BasicBoard,
     page: IntBox,
+    via_padstack: usize,
     net_no: i32,
     via_margin: i32,
     attach_smd: bool,
 ) -> (Vec<ExpansionDrill>, Vec<i32>) {
+    let Some(via_padstack) = board.padstacks.get_by_no(via_padstack) else {
+        return (Vec::new(), Vec::new());
+    };
+    let from_layer = via_padstack.from_layer();
+    let to_layer = via_padstack.to_layer();
     let page_shape = TileShape::Box(page);
     let query = page_shape.offset(via_margin as f64);
     let mut holes: Vec<(i32, Arc<TileShape>)> = Vec::new();
@@ -237,9 +261,12 @@ fn calculate_page_drills(
         let Some(inflated) = board.inflated_shapes(item_id, via_margin) else {
             continue;
         };
-        for (shape, bbox, _layer) in inflated.iter() {
-            // a via spans all layers: any layer's obstacle blocks
-            if bbox.intersects(page) {
+        for (shape, bbox, layer) in inflated.iter() {
+            // Only copper on layers actually spanned by this padstack can
+            // block the via.  Treating every obstacle as through-hole made a
+            // blind/buried via unusable whenever an unrelated outer layer
+            // contained copper.
+            if *layer >= from_layer && *layer <= to_layer && bbox.intersects(page) {
                 holes.push((item_id, shape.clone()));
             }
         }

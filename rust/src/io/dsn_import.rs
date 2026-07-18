@@ -8,6 +8,7 @@
 //! offsets and pad shapes at the y axis and flips the shape layers;
 //! non-quarter-turn rotations only rotate pin offsets, not pad shapes.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::board::basic_board::BasicBoard;
@@ -46,6 +47,25 @@ fn item_class_of(name: &str) -> Option<crate::rules::ItemClass> {
     }
 }
 
+/// Applies one `*_same_net` token to the item-class DRC table.  These tokens
+/// are consumed before composite clearance-pair expansion so they cannot be
+/// interpreted as (or counted alongside) ordinary matrix class pairs.
+fn apply_same_net_type_token(rules: &mut BoardRules, token: &str, value: i32) -> bool {
+    let normalized = token.to_ascii_lowercase().replace('-', "_");
+    let Some(base) = normalized.strip_suffix("_same_net") else {
+        return false;
+    };
+    let Some((first, second)) = base.split_once('_') else {
+        return false;
+    };
+    let (Some(first_class), Some(second_class)) = (item_class_of(first), item_class_of(second))
+    else {
+        return false;
+    };
+    rules.set_same_net_clearance(first_class, second_class, value);
+    true
+}
+
 /// Resolves a DSN clearance-class name to a clearance-matrix class index,
 /// creating the class on demand (Java `Structure.append_clearance_class` /
 /// `Network.get_clearance_class`). `wire` and `default` map to the default
@@ -59,14 +79,6 @@ fn resolve_clearance_class(rules: &mut BoardRules, name: &str) -> usize {
         "null" => return BoardRules::clearance_class_none(),
         _ => {}
     }
-    if let Some(idx) = rules.clearance_matrix.get_no(name) {
-        return idx;
-    }
-    rules.clearance_matrix.append_class(name);
-    let idx = rules
-        .clearance_matrix
-        .get_no(name)
-        .unwrap_or_else(BoardRules::default_clearance_class);
     let item = match lname.as_str() {
         "via" => Some(crate::rules::ItemClass::Via),
         "pin" => Some(crate::rules::ItemClass::Pin),
@@ -74,6 +86,18 @@ fn resolve_clearance_class(rules: &mut BoardRules, name: &str) -> usize {
         "area" => Some(crate::rules::ItemClass::Area),
         _ => None,
     };
+    let idx = if let Some(idx) = rules.clearance_matrix.get_no(name) {
+        idx
+    } else {
+        rules.clearance_matrix.append_class(name);
+        rules
+            .clearance_matrix
+            .get_no(name)
+            .unwrap_or_else(BoardRules::default_clearance_class)
+    };
+    // Bind standard item columns whenever they are semantically resolved.
+    // The rules reader may have created the matrix symbol earlier solely to
+    // satisfy a forward via declaration.
     if let Some(ic) = item {
         let default_nc = rules.get_default_net_class();
         rules
@@ -83,6 +107,161 @@ fn resolve_clearance_class(rules: &mut BoardRules, name: &str) -> usize {
             .set(ic, idx);
     }
     idx
+}
+
+/// Looks up a clearance class in a reference position. Unlike a typed rule
+/// declaration, an item/class reference must not invent a matrix column when
+/// the name is unknown; callers apply the Java-compatible fallback.
+fn lookup_clearance_class(rules: &BoardRules, name: &str) -> Option<usize> {
+    if let Some(index) = rules.clearance_matrix.get_no(name) {
+        return Some(index);
+    }
+    match name.to_ascii_lowercase().as_str() {
+        "wire" | "default" => Some(BoardRules::default_clearance_class()),
+        "null" => Some(BoardRules::clearance_class_none()),
+        _ => None,
+    }
+}
+
+/// Resolves an explicit `(clearance_class NAME)` reference.  An absent scope
+/// is not an error, but a present scope must name an existing matrix class;
+/// silently falling back to `null` or to the owning net's class changes the
+/// requested DRC semantics while leaving a plausible-looking board.
+fn explicit_clearance_class(
+    rules: &BoardRules,
+    node: &SExpr,
+    context: &str,
+) -> Result<Option<usize>, ImportError> {
+    let Some(scope) = node.child("clearance_class") else {
+        return Ok(None);
+    };
+    let mut args = scope.args();
+    let name = args
+        .next()
+        .ok_or_else(|| err(format!("{context} has an empty clearance_class reference")))?;
+    if args.next().is_some() {
+        return Err(err(format!(
+            "{context} clearance_class must name exactly one class"
+        )));
+    }
+    lookup_clearance_class(rules, name)
+        .map(Some)
+        .ok_or_else(|| err(format!("{context} references unknown clearance class {name:?}")))
+}
+
+/// Resolves a layer token used by a routing keepout.  Only the three
+/// Specctra wildcard spellings expand to all layers; an arbitrary unknown
+/// name must not be treated as a wildcard.
+fn keepout_layer_reference(
+    layer_structure: &LayerStructure,
+    name: &str,
+    context: &str,
+) -> Result<Option<usize>, ImportError> {
+    if let Some(layer) = layer_structure.get_no(name) {
+        return Ok(Some(layer));
+    }
+    if name.eq_ignore_ascii_case("signal")
+        || name.eq_ignore_ascii_case("all")
+        || name.eq_ignore_ascii_case("pcb")
+    {
+        return Ok(None);
+    }
+    Err(err(format!(
+        "{context} references unknown layer {name:?}"
+    )))
+}
+
+/// Validates the symbol and layer references of one library padstack before
+/// `read_padstack_scope` builds its sparse shape vector.  The low-level
+/// reader is shared with sidecar rules and intentionally returns `Option`;
+/// the public DSN boundary must distinguish an unsupported shape or unknown
+/// layer from a deliberately absent shape on another layer.
+fn validate_padstack_scope_references(
+    padstack_node: &SExpr,
+    layer_structure: &LayerStructure,
+) -> Result<(), ImportError> {
+    let name = padstack_node
+        .arg()
+        .ok_or_else(|| err("padstack without name"))?;
+    for shape_scope in padstack_node.children("shape") {
+        let shape = shape_scope
+            .as_list()
+            .and_then(|items| items.get(1))
+            .ok_or_else(|| err(format!("padstack {name:?} has a shape without geometry")))?;
+        let kind = shape
+            .name()
+            .ok_or_else(|| err(format!("padstack {name:?} has unnamed shape geometry")))?;
+        if !matches!(
+            kind.to_ascii_lowercase().as_str(),
+            "circle" | "rect" | "path" | "polygon"
+        ) {
+            return Err(err(format!(
+                "padstack {name:?} uses unsupported shape {kind:?}"
+            )));
+        }
+        let layer = shape
+            .arg()
+            .ok_or_else(|| err(format!("padstack {name:?} shape is missing its layer")))?;
+        if layer_structure.get_no(layer).is_none()
+            && !layer.eq_ignore_ascii_case("signal")
+            && !layer.eq_ignore_ascii_case("all")
+            && !layer.eq_ignore_ascii_case("pcb")
+        {
+            return Err(err(format!(
+                "padstack {name:?} shape references unknown layer {layer:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Resolves a `(net NAME [SUBNET])` reference.  A missing/zero subnet means
+/// "all subnets" in wiring and SES scopes; a positive subnet selects exactly
+/// that electrical subnet.  Keeping this in one helper prevents the design,
+/// wiring, and session readers from silently collapsing repeated net names.
+pub(crate) fn net_numbers_for_reference(
+    rules: &BoardRules,
+    net_node: &SExpr,
+) -> Result<Vec<i32>, String> {
+    let mut args = net_node.args();
+    let Some(name) = args.next() else {
+        return Err("net reference is missing its name".into());
+    };
+    let subnet = match args.next() {
+        None => None,
+        Some(value) => {
+            let subnet = value
+                .parse::<usize>()
+                .map_err(|_| format!("net reference subnet {value:?} is not an integer"))?;
+            Some(subnet)
+        }
+    };
+    if args.next().is_some() {
+        return Err("net reference has too many arguments".into());
+    }
+    let result = match subnet.filter(|value| *value > 0) {
+        Some(subnet) => rules
+            .nets
+            .get(name, subnet)
+            .map(|net| vec![net.net_number])
+            .unwrap_or_default(),
+        None => rules
+            .nets
+            .get_by_name(name)
+            .into_iter()
+            .map(|net| net.net_number)
+            .collect(),
+    };
+    if result.is_empty() {
+        return Err(format!("net reference names unknown net {name:?}"));
+    }
+    Ok(result)
+}
+
+fn append_unique_net(target: &mut Vec<i32>, net_no: i32) {
+    if !target.contains(&net_no) {
+        target.push(net_no);
+    }
 }
 
 /// Parses one `(padstack NAME (shape ...) ... [(attach off)])` scope into
@@ -139,7 +318,18 @@ pub(crate) struct NetworkScopeCtx<'a> {
     pub padstack_nos: &'a HashMap<String, usize>,
     pub padstacks: &'a Padstacks,
     pub layer_structure: &'a LayerStructure,
-    pub default_clearance: i32,
+}
+
+impl NetworkScopeCtx<'_> {
+    /// Padstacks are named case-insensitively by the Specctra library. Keep
+    /// the exact-name map as the fast path, then fall back to the library's
+    /// canonical lookup for differently-cased references.
+    pub(crate) fn padstack_no(&self, name: &str) -> Option<usize> {
+        self.padstack_nos
+            .get(name)
+            .copied()
+            .or_else(|| self.padstacks.get(name).map(|padstack| padstack.no))
+    }
 }
 
 /// Applies one `(via NAME PADSTACK [CLEARANCE_CLASS] [attach])`
@@ -154,16 +344,21 @@ pub(crate) fn apply_via_declaration(
     let (Some(name), Some(padstack_name)) = (a.next(), a.next()) else {
         return false;
     };
-    let Some(&padstack_no) = ctx.padstack_nos.get(padstack_name) else {
+    let Some(padstack_no) = ctx.padstack_no(padstack_name) else {
         return false;
     };
     let rest: Vec<&str> = a.collect();
     let attach = rest.iter().any(|t| t.eq_ignore_ascii_case("attach"));
     // the optional clearance class is the non-"attach" trailing token
+    // A via declaration is itself a symbol declaration in Java's network
+    // scope.  Its optional clearance token therefore creates a named matrix
+    // column at this source position (forward sidecar declarations rely on
+    // this), unlike an item/class *reference*, which must only look up an
+    // already-declared class.
     let cl = rest
         .iter()
         .find(|t| !t.eq_ignore_ascii_case("attach"))
-        .map(|n| resolve_clearance_class(rules, n))
+        .map(|name| resolve_clearance_class(rules, name))
         .unwrap_or_else(BoardRules::default_clearance_class);
     // a redeclared via info updates in place (names are unique in Java)
     if let Some(existing) = rules.via_infos.get_by_name(name) {
@@ -186,40 +381,33 @@ pub(crate) fn apply_via_rule_declaration(
     rules: &mut BoardRules,
     via_rule_ids: &mut HashMap<String, usize>,
     rule_node: &SExpr,
-) {
+) -> bool {
     let mut a = rule_node.args();
     let Some(rule_name) = a.next() else {
-        return;
+        return false;
     };
     let mut via_rule = crate::rules::ViaRule::new(rule_name);
-    let mut any = false;
+    let mut all_found = true;
+    let mut any_via = false;
     for via_name in a {
+        any_via = true;
         if let Some(id) = rules.via_infos.get_by_name(via_name) {
             via_rule.append_via(id);
-            any = true;
+        } else {
+            all_found = false;
         }
     }
-    if any {
+    if all_found && any_via {
         if let Some(&existing) = via_rule_ids.get(rule_name) {
             rules.via_rules[existing] = via_rule;
         } else {
             rules.via_rules.push(via_rule);
             via_rule_ids.insert(rule_name.to_string(), rules.via_rules.len() - 1);
         }
+        true
+    } else {
+        false
     }
-}
-
-/// Applies the TYPED clearance children of one `(rule ...)` node (Java
-/// `Structure.set_clearance_rule`): `(clearance V (type A_B))` pairs,
-/// `smd_to_turn_gap`, and `*_same_net` DRC rules. Returns the number of
-/// settings applied. Shared by the DSN structure rules and the standard
-/// `.rules` reader.
-pub(crate) fn apply_typed_clearances(
-    rules: &mut BoardRules,
-    rule_node: &SExpr,
-    scale: &dyn Fn(f64) -> i32,
-) -> usize {
-    apply_rule_scope_clearances(rules, rule_node, scale, false)
 }
 
 /// Walks one `(rule ...)` scope's clearance children IN DOCUMENT ORDER
@@ -236,26 +424,21 @@ pub(crate) fn apply_rule_scope_clearances(
     scale: &dyn Fn(f64) -> i32,
     apply_untyped: bool,
 ) -> usize {
+    apply_rule_scope_clearances_on_layer(rules, rule_node, scale, apply_untyped, None)
+}
+
+/// As [`apply_rule_scope_clearances`], but restricts matrix writes to one
+/// layer when `layer` is `Some`.  Keeping the traversal in one function is
+/// important: DSN structure rules, layer rules, class rules, and `.rules`
+/// sidecars all have the same ordered clearance grammar.
+pub(crate) fn apply_rule_scope_clearances_on_layer(
+    rules: &mut BoardRules,
+    rule_node: &SExpr,
+    scale: &dyn Fn(f64) -> i32,
+    apply_untyped: bool,
+    layer: Option<usize>,
+) -> usize {
     let mut applied = 0usize;
-    // if any wire pair appears, pre-create the four default item classes
-    // (Java create_default_clearance_classes)
-    let has_wire_pair = rule_node
-        .children("clearance")
-        .chain(rule_node.children("clear"))
-        .filter_map(|c| c.child("type"))
-        .flat_map(|t| t.args())
-        .any(|k| {
-            let k = k.to_ascii_lowercase();
-            k.starts_with("wire_")
-                || k.starts_with("wire-")
-                || k.ends_with("_wire")
-                || k.ends_with("-wire")
-        });
-    if has_wire_pair {
-        for name in ["via", "smd", "pin", "area"] {
-            resolve_clearance_class(rules, name);
-        }
-    }
     let children = rule_node.as_list().unwrap_or(&[]);
     for clearance_node in children.iter().filter(|c| {
         c.name()
@@ -267,73 +450,380 @@ pub(crate) fn apply_rule_scope_clearances(
         let Some(type_node) = clearance_node.child("type") else {
             if apply_untyped {
                 // the untyped default applies to EVERY non-null class pair
-                rules.clearance_matrix.set_default_value(value);
+                if let Some(layer_no) = layer {
+                    rules
+                        .clearance_matrix
+                        .set_default_value_on_layer(layer_no, value);
+                } else {
+                    rules.clearance_matrix.set_default_value(value);
+                }
                 applied += 1;
             }
             continue; // untyped: in DSN import the caller applied it
         };
-        let tokens: Vec<String> = type_node.args().map(|t| t.to_string()).collect();
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        if tokens.len() == 3 && (tokens[1] == "_" || tokens[1] == "-") {
-            // `(type "A B"_"C D")`: quoted names glued by a bare separator
-            // (its own token, see the parser) — the pair is exactly the two
-            // quoted names, underscores INSIDE them preserved
-            // (MIN_EXTERN_188A must not split at its first underscore)
-            pairs.push((tokens[0].clone(), tokens[2].clone()));
-        } else if tokens.len() == 2 {
-            // one pair split across two tokens: `"A" "B"`, `"A"_bare`
-            // (leading separator on the second) or `bare_"B"` (trailing
-            // separator on the first)
-            let a = tokens[0].strip_suffix(['_', '-']).unwrap_or(&tokens[0]);
-            let b = tokens[1].strip_prefix(['_', '-']).unwrap_or(&tokens[1]);
-            pairs.push((a.to_string(), b.to_string()));
-        } else {
-            for kind in &tokens {
-                let lower = kind.to_ascii_lowercase().replace('-', "_");
-                if lower == "smd_to_turn_gap" {
-                    rules.set_pin_edge_to_turn_dist(value as f64);
-                    applied += 1;
-                    continue;
-                }
-                // `A_B_same_net`: the clearance required between two
-                // SAME-NET item-class items (a drill-breakout rule). Java
-                // parses but never applies these; the DRC uses them.
-                if let Some(base) = lower.strip_suffix("_same_net") {
-                    if let Some((a, b)) = base.split_once('_') {
-                        if let (Some(ica), Some(icb)) = (item_class_of(a), item_class_of(b)) {
-                            rules.set_same_net_clearance(ica, icb, value);
-                            applied += 1;
-                        }
-                    }
-                    continue;
-                }
-                // split the RAW token at the FIRST '_' (the second name may
-                // contain underscores); hyphen spellings (`smd-smd`) split
-                // at '-' only when no underscore exists, so quoted names
-                // are never mutated
-                if let Some((a, b)) = kind.split_once('_').or_else(|| kind.split_once('-')) {
-                    pairs.push((a.to_string(), b.to_string()));
-                }
+        // Create the standard item columns at the point the Java reader sees
+        // a wire pair, rather than pre-scanning the whole rule (which would
+        // let an earlier untyped clearance affect classes declared later).
+        let raw_tokens: Vec<(String, bool)> = type_node
+            .as_list()
+            .unwrap_or(&[])
+            .iter()
+            .skip(1)
+            .filter_map(|t| t.as_atom().map(|s| (s.to_string(), t.is_quoted())))
+            .collect();
+        if raw_tokens.iter().any(|(name, quoted)| {
+            if *quoted {
+                return false;
+            }
+            let lower = name.to_ascii_lowercase();
+            lower.starts_with("wire_")
+                || lower.starts_with("wire-")
+                || lower.ends_with("_wire")
+                || lower.ends_with("-wire")
+        }) {
+            for name in ["via", "smd", "pin", "area"] {
+                resolve_clearance_class(rules, name);
             }
         }
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for (kind, quoted) in &raw_tokens {
+            if *quoted {
+                continue;
+            }
+            let lower = kind.to_ascii_lowercase().replace('-', "_");
+            if lower == "smd_to_turn_gap" {
+                rules.set_pin_edge_to_turn_dist(value as f64);
+                applied += 1;
+            } else if apply_same_net_type_token(rules, kind, value) {
+                applied += 1;
+            }
+        }
+        pairs.extend(type_pairs(type_node));
         for (a, b) in pairs {
             let ci = resolve_clearance_class(rules, &a);
             let cj = resolve_clearance_class(rules, &b);
-            rules
-                .clearance_matrix
-                .set_value_on_all_layers(ci, cj, value);
-            rules
-                .clearance_matrix
-                .set_value_on_all_layers(cj, ci, value);
+            if let Some(layer_no) = layer {
+                rules.clearance_matrix.set_value(ci, cj, layer_no, value);
+                rules.clearance_matrix.set_value(cj, ci, layer_no, value);
+            } else {
+                rules
+                    .clearance_matrix
+                    .set_value_on_all_layers(ci, cj, value);
+                rules
+                    .clearance_matrix
+                    .set_value_on_all_layers(cj, ci, value);
+            }
             applied += 1;
         }
     }
     applied
 }
 
-/// Applies one `(class_class (classes A B ...) (rule (clearance C)))`
-/// scope: pairwise clearances between the named net classes' trace
-/// clearance classes (Java `Network.insert_class_pairs`).
+/// Converts the lexical contents of a `(type ...)` node into composite class
+/// pairs.  The parser retains whether each atom was quoted; this lets us
+/// distinguish a quoted class called `A-B` from the unquoted legacy
+/// `A-B`/`A_B` pair notation.
+fn type_pairs(type_node: &SExpr) -> Vec<(String, String)> {
+    let tokens: Vec<(String, bool)> = type_node
+        .as_list()
+        .unwrap_or(&[])
+        .iter()
+        .skip(1)
+        .filter_map(|t| t.as_atom().map(|s| (s.to_string(), t.is_quoted())))
+        .filter(|(s, quoted)| {
+            *quoted
+                || (!s.eq_ignore_ascii_case("smd_to_turn_gap")
+                    && !s.to_ascii_lowercase().ends_with("_same_net")
+                    && !s.to_ascii_lowercase().ends_with("-same_net"))
+        })
+        .collect();
+    if tokens.len() == 3 && !tokens[1].1 && (tokens[1].0 == "_" || tokens[1].0 == "-") {
+        return vec![(tokens[0].0.clone(), tokens[2].0.clone())];
+    }
+    if tokens.len() == 2 {
+        let mut first = tokens[0].0.clone();
+        let mut second = tokens[1].0.clone();
+        if !tokens[0].1 {
+            first = first.strip_suffix(['_', '-']).unwrap_or(&first).to_string();
+        }
+        if !tokens[1].1 {
+            second = second
+                .strip_prefix(['_', '-'])
+                .unwrap_or(&second)
+                .to_string();
+        }
+        return vec![(first, second)];
+    }
+    tokens
+        .into_iter()
+        .filter(|(_, quoted)| !quoted)
+        .filter_map(|(token, _)| split_composite_token(&token))
+        .collect()
+}
+
+fn rule_has_smd_to_turn_gap(rule_node: &SExpr) -> bool {
+    rule_node
+        .as_list()
+        .unwrap_or(&[])
+        .iter()
+        .filter(|child| {
+            child.name().is_some_and(|name| {
+                name.eq_ignore_ascii_case("clearance") || name.eq_ignore_ascii_case("clear")
+            })
+        })
+        .filter_map(|child| child.child("type"))
+        .flat_map(|type_node| type_node.args())
+        .any(|name| name.eq_ignore_ascii_case("smd_to_turn_gap"))
+}
+
+fn rule_has_clearance_declaration(rule_node: &SExpr) -> bool {
+    rule_node.as_list().unwrap_or(&[]).iter().any(|child| {
+        child.name().is_some_and(|name| {
+            (name.eq_ignore_ascii_case("clearance") || name.eq_ignore_ascii_case("clear"))
+                && child.arg_f64().is_some()
+        })
+    })
+}
+
+/// Splits the compact one-token spelling used by older Specctra writers.
+/// Most pairs are unambiguous at the first `_`/`-` (`wire_kicad_default`),
+/// but names themselves may contain underscores.  When both halves are the
+/// same, prefer that midpoint (`base_a_base_a`) so the class name is not
+/// truncated.  Quoted names and explicit separator tokens are handled by
+/// `type_pairs` before this helper.
+fn split_composite_token(token: &str) -> Option<(String, String)> {
+    let mut separators: Vec<usize> = token
+        .char_indices()
+        .filter_map(|(index, ch)| matches!(ch, '_' | '-').then_some(index))
+        .collect();
+    separators.sort_unstable();
+    for index in &separators {
+        let (left, right_with_separator) = token.split_at(*index);
+        let right = &right_with_separator[1..];
+        if !left.is_empty() && !right.is_empty() && left.eq_ignore_ascii_case(right) {
+            return Some((left.to_string(), right.to_string()));
+        }
+    }
+    separators.first().and_then(|index| {
+        let left = &token[..*index];
+        let right = &token[*index + 1..];
+        (!left.is_empty() && !right.is_empty()).then(|| (left.to_string(), right.to_string()))
+    })
+}
+
+/// Resolves an item name in the namespace of one net class.  Java keeps
+/// separate matrix columns for `class`, `class-via`, `class-pin`, etc.; using
+/// the global `via`/`pin` columns here makes a class-scoped typed rule affect
+/// unrelated nets.
+fn ensure_class_item_clearance_class(
+    rules: &mut BoardRules,
+    net_class_idx: usize,
+    item_name: &str,
+    bind_items: bool,
+) -> (usize, bool) {
+    let class_name = rules.net_classes.get(net_class_idx).get_name().to_string();
+    let is_wire =
+        item_name.eq_ignore_ascii_case("wire") || item_name.eq_ignore_ascii_case("default");
+    let matrix_name = if is_wire {
+        class_name.clone()
+    } else {
+        format!("{class_name}-{item_name}")
+    };
+    let base = rules
+        .net_classes
+        .get(net_class_idx)
+        .get_trace_clearance_class()
+        .max(BoardRules::default_clearance_class());
+    let (idx, created) = match rules.clearance_matrix.get_no(&matrix_name) {
+        Some(idx) => (idx, false),
+        None => {
+            if !rules.clearance_matrix.append_class(&matrix_name) {
+                return (
+                    rules
+                        .clearance_matrix
+                        .get_no(&matrix_name)
+                        .unwrap_or(BoardRules::default_clearance_class()),
+                    false,
+                );
+            }
+            let idx = rules
+                .clearance_matrix
+                .get_no(&matrix_name)
+                .unwrap_or(BoardRules::default_clearance_class());
+            let n = rules.clearance_matrix.get_class_count();
+            let layers = rules.clearance_matrix.get_layer_count();
+            for other in 1..n {
+                for layer in 0..layers {
+                    let value = rules.clearance_matrix.get_value(base, other, layer, false);
+                    rules.clearance_matrix.set_value(idx, other, layer, value);
+                    rules.clearance_matrix.set_value(other, idx, layer, value);
+                }
+            }
+            (idx, true)
+        }
+    };
+    if let Some(item_class) = item_class_of(&item_name.to_ascii_lowercase()) {
+        // Java's `get_clearance_class` only updates a NetClass's per-item
+        // defaults for via/pin/smd/area.  A mixed class-pair's `wire` column
+        // is a matrix endpoint, not a request to rebind either class's trace
+        // clearance (or its Trace item default).
+        if bind_items {
+            rules
+                .net_classes
+                .get_mut(net_class_idx)
+                .default_item_clearance_classes
+                .set(item_class, idx);
+        }
+    }
+    if is_wire && bind_items {
+        rules
+            .net_classes
+            .get_mut(net_class_idx)
+            .set_trace_clearance_class(idx);
+    }
+    (idx, created)
+}
+
+/// Applies one class-local rule.  Unlike the board-level applier, every
+/// typed class name is resolved in `net_class_idx`'s namespace and the layer
+/// argument is honored.  Returns `(settings_applied, smd_gap_seen)`.
+fn apply_class_rule_scope(
+    rules: &mut BoardRules,
+    net_class_idx: usize,
+    rule_node: &SExpr,
+    scale: &dyn Fn(f64) -> i32,
+    layer: Option<usize>,
+) -> (usize, bool) {
+    let mut applied = 0;
+    let mut gap_seen = false;
+    let default_class = rules.get_default_net_class();
+    for child in rule_node.as_list().unwrap_or(&[]).iter().filter(|c| {
+        c.name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("clearance") || n.eq_ignore_ascii_case("clear"))
+    }) {
+        let Some(value) = child.arg_f64().map(scale) else {
+            continue;
+        };
+        let (class_wire, class_wire_created) =
+            ensure_class_item_clearance_class(rules, net_class_idx, "wire", true);
+        if net_class_idx != default_class || class_wire_created {
+            rules
+                .net_classes
+                .get_mut(net_class_idx)
+                .set_trace_clearance_class(class_wire);
+        }
+        if net_class_idx != default_class && class_wire_created {
+            // Java initializes every item class to the newly-created net
+            // class, then lets typed pairs refine individual item columns.
+            rules
+                .net_classes
+                .get_mut(net_class_idx)
+                .default_item_clearance_classes
+                .set_all(class_wire);
+        }
+        let Some(type_node) = child.child("type") else {
+            let class_no = class_wire;
+            // An untyped class clearance is the class's minimum spacing to
+            // every other non-null class, not merely its diagonal.  Apply it
+            // with max semantics so a class read later cannot weaken a
+            // stricter pair that was already declared (Java's
+            // Network.add_clearance_rule behavior).
+            let class_count = rules.clearance_matrix.get_class_count();
+            let layers = if let Some(layer_no) = layer {
+                layer_no..layer_no + 1
+            } else {
+                0..rules.clearance_matrix.get_layer_count()
+            };
+            for other in 1..class_count {
+                for layer_no in layers.clone() {
+                    if other == class_no {
+                        rules
+                            .clearance_matrix
+                            .set_value(class_no, class_no, layer_no, value);
+                        continue;
+                    }
+                    let current = rules
+                        .clearance_matrix
+                        .get_value(class_no, other, layer_no, false);
+                    let effective = current.max(value);
+                    rules
+                        .clearance_matrix
+                        .set_value(class_no, other, layer_no, effective);
+                    rules
+                        .clearance_matrix
+                        .set_value(other, class_no, layer_no, effective);
+                }
+            }
+            applied += 1;
+            continue;
+        };
+        // Consume special type atoms once, before `type_pairs` expands the
+        // remaining matrix-pair atoms.  In particular, a class-scoped
+        // `via_via_same_net` must reach the same-net DRC table rather than
+        // becoming a stray clearance-matrix class.
+        let raw_type_tokens: Vec<(String, bool)> = type_node
+            .as_list()
+            .unwrap_or(&[])
+            .iter()
+            .skip(1)
+            .filter_map(|t| t.as_atom().map(|s| (s.to_string(), t.is_quoted())))
+            .collect();
+        for (name, quoted) in &raw_type_tokens {
+            if *quoted {
+                continue;
+            }
+            if name.eq_ignore_ascii_case("smd_to_turn_gap") {
+                rules.set_pin_edge_to_turn_dist(value as f64);
+                gap_seen = true;
+                applied += 1;
+            } else if apply_same_net_type_token(rules, name, value) {
+                applied += 1;
+            }
+        }
+        // A wire pair makes Java create the four standard item columns in the
+        // class namespace before applying the remaining pairs.
+        if raw_type_tokens.iter().any(|(name, quoted)| {
+            if *quoted {
+                return false;
+            }
+            let lower = name.to_ascii_lowercase();
+            lower.starts_with("wire_")
+                || lower.starts_with("wire-")
+                || lower.ends_with("_wire")
+                || lower.ends_with("-wire")
+        }) {
+            for item in ["via", "smd", "pin", "area"] {
+                ensure_class_item_clearance_class(rules, net_class_idx, item, true);
+            }
+        }
+        for (a, b) in type_pairs(type_node) {
+            // `smd_to_turn_gap` and unquoted `*_same_net` atoms were handled
+            // above and are filtered by `type_pairs`; quoted names are valid
+            // ordinary matrix classes and must remain untouched.
+            let (ia, _) = ensure_class_item_clearance_class(rules, net_class_idx, &a, true);
+            let (ib, _) = ensure_class_item_clearance_class(rules, net_class_idx, &b, true);
+            if let Some(layer_no) = layer {
+                rules.clearance_matrix.set_value(ia, ib, layer_no, value);
+                rules.clearance_matrix.set_value(ib, ia, layer_no, value);
+            } else {
+                rules
+                    .clearance_matrix
+                    .set_value_on_all_layers(ia, ib, value);
+                rules
+                    .clearance_matrix
+                    .set_value_on_all_layers(ib, ia, value);
+            }
+            applied += 1;
+        }
+    }
+    (applied, gap_seen)
+}
+
+/// Applies one `(class_class (classes A B ...) ...)` scope.  Class-pair
+/// rules use matrix columns named after the *net classes*, not whichever
+/// scalar/default column happened to exist when the scope was read.  Typed
+/// pairs are resolved in each endpoint's class namespace, just as Java's
+/// `Network.add_mixed_clearance_rule` does.
 pub(crate) fn apply_class_class_scope(
     rules: &mut BoardRules,
     node: &SExpr,
@@ -343,33 +833,94 @@ pub(crate) fn apply_class_class_scope(
         .child("classes")
         .map(|c| c.args().map(|s| s.to_string()).collect())
         .unwrap_or_default();
-    let mut value: Option<i32> = None;
-    for rule in node.children("rule") {
-        if let Some(c) = rule
-            .child("clearance")
-            .or_else(|| rule.child("clear"))
-            .and_then(|c| c.arg_f64())
-        {
-            value = Some(scale(c));
-        }
-    }
-    let Some(v) = value else {
+    let class_indices: Vec<usize> = names
+        .iter()
+        .filter_map(|name| rules.net_classes.get_by_name(name))
+        .collect();
+    if class_indices.len() < 2 {
         return;
-    };
-    let tcc_of = |rules: &BoardRules, name: &str| -> Option<usize> {
-        rules
-            .net_classes
-            .get_by_name(name)
-            .map(|idx| rules.net_classes.get(idx).get_trace_clearance_class())
-    };
+    }
     for i in 0..names.len() {
         for j in (i + 1)..names.len() {
-            let (Some(a), Some(b)) = (tcc_of(rules, &names[i]), tcc_of(rules, &names[j])) else {
+            let (Some(a_idx), Some(b_idx)) = (
+                rules.net_classes.get_by_name(&names[i]),
+                rules.net_classes.get_by_name(&names[j]),
+            ) else {
                 continue;
             };
-            rules.clearance_matrix.set_value_on_all_layers(a, b, v);
-            rules.clearance_matrix.set_value_on_all_layers(b, a, v);
+            for rule in node.children("rule") {
+                apply_mixed_rule(rules, a_idx, b_idx, rule, scale, None);
+            }
+            for layer_rule in node.children("layer_rule") {
+                let layers: Vec<usize> = layer_rule
+                    .args()
+                    .filter_map(|name| rules.layer_structure().get_no(name))
+                    .collect();
+                for layer in layers {
+                    for rule in layer_rule.children("rule") {
+                        apply_mixed_rule(rules, a_idx, b_idx, rule, scale, Some(layer));
+                    }
+                }
+            }
         }
+    }
+}
+
+fn apply_mixed_rule(
+    rules: &mut BoardRules,
+    first_class_idx: usize,
+    second_class_idx: usize,
+    rule: &SExpr,
+    scale: &dyn Fn(f64) -> i32,
+    layer: Option<usize>,
+) {
+    for child in rule.as_list().unwrap_or(&[]).iter().filter(|c| {
+        c.name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("clearance") || n.eq_ignore_ascii_case("clear"))
+    }) {
+        let Some(value) = child.arg_f64().map(scale) else {
+            continue;
+        };
+        let Some(type_node) = child.child("type") else {
+            let (a, _) = ensure_class_item_clearance_class(rules, first_class_idx, "wire", false);
+            let (b, _) = ensure_class_item_clearance_class(rules, second_class_idx, "wire", false);
+            set_matrix_pair(rules, a, b, value, layer);
+            continue;
+        };
+        for (a_name, b_name) in type_pairs(type_node) {
+            let (a, _) = ensure_class_item_clearance_class(rules, first_class_idx, &a_name, false);
+            let (b, _) = ensure_class_item_clearance_class(rules, second_class_idx, &b_name, false);
+            let (a_rev, _) =
+                ensure_class_item_clearance_class(rules, second_class_idx, &a_name, false);
+            let (b_rev, _) =
+                ensure_class_item_clearance_class(rules, first_class_idx, &b_name, false);
+            set_matrix_pair(rules, a, b, value, layer);
+            set_matrix_pair(rules, a_rev, b_rev, value, layer);
+        }
+    }
+}
+
+fn set_matrix_pair(
+    rules: &mut BoardRules,
+    first: usize,
+    second: usize,
+    value: i32,
+    layer: Option<usize>,
+) {
+    if let Some(layer_no) = layer {
+        rules
+            .clearance_matrix
+            .set_value(first, second, layer_no, value);
+        rules
+            .clearance_matrix
+            .set_value(second, first, layer_no, value);
+    } else {
+        rules
+            .clearance_matrix
+            .set_value_on_all_layers(first, second, value);
+        rules
+            .clearance_matrix
+            .set_value_on_all_layers(second, first, value);
     }
 }
 
@@ -386,16 +937,19 @@ pub(crate) fn apply_class_scope(
     scale: &dyn Fn(f64) -> i32,
     via_rule_ids: &HashMap<String, usize>,
 ) {
-    let clearance_child = |rule: &SExpr| -> Option<f64> {
-        rule.child("clearance")
-            .or_else(|| rule.child("clear"))
-            .and_then(|c| c.arg_f64())
-    };
     let mut class_args = class_node.args();
-    let Some(class_name) = class_args.next() else {
+    let Some(raw_class_name) = class_args.next() else {
         return;
     };
-    let member_nets: Vec<&str> = class_args.collect();
+    // A few KiCad 4 exports encode the implicit default class as two empty
+    // quoted atoms: `(class '' ...)`. Treat that spelling as the canonical
+    // default class instead of creating an unnameable matrix column.
+    let class_name = if raw_class_name.is_empty() {
+        "default"
+    } else {
+        raw_class_name
+    };
+    let member_nets: Vec<&str> = class_args.filter(|name| !name.is_empty()).collect();
     // classes resolve BY NAME (Java Network.insert_net_class): only the
     // class actually named "default" describes the default rules. The
     // former any-empty-class-is-default rule let every memberless named
@@ -406,100 +960,61 @@ pub(crate) fn apply_class_scope(
         .net_classes
         .get_by_name(class_name)
         .unwrap_or_else(|| rules.append_net_class(class_name));
-    let is_default_descriptor = class_idx == default_idx;
-    // EVERY (rule ...) scope of the class is read in order, later values
-    // overwriting earlier ones (only the first scalar rule was read)
-    let mut half_width: Option<i32> = None;
-    let mut class_clearance: Option<i32> = None;
+    // Apply every rule scope in source order.  Width and clearance are
+    // intentionally handled in the same traversal so later declarations
+    // have Java's last-write-wins behavior.
+    let mut class_has_clearance = false;
     for rule in class_node.children("rule") {
-        if let Some(w) = rule.child("width").and_then(|w| w.arg_f64()) {
-            half_width = Some((scale(w) / 2).max(1));
+        for w in rule.children("width").filter_map(|w| w.arg_f64()) {
+            rules
+                .net_classes
+                .get_mut(class_idx)
+                .set_trace_half_width((scale(w) / 2).max(1));
         }
-        if let Some(c) = clearance_child(rule) {
-            class_clearance = Some(scale(c));
-        }
+        apply_class_rule_scope(rules, class_idx, rule, scale, None);
+        class_has_clearance |= rule_has_clearance_declaration(rule);
     }
-    let clearance_class_idx = match class_clearance {
-        Some(c) => {
-            if is_default_descriptor && c == ctx.default_clearance {
-                // the (class ... (rule (clearance <default>))) descriptor
-                // for the default net class: keep the shared default
-                // class and leave the default net class's item classes
-                // (so plain-net smd pads stay tight); no set_all below.
-                BoardRules::default_clearance_class()
-            } else {
-                // Java Network.add_clearance_rule: the clearance class is
-                // NAMED after the net class, so a later typed A_B rule
-                // naming the class targets the SAME matrix column. The
-                // former cl_<value> key collapsed distinct classes with
-                // equal values and left typed name rules inert.
-                let idx = match rules.clearance_matrix.get_no(class_name) {
-                    Some(idx) => idx,
-                    None => {
-                        rules.clearance_matrix.append_class(class_name);
-                        rules
-                            .clearance_matrix
-                            .get_no(class_name)
-                            .unwrap_or_else(BoardRules::default_clearance_class)
-                    }
-                };
-                // Java parity (Network.add_clearance_rule): the class's
-                // clearance to every existing class is the MAXIMUM of its
-                // own value and the existing entry, so a stricter class is
-                // never under-cleared next to a looser one regardless of
-                // class-creation order. Start at class 1 to leave
-                // "null" (0) at zero.
-                let n = rules.clearance_matrix.get_class_count();
-                let layers = rules.clearance_matrix.get_layer_count();
-                for j in 1..n {
-                    if j == idx {
-                        continue;
-                    }
-                    for layer in 0..layers {
-                        let curr = rules
-                            .clearance_matrix
-                            .get_value(idx, j, layer, false)
-                            .max(c);
-                        rules.clearance_matrix.set_value(idx, j, layer, curr);
-                        rules.clearance_matrix.set_value(j, idx, layer, curr);
-                    }
+    for layer_rule in class_node.children("layer_rule") {
+        let layers: Vec<usize> = layer_rule
+            .args()
+            .filter_map(|name| ctx.layer_structure.get_no(name))
+            .collect();
+        for layer in layers {
+            for rule in layer_rule.children("rule") {
+                for w in rule.children("width").filter_map(|w| w.arg_f64()) {
+                    rules
+                        .net_classes
+                        .get_mut(class_idx)
+                        .set_trace_half_width_on_layer(layer, (scale(w) / 2).max(1));
                 }
-                // the class's clearance to itself is exactly its own value
-                rules.clearance_matrix.set_value_on_all_layers(idx, idx, c);
-                idx
+                apply_class_rule_scope(rules, class_idx, rule, scale, Some(layer));
+                class_has_clearance |= rule_has_clearance_declaration(rule);
             }
         }
-        // no inline clearance rule: honor a `(clearance_class NAME)`
-        // reference (Java insert_net_class) — the trace clearance class
-        // becomes the named class; item classes stay at their defaults
-        // (no set_all), unlike an inline clearance rule.
-        None => match class_node.child("clearance_class").and_then(|c| c.arg()) {
-            Some(name) => resolve_clearance_class(rules, name),
-            None => BoardRules::default_clearance_class(),
-        },
-    };
-    let via_padstack = class_node
-        .child("circuit")
-        .and_then(|c| c.child("use_via"))
-        .and_then(|u| u.arg())
-        .and_then(|name| ctx.padstack_nos.get(name).copied());
+    }
+    // A class may use a named matrix class without an inline rule. Java
+    // applies this reference before its inline rules; any successfully
+    // parsed inline clearance (including typed-only rules such as
+    // smd_to_turn_gap) therefore owns the trace class. Checking only for a
+    // wire pair would let this reference overwrite a class-local column.
+    if !class_has_clearance {
+        if let Some(name) = class_node.child("clearance_class").and_then(|c| c.arg()) {
+            if let Some(cc) = lookup_clearance_class(rules, name) {
+                rules
+                    .net_classes
+                    .get_mut(class_idx)
+                    .set_trace_clearance_class(cc);
+            }
+        }
+    }
+    let via_padstacks: Vec<usize> = class_node
+        .children("circuit")
+        .flat_map(|c| c.children("use_via"))
+        .flat_map(|u| u.args())
+        .filter_map(|name| ctx.padstack_no(name))
+        .collect();
     {
         let class = rules.net_classes.get_mut(class_idx);
-        if let Some(hw) = half_width {
-            class.set_trace_half_width(hw);
-        }
-        class.set_trace_clearance_class(clearance_class_idx);
-        // Java (Network.add_clearance_rule): default_item_clearance_classes
-        // .set_all(class_no) — pins (incl. smd), vias and areas of a
-        // named class that carries a clearance rule use its clearance
-        // class too, not just traces, EVEN when the value equals the
-        // board default. Never applied to the default net class (the
-        // folded default descriptor), which must keep smd pads tight.
-        if !is_default_descriptor && class_clearance.is_some() {
-            class
-                .default_item_clearance_classes
-                .set_all(clearance_class_idx);
-        }
         // (circuit (use_layer L ...)): ONLY the listed layers stay
         // active routing layers, and inactive layers get trace
         // width 0 (Java Network.create_active_trace_layers)
@@ -509,7 +1024,10 @@ pub(crate) fn apply_class_scope(
             .flat_map(|u| u.args())
             .filter_map(|n| ctx.layer_structure.get_no(n))
             .collect();
-        if !use_layers.is_empty() {
+        if class_node
+            .children("circuit")
+            .any(|c| c.child("use_layer").is_some())
+        {
             class.set_all_layers_active(false);
             for &l in &use_layers {
                 class.set_active_routing_layer(l, true);
@@ -526,6 +1044,27 @@ pub(crate) fn apply_class_scope(
         if let Some(v) = class_node.child("shove_fixed").and_then(|s| s.arg()) {
             class.set_shove_fixed(v.eq_ignore_ascii_case("on"));
         }
+        if let Some(v) = class_node.child("pull_tight").and_then(|s| s.arg()) {
+            class.set_pull_tight(v.eq_ignore_ascii_case("on"));
+        }
+        // Specctra orders the two length values as MAX then MIN. Negative
+        // max and zero min are the standard "unset" sentinels.
+        for circuit in class_node.children("circuit") {
+            let Some(length) = circuit.child("length") else {
+                continue;
+            };
+            let values: Vec<f64> = length.args().filter_map(|v| v.parse().ok()).collect();
+            if let Some(&max) = values.first() {
+                if max > 0.0 {
+                    class.set_maximum_trace_length(scale(max) as f64);
+                }
+            }
+            if let Some(&min) = values.get(1) {
+                if min > 0.0 {
+                    class.set_minimum_trace_length(scale(min) as f64);
+                }
+            }
+        }
     }
     // a `(via_rule NAME)` reference binds the class to a named via rule
     // declared in the network scope (Java insert_net_class); it wins
@@ -539,34 +1078,86 @@ pub(crate) fn apply_class_scope(
             .net_classes
             .get_mut(class_idx)
             .set_via_rule(Some(rule_id));
-    } else if let Some(padstack_no) = via_padstack {
+    } else if !via_padstacks.is_empty() {
         // Java create_via_rule reuses the existing via info for the
         // padstack; only when none was declared is one created, with
         // the default attach rule (via_at_smd && padstack attach).
-        let existing = (0..rules.via_infos.count())
-            .find(|&i| rules.via_infos.get(i).get_padstack() == padstack_no);
-        let via_info_id = existing.or_else(|| {
-            let attach = rules.via_at_smd_allowed
-                && ctx
-                    .padstacks
-                    .get_by_no(padstack_no)
-                    .is_some_and(|p| p.attach_allowed);
-            rules.via_infos.add(crate::rules::ViaInfo::new(
-                format!("via::{class_name}"),
-                padstack_no,
-                clearance_class_idx,
-                attach,
-            ))
-        });
-        if let Some(via_info_id) = via_info_id {
-            let mut via_rule = crate::rules::ViaRule::new(class_name);
-            via_rule.append_via(via_info_id);
+        let via_class = rules
+            .net_classes
+            .get(class_idx)
+            .default_item_clearance_classes
+            .get(crate::rules::ItemClass::Via);
+        let mut via_rule = crate::rules::ViaRule::new(class_name);
+        for padstack_no in via_padstacks {
+            let existing = (0..rules.via_infos.count()).find(|&i| {
+                let info = rules.via_infos.get(i);
+                info.get_padstack() == padstack_no && info.get_clearance_class() == via_class
+            });
+            let via_info_id = existing.or_else(|| {
+                let attach = rules.via_at_smd_allowed
+                    && ctx
+                        .padstacks
+                        .get_by_no(padstack_no)
+                        .is_some_and(|p| p.attach_allowed);
+                rules.via_infos.add(crate::rules::ViaInfo::new(
+                    format!("via::{class_name}::{padstack_no}"),
+                    padstack_no,
+                    via_class,
+                    attach,
+                ))
+            });
+            if let Some(via_info_id) = via_info_id {
+                via_rule.append_via(via_info_id);
+            }
+        }
+        if via_rule.via_count() > 0 {
             rules.via_rules.push(via_rule);
             let rule_id = rules.via_rules.len() - 1;
             rules
                 .net_classes
                 .get_mut(class_idx)
                 .set_via_rule(Some(rule_id));
+        }
+    } else if class_has_clearance && class_idx != default_idx {
+        // Java creates class-specific default ViaInfos when a class has a
+        // clearance rule, even if no `(use_via ...)` list is present.  This
+        // prevents a strict class from silently reusing a weaker default via.
+        let via_class = rules
+            .net_classes
+            .get(class_idx)
+            .default_item_clearance_classes
+            .get(crate::rules::ItemClass::Via);
+        let mut via_rule = crate::rules::ViaRule::new(class_name);
+        for ps_no in 1..=ctx.padstacks.count() {
+            let Some(ps) = ctx.padstacks.get_by_no(ps_no) else {
+                continue;
+            };
+            if ps.to_layer() <= ps.from_layer() {
+                continue; // one-layer padstacks are pins/SMDs, not vias
+            }
+            let attach = rules.via_at_smd_allowed && ps.attach_allowed;
+            let existing = (0..rules.via_infos.count()).find(|&i| {
+                let info = rules.via_infos.get(i);
+                info.get_padstack() == ps_no && info.get_clearance_class() == via_class
+            });
+            let info_id = existing.or_else(|| {
+                rules.via_infos.add(crate::rules::ViaInfo::new(
+                    format!("{}-{}", ps.name, class_name),
+                    ps_no,
+                    via_class,
+                    attach,
+                ))
+            });
+            if let Some(id) = info_id {
+                via_rule.append_via(id);
+            }
+        }
+        if via_rule.via_count() > 0 {
+            rules.via_rules.push(via_rule);
+            rules
+                .net_classes
+                .get_mut(class_idx)
+                .set_via_rule(Some(rules.via_rules.len() - 1));
         }
     }
     for net_name in member_nets {
@@ -586,30 +1177,35 @@ pub(crate) fn apply_class_scope(
 
 /// The fixed state of a `(wire ...)`/`(via ...)` wiring node from its
 /// `(type ...)` attribute, mapped like Java `Wiring.calc_fixed`:
-/// `shove_fixed` → ShoveFixed, `fix` → SystemFixed, `protect` → UserFixed,
-/// `normal`/`route` (and absent) → Unfixed. Deviation from Java: Java maps
-/// every UNKNOWN type (including KiCad's `route`) to USER_FIXED; this port
-/// keeps plain `route` wiring rippable so pre-routed boards stay optimizable
-/// (SES-imported sessions are USER_FIXED like Java's SesReader).
+/// `shove_fixed` → ShoveFixed, `fix` → SystemFixed, `normal` (and absent) →
+/// Unfixed; every other explicit token, including KiCad's `route`, is
+/// UserFixed. This matches Java `Wiring.calc_fixed`; the writer represents a
+/// genuinely unfixed item by omitting `(type ...)`.
 fn wiring_fixed_state(node: &SExpr) -> crate::board::FixedState {
-    let t = node.child("type").and_then(|t| t.arg()).unwrap_or("route");
+    let Some(t) = node.child("type").and_then(|t| t.arg()) else {
+        return crate::board::FixedState::Unfixed;
+    };
     if t.eq_ignore_ascii_case("shove_fixed") {
         crate::board::FixedState::ShoveFixed
     } else if t.eq_ignore_ascii_case("fix") {
         crate::board::FixedState::SystemFixed
-    } else if t.eq_ignore_ascii_case("protect") {
-        crate::board::FixedState::UserFixed
-    } else {
+    } else if t.eq_ignore_ascii_case("normal") {
         crate::board::FixedState::Unfixed
+    } else {
+        crate::board::FixedState::UserFixed
     }
 }
 
 /// An explicit wiring-level `(clearance_class NAME)` resolved against the
-/// board's clearance matrix (Java `Wiring.read_wire_scope`); `None` when
-/// absent or unknown, letting the caller fall back to the net's class.
-fn wiring_clearance_class(board: &BasicBoard, node: &SExpr) -> Option<usize> {
-    let name = node.child("clearance_class").and_then(|c| c.arg())?;
-    board.rules.clearance_matrix.get_no(name)
+/// board's clearance matrix (Java `Wiring.read_wire_scope`). An absent scope
+/// lets the caller use its net-class default; an explicit unknown symbol is a
+/// malformed reference and must fail the import.
+fn wiring_clearance_class(
+    board: &BasicBoard,
+    node: &SExpr,
+    context: &str,
+) -> Result<Option<usize>, ImportError> {
+    explicit_clearance_class(&board.rules, node, context)
 }
 
 struct ImagePin {
@@ -632,6 +1228,7 @@ struct ImageKeepout {
     /// resolved clearance class (from a nested or trailing-sibling
     /// `(clearance_class ...)`; the default class when absent)
     clearance_class: usize,
+    clearance_class_explicit: bool,
 }
 
 /// A parsed `(image ...)` footprint: its pins and its keepouts.
@@ -644,84 +1241,278 @@ struct Image {
 /// component pins (as drill items carrying their nets) and nets.
 pub fn import_dsn(content: &str) -> Result<BasicBoard, ImportError> {
     let mut board = import_dsn_inner(content)?;
+    // A parsed tree is not enough to establish a usable board: malformed
+    // layers, padstack shapes, net/class references, or item geometry can
+    // otherwise survive as plausible defaults and fail much later in the
+    // router.  Validate the completed graph before exposing it to callers.
+    // Duplicate symbols are deliberately rejected here. Resolving a repeated
+    // padstack name by either first- or last-write order changes component
+    // geometry, so a public interchange boundary must not guess.
+    crate::board::validation::validate_board_references(&board)
+        .map_err(|error| err(format!("imported DSN violates board invariants: {error}")))?;
     // retain the document without its wiring for DSN export (the router
     // only changes the wiring section): remove exactly the balanced
     // `(wiring ...)` span, keeping everything before and after it
     board.dsn_source = Some(strip_wiring(content));
+    // The exporter preserves every non-wiring section verbatim. Capture the
+    // fully imported semantic state now so later routing edits can be
+    // distinguished from unsafe rule or geometry edits.
+    board.capture_dsn_semantic_baseline();
     Ok(board)
 }
 
-/// The document with its `(wiring ...)` sections removed. Spans are found
-/// by paren counting (quoted strings have no escapes, matching the
-/// parser); an unbalanced span leaves the document untouched. The keyword
-/// match is case-insensitive like the parser (`%ignorecase` in Java's
-/// scanner): a case-sensitive find left `(WIRING ...)` in the retained
-/// source, and the exporter then emitted the copper twice. Public: the
-/// CLI's `--strip-wiring` uses the same logic instead of its own
-/// (formerly exact, case-sensitive) substring truncation.
+/// The document with its top-level `(wiring ...)` sections removed. The
+/// structural scan uses the parser's exact quote/comment rules, so text such
+/// as `"(wiring fake)"` is never mistaken for copper. Invalid input is left
+/// untouched; [`import_dsn`] reports the parse error before retaining it.
 pub fn strip_wiring(content: &str) -> String {
+    let Ok((_, spans)) = crate::io::dsn::document_structure(content, "wiring") else {
+        return content.to_string();
+    };
+    if spans.is_empty() {
+        return content.to_string();
+    }
     let mut out = String::with_capacity(content.len());
-    // ASCII lowercasing is byte-length preserving, so positions found in
-    // `lower` index `content` directly
-    let lower = content.to_ascii_lowercase();
     let mut cursor = 0usize;
-    while let Some(rel) = lower[cursor..].find("(wiring") {
-        let pos = cursor + rel;
-        // require a real section name: "(wiring" then a delimiter
-        let after = content.as_bytes().get(pos + "(wiring".len()).copied();
-        let is_section = after.is_none_or(|c| c.is_ascii_whitespace() || c == b')' || c == b'(');
-        let mut end = None;
-        if is_section {
-            let bytes = content.as_bytes();
-            let mut depth = 0usize;
-            let mut i = pos;
-            while i < bytes.len() {
-                match bytes[i] {
-                    q @ (b'"' | b'\'') => {
-                        // parser rules: a quote opens a string only at token
-                        // START (mid-atom quotes are ordinary chars, Java
-                        // SpecChar3); a lone quote before whitespace/`)` is
-                        // an atom, otherwise a quoted string (no escapes)
-                        let token_start = i == 0
-                            || matches!(bytes[i - 1], b'(' | b')')
-                            || bytes[i - 1].is_ascii_whitespace();
-                        let next = bytes.get(i + 1);
-                        if token_start
-                            && next.is_some_and(|c| !c.is_ascii_whitespace() && *c != b')')
-                        {
-                            match bytes[i + 1..].iter().position(|&c| c == q) {
-                                Some(p) => i += p + 1,
-                                None => break, // unterminated string
-                            }
-                        }
-                    }
-                    b'(' => depth += 1,
-                    b')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = Some(i + 1);
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-        }
-        match end {
-            Some(end) => {
-                out.push_str(content[cursor..pos].trim_end_matches([' ', '\t']));
-                cursor = end;
-            }
-            None => {
-                // not a wiring section (or unbalanced): keep it verbatim
-                out.push_str(&content[cursor..pos + "(wiring".len()]);
-                cursor = pos + "(wiring".len();
-            }
-        }
+    for span in spans {
+        out.push_str(content[cursor..span.start].trim_end_matches([' ', '\t']));
+        cursor = span.end;
     }
     out.push_str(&content[cursor..]);
     out
+}
+
+/// Reads the Specctra resolution declaration without applying lossy defaults.
+/// Coordinates and every rule value are scaled by this value, so accepting a
+/// typo here (or coercing a fractional/overflowing value into `i32`) changes
+/// the physical board while still producing an apparently valid import.
+///
+/// The declaration is optional in the format; an omitted declaration keeps
+/// the historical Specctra default of one micrometre file unit.  When present,
+/// however, it must contain exactly a supported physical unit and a positive
+/// integral resolution that fits the board's integer coordinate grid.
+fn parse_resolution(pcb: &SExpr) -> Result<(String, i32), ImportError> {
+    let mut declarations = pcb.children("resolution");
+    let Some(node) = declarations.next() else {
+        return Ok(("um".to_string(), 1));
+    };
+    if declarations.next().is_some() {
+        return Err(err(
+            "the design contains more than one resolution declaration",
+        ));
+    }
+    let mut args = node.args();
+    let unit = args
+        .next()
+        .ok_or_else(|| err("resolution is missing its physical unit"))?;
+    let raw = args
+        .next()
+        .ok_or_else(|| err("resolution is missing its numeric value"))?;
+    if args.next().is_some() {
+        return Err(err("resolution must contain exactly a unit and a value"));
+    }
+    if !matches!(
+        unit.to_ascii_lowercase().as_str(),
+        "um" | "micron" | "microns" | "mil" | "mm" | "cm" | "inch" | "in"
+    ) {
+        return Err(err(format!("unsupported resolution unit {unit:?}")));
+    }
+    let value = raw
+        .parse::<f64>()
+        .map_err(|_| err(format!("resolution value {raw:?} is not numeric")))?;
+    if !value.is_finite() || value <= 0.0 {
+        return Err(err(format!(
+            "resolution value must be finite and positive, got {raw:?}"
+        )));
+    }
+    if value.fract() != 0.0 {
+        return Err(err(format!(
+            "resolution value must be an integer, got {raw:?}"
+        )));
+    }
+    if value > f64::from(i32::MAX) {
+        return Err(err(format!(
+            "resolution value {raw:?} exceeds the board coordinate limit"
+        )));
+    }
+    Ok((unit.to_string(), value as i32))
+}
+
+/// Rejects malformed numeric atoms in the DSN scopes this importer actually
+/// consumes.  The semantic readers intentionally ignore unknown Specctra
+/// extensions for compatibility, but a known coordinate/rule token must not
+/// be silently removed by `filter_map` or replaced with zero: either behavior
+/// can produce a different, still-plausible board.
+fn validate_known_numeric_scopes(pcb: &SExpr) -> Result<(), ImportError> {
+    fn finite(atom: &str, context: &str) -> Result<f64, ImportError> {
+        let value = atom
+            .parse::<f64>()
+            .map_err(|_| err(format!("{context} contains non-numeric atom {atom:?}")))?;
+        if !value.is_finite() {
+            return Err(err(format!("{context} must contain only finite values")));
+        }
+        Ok(value)
+    }
+
+    fn shape(node: &SExpr, context: &str, strict_geometry: bool) -> Result<(), ImportError> {
+        let kind = node
+            .name()
+            .ok_or_else(|| err(format!("{context} is missing its shape kind")))?;
+        let args: Vec<&str> = node.args().collect();
+        if args.is_empty() {
+            return if strict_geometry {
+                Err(err(format!("{context} is missing its layer")))
+            } else {
+                Ok(())
+            };
+        }
+        let numbers = &args[1..];
+        for atom in numbers {
+            finite(atom, context)?;
+        }
+        let malformed = match kind.to_ascii_lowercase().as_str() {
+            "circle" | "circ" => !matches!(numbers.len(), 1 | 3),
+            "rect" => numbers.len() != 4,
+            "path" | "polygon" => numbers.len() < 5 || !(numbers.len() - 1).is_multiple_of(2),
+            _ => false,
+        };
+        if malformed && !strict_geometry {
+            // Keepouts are optional obstacle hints.  Several legacy exporters
+            // emit an empty marker (for example `(polygon F.Cu)`) which Java
+            // skips.  Ignore that marker, but still reject non-numeric atoms
+            // above so malformed numeric data cannot silently become zero.
+            return Ok(());
+        }
+        match kind.to_ascii_lowercase().as_str() {
+            // Centre coordinates are optional, but they are a pair.
+            "circle" | "circ" if !matches!(numbers.len(), 1 | 3) => Err(err(format!(
+                "{context} circle needs a diameter and optionally an x/y centre"
+            ))),
+            "rect" if numbers.len() != 4 => Err(err(format!(
+                "{context} rect needs exactly two coordinate pairs"
+            ))),
+            // width/aperture followed by complete coordinate pairs
+            "path" | "polygon" if numbers.len() < 5 || !(numbers.len() - 1).is_multiple_of(2) => {
+                Err(err(format!(
+                    "{context} {kind} needs a width/aperture and complete coordinate pairs"
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn walk(node: &SExpr, parent: Option<&str>, path: &str) -> Result<(), ImportError> {
+        let Some(name) = node.name() else {
+            return Ok(());
+        };
+        let lname = name.to_ascii_lowercase();
+        let parent = parent.unwrap_or("");
+        match lname.as_str() {
+            "width" | "clearance" | "clear" => {
+                let args: Vec<&str> = node.args().collect();
+                if args.len() != 1 {
+                    return Err(err(format!(
+                        "{path}/{name} must contain exactly one numeric value"
+                    )));
+                }
+                let value = finite(args[0], &format!("{path}/{name}"))?;
+                if value < 0.0 {
+                    return Err(err(format!("{path}/{name} must be nonnegative")));
+                }
+            }
+            "length" => {
+                let args: Vec<&str> = node.args().collect();
+                if args.len() != 2 {
+                    return Err(err(format!(
+                        "{path}/length must contain exactly two numeric values"
+                    )));
+                }
+                for atom in args {
+                    finite(atom, &format!("{path}/length"))?;
+                }
+            }
+            "index" if parent.eq_ignore_ascii_case("property") => {
+                let args: Vec<&str> = node.args().collect();
+                if args.len() != 1 || args[0].parse::<i64>().is_err() {
+                    return Err(err(format!(
+                        "{path}/index must contain exactly one integer"
+                    )));
+                }
+            }
+            "shape" if parent.eq_ignore_ascii_case("padstack") => {
+                let Some(inner) = node.as_list().and_then(|items| items.get(1)) else {
+                    return Err(err(format!("{path}/shape is missing its geometry")));
+                };
+                if inner.name().is_none() {
+                    return Err(err(format!("{path}/shape geometry must be a list")));
+                }
+                shape(inner, &format!("{path}/shape"), true)?;
+            }
+            "path" | "polygon" | "rect" | "circle" | "circ"
+                if matches!(
+                    parent.to_ascii_lowercase().as_str(),
+                    "boundary" | "plane" | "keepout" | "via_keepout"
+                ) =>
+            {
+                let optional_keepout = matches!(
+                    parent.to_ascii_lowercase().as_str(),
+                    "keepout" | "via_keepout"
+                );
+                shape(node, &format!("{path}/{name}"), !optional_keepout)?;
+            }
+            "pin" if parent.eq_ignore_ascii_case("image") => {
+                // Nested `(rotate ...)` is not an atom and is deliberately
+                // absent from args(); the remaining grammar is padstack,
+                // pin name, dx, dy.
+                let args: Vec<&str> = node.args().collect();
+                if args.len() != 4 {
+                    return Err(err(format!(
+                        "{path}/pin needs a padstack, pin name, and x/y offset"
+                    )));
+                }
+                finite(args[2], &format!("{path}/pin offset"))?;
+                finite(args[3], &format!("{path}/pin offset"))?;
+            }
+            "place" if parent.eq_ignore_ascii_case("component") => {
+                let args: Vec<&str> = node.args().collect();
+                if !(4..=5).contains(&args.len()) {
+                    return Err(err(format!(
+                        "{path}/place needs refdes, x, y, side, and optional rotation"
+                    )));
+                }
+                finite(args[1], &format!("{path}/place coordinate"))?;
+                finite(args[2], &format!("{path}/place coordinate"))?;
+                if let Some(rotation) = args.get(4) {
+                    finite(rotation, &format!("{path}/place rotation"))?;
+                }
+            }
+            "net" if parent.eq_ignore_ascii_case("network") => {
+                let args: Vec<&str> = node.args().collect();
+                if args.is_empty() || args.len() > 2 {
+                    return Err(err(format!(
+                        "{path}/net needs a name and optional positive subnet"
+                    )));
+                }
+                if let Some(subnet) = args.get(1) {
+                    let parsed = subnet.parse::<usize>().map_err(|_| {
+                        err(format!("{path}/net subnet {subnet:?} is not an integer"))
+                    })?;
+                    if parsed == 0 {
+                        return Err(err(format!("{path}/net subnet must be positive")));
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Some(items) = node.as_list() {
+            for (index, child) in items.iter().enumerate().skip(1) {
+                walk(child, Some(name), &format!("{path}/{name}[{index}]"))?;
+            }
+        }
+        Ok(())
+    }
+
+    walk(pcb, None, "pcb")
 }
 
 fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
@@ -729,22 +1520,35 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     if !pcb.name().is_some_and(|n| n.eq_ignore_ascii_case("pcb")) {
         return Err(err("root node is not (pcb ...)"));
     }
+    validate_known_numeric_scopes(&pcb)?;
     let structure = pcb.child("structure").ok_or_else(|| err("no structure"))?;
 
     // resolution: `(resolution <unit> <value>)`. File coordinates are
     // multiplied by <value> to get integer board units; <unit> is the
     // physical unit, which must be preserved for a faithful SES round-trip
     // (a `mil` design was previously relabelled `um` on export).
-    let resolution_node = pcb.child("resolution");
-    let unit: String = resolution_node
-        .and_then(|r| r.args().next())
-        .map(|a| a.to_string())
-        .unwrap_or_else(|| "um".to_string());
-    let resolution: f64 = resolution_node
-        .and_then(|r| r.args().nth(1))
-        .and_then(|a| a.parse().ok())
-        .unwrap_or(1.0);
-    let scale = |v: f64| -> i32 { (v * resolution).round() as i32 };
+    let (unit, resolution) = parse_resolution(&pcb)?;
+    // Float-to-integer casts saturate in Rust.  That is convenient for some
+    // numeric code, but unsafe at an interchange boundary: a coordinate just
+    // outside the board grid would silently collapse onto i32::MAX/MIN and
+    // could still form a plausible-looking polygon.  Keep the importer
+    // closures ergonomic while recording the first out-of-range scaled value;
+    // the transaction is rejected once all scopes have been parsed.
+    let scale_error: RefCell<Option<String>> = RefCell::new(None);
+    let scale = |v: f64| -> i32 {
+        let scaled = v * f64::from(resolution);
+        let limit = f64::from(crate::geometry::planar::limits::CRIT_INT);
+        if !scaled.is_finite() || scaled < -limit || scaled > limit {
+            let mut error = scale_error.borrow_mut();
+            if error.is_none() {
+                *error = Some(format!(
+                    "scaled geometry/rule value {v} does not fit the board coordinate range"
+                ));
+            }
+            return 0;
+        }
+        scaled.round() as i32
+    };
 
     // layers
     let mut layers: Vec<(String, bool, i64)> = Vec::new();
@@ -775,28 +1579,13 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     let layer_no = |name: &str| -> Option<usize> { layer_structure.get_no(name) };
     let layer_count = layer_structure.layer_count();
 
-    // default rules (`(clear ...)` is a Specctra alias for `(clearance ...)`).
-    // A structure may carry SEVERAL (rule ...) nodes; all are read (Java
-    // reads every rule scope), preferring an untyped clearance as default.
+    // Default rules (`(clear ...)` is a Specctra alias for `(clearance ...)`).
+    // Start with Java's fallback values, then apply every child in source
+    // order.  In particular, a later width/clearance wins; selecting the
+    // first rule silently changed Issue029-style files.
     let rule_nodes: Vec<&SExpr> = structure.children("rule").collect();
-    let clearance_nodes: Vec<&SExpr> = rule_nodes
-        .iter()
-        .flat_map(|r| r.children("clearance").chain(r.children("clear")))
-        .collect();
-    // ONLY an untyped clearance may become the global default: falling
-    // back to the first TYPED rule made `(rule (clearance 500 (type
-    // A_B)))` change every class pair instead of only A_B
-    let default_clearance = clearance_nodes
-        .iter()
-        .find(|c| c.child("type").is_none())
-        .and_then(|c| c.arg_f64())
-        .map(&scale)
-        .unwrap_or(200);
-    let default_width = rule_nodes
-        .iter()
-        .find_map(|r| r.child("width").and_then(|w| w.arg_f64()))
-        .map(&scale)
-        .unwrap_or(250);
+    let default_clearance = 200;
+    let default_width = 250;
     // clearance classes: base "null" (0), "default" (1), "smd" (2). Typed
     // clearance rules `(clear V (type A_B))` then refine or create per-item and
     // named clearance classes once the rules exist.
@@ -822,21 +1611,15 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
         .default_item_clearance_classes
         .set(crate::rules::ItemClass::Smd, 2);
 
-    // typed clearance rules `(clear V (type A_B))` (Java Structure.set_clearance_rule):
-    // A and B resolve to clearance-matrix classes — "wire"/"default" map to the
-    // default class, the item classes via/pin/smd/area also point the default
-    // net class's item clearance classes at their class, any other name is
-    // created on demand. `smd_to_turn_gap` sets the pin-edge-to-turn distance;
-    // `A_B_same_net` records a same-net clearance for the DRC. Splitting is at
-    // the FIRST '_' (Java `split("_", 2)`), so the second name may itself carry
-    // underscores (e.g. `wire_kicad_default`); a two-token `(type NAME1 NAME2)`
-    // is ONE pair split across tokens (Java's quoted-pair form, the second
-    // token optionally led by the '_' separator). Hyphen spellings (`smd-smd`)
-    // are normalized to underscore.
-    for rule in &rule_nodes {
-        apply_typed_clearances(&mut rules, rule, &scale);
-    }
     rules.set_default_trace_half_widths((default_width / 2).max(1));
+    let mut smd_gap_found = false;
+    for rule in &rule_nodes {
+        for width in rule.children("width").filter_map(|w| w.arg_f64()) {
+            rules.set_default_trace_half_widths((scale(width) / 2).max(1));
+        }
+        apply_rule_scope_clearances(&mut rules, rule, &scale, true);
+        smd_gap_found |= rule_has_smd_to_turn_gap(rule);
+    }
     // (layer L ... (rule (width W) (clearance C))): per-layer defaults
     // (Java Structure.read_layer_scope) — the layer's width lands on the
     // default net class's layer entry and its clearance on the matrix
@@ -846,31 +1629,36 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
             continue;
         };
         for rule in layer_node.children("rule") {
-            if let Some(w) = rule.child("width").and_then(|w| w.arg_f64()).map(&scale) {
+            for w in rule
+                .children("width")
+                .filter_map(|w| w.arg_f64())
+                .map(&scale)
+            {
                 let dc = rules.get_default_net_class();
                 rules
                     .net_classes
                     .get_mut(dc)
                     .set_trace_half_width_on_layer(layer, (w / 2).max(1));
             }
-            if let Some(c) = rule
-                .child("clearance")
-                .or_else(|| rule.child("clear"))
-                .filter(|c| c.child("type").is_none())
-                .and_then(|c| c.arg_f64())
-                .map(&scale)
-            {
-                rules.clearance_matrix.set_default_value_on_layer(layer, c);
-            }
+            apply_rule_scope_clearances_on_layer(&mut rules, rule, &scale, true, Some(layer));
+            smd_gap_found |= rule_has_smd_to_turn_gap(rule);
         }
+    }
+    if !smd_gap_found {
+        rules.set_pin_edge_to_turn_dist(rules.get_min_trace_half_width() as f64);
     }
 
     // library: padstacks and images
     let mut padstacks = Padstacks::new(layer_count);
     let mut padstack_nos: HashMap<String, usize> = HashMap::new();
     let mut images: HashMap<String, Image> = HashMap::new();
+    // Read every padstack before images so an image may legally reference a
+    // padstack declared in a later library scope.  Each individual shape is
+    // validated first because the shared low-level reader otherwise skips
+    // unsupported shapes and unknown layers.
     for library in pcb.children("library") {
         for padstack_node in library.children("padstack") {
+            validate_padstack_scope_references(padstack_node, &layer_structure)?;
             let Some(no) =
                 read_padstack_scope(&mut padstacks, &layer_structure, &scale, padstack_node)
             else {
@@ -878,8 +1666,13 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
             };
             padstack_nos.insert(padstacks.get_by_no(no).unwrap().name.clone(), no);
         }
+    }
+    for library in pcb.children("library") {
         for image_node in library.children("image") {
             let name = image_node.arg().ok_or_else(|| err("image without name"))?;
+            if images.contains_key(name) {
+                return Err(err(format!("duplicate image declaration {name:?}")));
+            }
             let mut pins = Vec::new();
             for pin_node in image_node.children("pin") {
                 let mut args = pin_node.args();
@@ -891,6 +1684,19 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                     continue;
                 }
                 let pin_name = rest[rest.len() - 3].to_string();
+                if padstacks.get(&padstack_name).is_none() {
+                    return Err(err(format!(
+                        "image {name:?} pin {pin_name:?} references unknown padstack {padstack_name:?}"
+                    )));
+                }
+                if pins
+                    .iter()
+                    .any(|pin: &ImagePin| pin.pin_name == pin_name)
+                {
+                    return Err(err(format!(
+                        "image {name:?} declares duplicate pin {pin_name:?}"
+                    )));
+                }
                 let dx: f64 = rest[rest.len() - 2].parse().unwrap_or(0.0);
                 let dy: f64 = rest[rest.len() - 1].parse().unwrap_or(0.0);
                 pins.push(ImagePin {
@@ -925,9 +1731,25 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 else {
                     continue;
                 };
-                let layer = shape_node.arg().and_then(&layer_no);
+                let layer = match shape_node.arg() {
+                    Some(layer_name) => keepout_layer_reference(
+                        &layer_structure,
+                        layer_name,
+                        &format!("image {name:?} keepout"),
+                    )?,
+                    // Missing layer is part of malformed optional keepout
+                    // geometry and is skipped below with the empty shape.
+                    None => None,
+                };
                 let corners = keepout_corners(shape_node, &scale);
                 if corners.len() < 3 {
+                    continue;
+                }
+                let polygon = crate::geometry::planar::PolygonShape::new(corners);
+                if polygon.dimension() != 2 || polygon.is_empty() {
+                    // Some KiCad exports retain an empty keepout marker as a
+                    // three-point polygon with all points equal. Do not turn
+                    // that marker into a one-point obstacle area.
                     continue;
                 }
                 let cc_name = ko
@@ -942,30 +1764,157 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                             })
                             .and_then(|n| n.arg())
                     });
-                let clearance_class = cc_name
-                    .map(|n| resolve_clearance_class(&mut rules, n))
-                    .unwrap_or_else(BoardRules::default_clearance_class);
+                let clearance_class_explicit = cc_name.is_some();
+                let clearance_class = match cc_name {
+                    Some(class_name) => lookup_clearance_class(&rules, class_name).ok_or_else(|| {
+                        err(format!(
+                            "image {name:?} keepout references unknown clearance class {class_name:?}"
+                        ))
+                    })?,
+                    None => rules.item_clearance_class_for(0, crate::rules::ItemClass::Area),
+                };
                 keepouts.push(ImageKeepout {
-                    area: crate::geometry::planar::PolygonShape::new(corners),
+                    area: polygon,
                     layer,
                     via_only,
                     clearance_class,
+                    clearance_class_explicit,
                 });
             }
             images.insert(name.to_string(), Image { pins, keepouts });
         }
     }
 
-    // network: pin reference "COMP-PIN" -> net number (split at the last
-    // '-', like Java)
-    let mut pin_nets: HashMap<String, i32> = HashMap::new();
+    // Materialize the placement namespace before reading network pin lists.
+    // A network endpoint is meaningful only when exactly one placed image pin
+    // owns that `REFDES-PIN` identity.  Counting rather than using a set also
+    // catches duplicate refdes/image-pin combinations that would otherwise
+    // create two physical pads for one logical endpoint.
+    let mut placed_pin_ref_counts: HashMap<String, usize> = HashMap::new();
+    for placement in pcb.children("placement") {
+        for component in placement.children("component") {
+            let image_name = component
+                .arg()
+                .ok_or_else(|| err("placement component is missing its image name"))?;
+            let image = images.get(image_name).ok_or_else(|| {
+                err(format!(
+                    "placement component references unknown image {image_name:?}"
+                ))
+            })?;
+            for place in component.children("place") {
+                let refdes = place
+                    .arg()
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| err(format!("component {image_name:?} has a place without refdes")))?;
+                for override_node in place.children("pin") {
+                    let pin_name = override_node.arg().ok_or_else(|| {
+                        err(format!("placement {refdes:?} has an unnamed pin override"))
+                    })?;
+                    if !image.pins.iter().any(|pin| pin.pin_name == pin_name) {
+                        return Err(err(format!(
+                            "placement {refdes:?} overrides unknown image pin {pin_name:?}"
+                        )));
+                    }
+                }
+                for pin in &image.pins {
+                    let pin_ref = format!("{refdes}-{}", pin.pin_name);
+                    *placed_pin_ref_counts.entry(pin_ref).or_default() += 1;
+                }
+            }
+        }
+    }
+
+    // network: pin reference "COMP-PIN" -> one or more net numbers (split at
+    // the last '-', like Java).  Specctra permits repeated net names with
+    // explicit subnet numbers and can partition a `(net ...)` with
+    // `(fromto ...)` or `(order ...)`; retaining those partitions is required
+    // for electrical equivalence and for wiring/session references.
+    let mut pin_nets: HashMap<String, Vec<i32>> = HashMap::new();
+    let mut pin_net_names: HashMap<String, String> = HashMap::new();
     for network in pcb.children("network") {
         for net_node in network.children("net") {
-            let net_name = net_node.arg().unwrap_or_default();
-            let net_no = rules.nets.add(net_name, 1, false);
-            for pins_node in net_node.children("pins") {
-                for pin_ref in pins_node.args() {
-                    pin_nets.insert(pin_ref.to_string(), net_no);
+            let mut net_args = net_node.args();
+            let net_name = net_args.next().unwrap_or_default();
+            if net_name.is_empty() {
+                return Err(err("network net is missing its name"));
+            }
+            let first_subnet = net_args
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(1);
+            let pins: Vec<String> = net_node
+                .children("pins")
+                .flat_map(|pins_node| pins_node.args().map(str::to_string))
+                .collect();
+            let fromto_groups: Vec<Vec<String>> = net_node
+                .children("fromto")
+                .map(|scope| scope.args().map(str::to_string).collect())
+                .filter(|group: &Vec<String>| !group.is_empty())
+                .collect();
+            // Validate every endpoint spelling present in the net scope,
+            // including a redundant `(pins ...)` list when `(fromto ...)`
+            // supplies the actual subnet partitioning.
+            let mut declared_pin_refs: Vec<&str> = net_node
+                .children("pins")
+                .flat_map(|scope| scope.args())
+                .collect();
+            declared_pin_refs.extend(
+                net_node
+                    .children("fromto")
+                    .flat_map(|scope| scope.args()),
+            );
+            if let Some(order) = net_node.child("order") {
+                declared_pin_refs.extend(order.args());
+            }
+            for pin_ref in declared_pin_refs {
+                match placed_pin_ref_counts.get(pin_ref).copied().unwrap_or(0) {
+                    1 => {}
+                    0 => {
+                        return Err(err(format!(
+                            "network net {net_name:?} references unknown placed pin {pin_ref:?}"
+                        )));
+                    }
+                    count => {
+                        return Err(err(format!(
+                            "network pin reference {pin_ref:?} is ambiguous across {count} placed pins"
+                        )));
+                    }
+                }
+                if let Some(previous_net) = pin_net_names.get(pin_ref) {
+                    if previous_net != net_name {
+                        return Err(err(format!(
+                            "placed pin {pin_ref:?} is assigned to both net {previous_net:?} and {net_name:?}"
+                        )));
+                    }
+                } else {
+                    pin_net_names.insert(pin_ref.to_string(), net_name.to_string());
+                }
+            }
+            let groups: Vec<Vec<String>> = if !fromto_groups.is_empty() {
+                fromto_groups
+            } else if let Some(order) = net_node.child("order") {
+                // Java's create_ordered_subnets connects adjacent pins in
+                // the declared order. A one-pin order remains one subnet.
+                let ordered: Vec<String> = order.args().map(str::to_string).collect();
+                if ordered.len() > 1 {
+                    ordered.windows(2).map(|pair| pair.to_vec()).collect()
+                } else {
+                    vec![ordered]
+                }
+            } else {
+                vec![pins]
+            };
+            for (offset, group) in groups.into_iter().enumerate() {
+                let subnet = first_subnet.saturating_add(offset);
+                let net_no = rules
+                    .nets
+                    .get(net_name, subnet)
+                    .map(|net| net.net_number)
+                    .unwrap_or_else(|| rules.nets.add(net_name, subnet, false));
+                for pin_ref in group {
+                    let entry = pin_nets.entry(pin_ref).or_default();
+                    append_unique_net(entry, net_no);
                 }
             }
         }
@@ -986,44 +1935,208 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
         padstack_nos: &padstack_nos,
         padstacks: &padstacks,
         layer_structure: &layer_structure,
-        default_clearance,
     };
     for network in pcb.children("network") {
         for via_node in network.children("via") {
-            apply_via_declaration(&mut rules, &ctx, via_node);
+            if !apply_via_declaration(&mut rules, &ctx, via_node) {
+                return Err(err("malformed or unbound network via declaration"));
+            }
         }
         for rule_node in network.children("via_rule") {
-            apply_via_rule_declaration(&mut rules, &mut via_rule_ids, rule_node);
+            if !apply_via_rule_declaration(&mut rules, &mut via_rule_ids, rule_node) {
+                return Err(err("malformed or unbound network via_rule declaration"));
+            }
         }
     }
 
+    // Java inserts every network class first, then resolves all class-pair
+    // scopes.  Delaying `class_class` application is important when the two
+    // classes live in different `(network ...)` scopes: applying a pair while
+    // visiting the first network silently drops it because the second class
+    // has not been created yet.
+    let class_pair_nodes: Vec<&SExpr> = pcb
+        .children("network")
+        .flat_map(|network| network.children("class_class"))
+        .collect();
     for network in pcb.children("network") {
         for class_node in network.children("class") {
+            let mut class_args = class_node.args();
+            let class_name = class_args
+                .next()
+                .ok_or_else(|| err("network class is missing its name"))?;
+            for circuit in class_node.children("circuit") {
+                for use_via in circuit.children("use_via") {
+                    for padstack in use_via.args() {
+                        if ctx.padstack_no(padstack).is_none() {
+                            return Err(err(format!(
+                                "network class {class_name:?} references unknown padstack {padstack:?}"
+                            )));
+                        }
+                    }
+                }
+                for use_layer in circuit.children("use_layer") {
+                    for layer in use_layer.args() {
+                        if layer_structure.get_no(layer).is_none() {
+                            return Err(err(format!(
+                                "network class {class_name:?} references unknown layer {layer:?}"
+                            )));
+                        }
+                    }
+                }
+            }
+            for layer_rule in class_node.children("layer_rule") {
+                for layer in layer_rule.args() {
+                    if layer_structure.get_no(layer).is_none() {
+                        return Err(err(format!(
+                            "network class {class_name:?} has a rule for unknown layer {layer:?}"
+                        )));
+                    }
+                }
+            }
+            if let Some(via_rule) = class_node.child("via_rule") {
+                let rule_name = via_rule.arg().ok_or_else(|| {
+                    err(format!(
+                        "network class {class_name:?} has an empty via_rule"
+                    ))
+                })?;
+                if !via_rule_ids.contains_key(rule_name) {
+                    return Err(err(format!(
+                        "network class {class_name:?} references unknown via_rule {rule_name:?}"
+                    )));
+                }
+            }
             apply_class_scope(&mut rules, &ctx, class_node, &scale, &via_rule_ids);
         }
-        // (class_class (classes A B) (rule (clearance C))): a pairwise
-        // clearance between two net classes (Java Network.insert_class_pairs)
-        for cc_node in network.children("class_class") {
-            apply_class_class_scope(&mut rules, cc_node, &scale);
+    }
+    // Resolve class-level clearance references after every class declaration
+    // has had a chance to create its named matrix column.  This both supports
+    // forward references and prevents `apply_class_scope` from silently
+    // ignoring an unknown explicit symbol.
+    for network in pcb.children("network") {
+        for class_node in network.children("class") {
+            let Some(raw_name) = class_node.arg() else {
+                continue;
+            };
+            let class_name = if raw_name.is_empty() { "default" } else { raw_name };
+            let referenced = explicit_clearance_class(
+                &rules,
+                class_node,
+                &format!("network class {class_name:?}"),
+            )?;
+            let has_inline_clearance = class_node
+                .children("rule")
+                .any(rule_has_clearance_declaration)
+                || class_node.children("layer_rule").any(|layer_rule| {
+                    layer_rule
+                        .children("rule")
+                        .any(rule_has_clearance_declaration)
+                });
+            if let (Some(clearance_class), false) = (referenced, has_inline_clearance) {
+                let class_idx = rules.net_classes.get_by_name(class_name).ok_or_else(|| {
+                    err(format!("network class {class_name:?} was not created"))
+                })?;
+                rules
+                    .net_classes
+                    .get_mut(class_idx)
+                    .set_trace_clearance_class(clearance_class);
+            }
+        }
+    }
+    // (class_class (classes A B) (rule (clearance C))): a pairwise
+    // clearance between two net classes (Java Network.insert_class_pairs)
+    for cc_node in class_pair_nodes {
+        let classes = cc_node
+            .child("classes")
+            .ok_or_else(|| err("network class_class is missing its classes scope"))?;
+        let names: Vec<&str> = classes.args().collect();
+        if names.len() < 2 || names.iter().any(|name| name.is_empty()) {
+            return Err(err("network class_class requires two named classes"));
+        }
+        for layer_rule in cc_node.children("layer_rule") {
+            for layer in layer_rule.args() {
+                if layer_structure.get_no(layer).is_none() {
+                    return Err(err(format!(
+                        "network class_class references unknown layer {layer:?}"
+                    )));
+                }
+            }
+        }
+        apply_class_class_scope(&mut rules, cc_node, &scale);
+    }
+
+    // Java always has a usable default ViaInfo/rule, even when a DSN omits
+    // explicit `(via ...)` declarations.  Build those from the library and
+    // attach every still-unbound class to the resulting rule.  Class-local
+    // rules above already created stricter per-class variants, so they are
+    // left untouched.
+    let default_net_class = rules.get_default_net_class();
+    let default_via_class = rules
+        .net_classes
+        .get(default_net_class)
+        .default_item_clearance_classes
+        .get(crate::rules::ItemClass::Via);
+    for ps_no in 1..=padstacks.count() {
+        let Some(ps) = padstacks.get_by_no(ps_no) else {
+            continue;
+        };
+        if ps.to_layer() <= ps.from_layer() {
+            continue;
+        }
+        let has_default_info = (0..rules.via_infos.count()).any(|i| {
+            let info = rules.via_infos.get(i);
+            info.get_padstack() == ps_no && info.get_clearance_class() == default_via_class
+        });
+        if !has_default_info {
+            let attach = rules.via_at_smd_allowed && ps.attach_allowed;
+            let _ = rules.via_infos.add(crate::rules::ViaInfo::new(
+                ps.name.clone(),
+                ps_no,
+                default_via_class,
+                attach,
+            ));
+        }
+    }
+    if rules
+        .net_classes
+        .get(default_net_class)
+        .get_via_rule()
+        .is_none()
+    {
+        rules.create_default_via_rule(default_net_class, "default", &padstacks);
+    }
+    let default_via_rule = rules.net_classes.get(default_net_class).get_via_rule();
+    if let Some(default_via_rule) = default_via_rule {
+        for class_idx in 0..rules.net_classes.count() {
+            if rules.net_classes.get(class_idx).get_via_rule().is_none() {
+                rules
+                    .net_classes
+                    .get_mut(class_idx)
+                    .set_via_rule(Some(default_via_rule));
+            }
         }
     }
 
     let mut board = BasicBoard::new(layer_structure, rules, padstacks);
-    board.resolution = resolution.round() as i32;
+    board.resolution = resolution;
     board.unit = unit;
 
     // power planes: conduction areas connecting their net's pins
     // ((plane NET (polygon LAYER aperture x y ...)))
     for plane_node in structure.children("plane") {
-        let Some(net_name) = plane_node.arg() else {
-            continue;
-        };
-        let Some(polygon) = plane_node.child("polygon") else {
-            continue;
-        };
-        let Some(layer) = polygon.arg().and_then(|n| board.layer_structure.get_no(n)) else {
-            continue;
-        };
+        let net_name = plane_node
+            .arg()
+            .ok_or_else(|| err("plane is missing its net reference"))?;
+        let polygon = plane_node
+            .child("polygon")
+            .ok_or_else(|| err(format!("plane {net_name:?} is missing its polygon")))?;
+        let layer_name = polygon
+            .arg()
+            .ok_or_else(|| err(format!("plane {net_name:?} polygon is missing its layer")))?;
+        let layer = board.layer_structure.get_no(layer_name).ok_or_else(|| {
+            err(format!(
+                "plane {net_name:?} references unknown layer {layer_name:?}"
+            ))
+        })?;
         let nums: Vec<f64> = polygon
             .args()
             .skip(2)
@@ -1043,6 +2156,11 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
             .iter()
             .map(|n| n.net_number)
             .collect();
+        if net_nos.is_empty() {
+            return Err(err(format!(
+                "plane references unknown net {net_name:?}"
+            )));
+        }
         // the net now carries a plane (Java DsnFile/Network set_contains_plane):
         // an explicit flag for interchange (KiCad JSON `containsPlane`) instead
         // of re-deriving it from whichever areas happen to be serialized
@@ -1058,11 +2176,21 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
         // the plane uses its net class's Area item clearance class (Java
         // Network insert plane -> get(Area)), so a high-clearance net's copper
         // pour keeps its spacing (#2/#4)
-        let plane_cl = board.rules.item_clearance_class_for(
-            net_nos.first().copied().unwrap_or(0),
-            crate::rules::ItemClass::Area,
-        );
-        board.insert_area(area, layer, net_name, net_nos, plane_cl, true);
+        let explicit_plane_cl = explicit_clearance_class(
+            &board.rules,
+            plane_node,
+            &format!("plane {net_name:?}"),
+        )?;
+        let plane_cl = explicit_plane_cl.unwrap_or_else(|| {
+            board.rules.item_clearance_class_for(
+                net_nos.first().copied().unwrap_or(0),
+                crate::rules::ItemClass::Area,
+            )
+        });
+        let id = board.insert_area(area, layer, net_name, net_nos, plane_cl, true);
+        if explicit_plane_cl.is_some() {
+            board.set_item_clearance_class_explicit(id, true);
+        }
     }
 
     // keepout areas ((keepout ...) traces+vias, (via_keepout ...) vias
@@ -1081,35 +2209,42 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 continue;
             };
             let layer_arg = shape_node.arg().unwrap_or("signal");
-            let layers: Vec<usize> = match board.layer_structure.get_no(layer_arg) {
-                Some(l) => vec![l],
-                // "signal", "all", "pcb": every layer
+            let layers: Vec<usize> = match keepout_layer_reference(
+                &board.layer_structure,
+                layer_arg,
+                &format!("structure {kind}"),
+            )? {
+                Some(layer) => vec![layer],
                 None => (0..board.layer_structure.layer_count()).collect(),
             };
             let corners = keepout_corners(shape_node, &scale);
             if corners.len() < 3 {
                 continue;
             }
-            let area = crate::geometry::planar::PolylineArea::new(
-                crate::geometry::planar::PolygonShape::new(corners),
-                Vec::new(),
-            );
+            let polygon = crate::geometry::planar::PolygonShape::new(corners);
+            if polygon.dimension() != 2 || polygon.is_empty() {
+                continue;
+            }
+            let area = crate::geometry::planar::PolylineArea::new(polygon, Vec::new());
             let name = node.arg().unwrap_or(kind);
             // a keepout may name its clearance class (Java uses the keepout's
             // clearance class); default when absent.
-            let keepout_cl = node
-                .child("clearance_class")
-                .and_then(|c| c.arg())
-                .map(|n| resolve_clearance_class(&mut board.rules, n))
-                .unwrap_or_else(BoardRules::default_clearance_class);
+            let explicit_clearance = explicit_clearance_class(
+                &board.rules,
+                node,
+                &format!("structure {kind} {name:?}"),
+            )?;
+            let keepout_cl = match explicit_clearance {
+                Some(class) => class,
+                None => board
+                    .rules
+                    .item_clearance_class_for(0, crate::rules::ItemClass::Area),
+            };
             for layer in layers {
-                let mut item = crate::board::Item::new_obstacle_area(
-                    crate::board::ItemBase::new(0, Vec::new(), keepout_cl),
-                    area.clone(),
-                    layer,
-                    name,
-                    false,
-                );
+                let mut base = crate::board::ItemBase::new(0, Vec::new(), keepout_cl);
+                base.clearance_class_explicit = explicit_clearance.is_some();
+                let mut item =
+                    crate::board::Item::new_obstacle_area(base, area.clone(), layer, name, false);
                 if kind == "via_keepout" {
                     if let crate::board::ItemKind::ObstacleArea(a) = &mut item.kind {
                         a.via_only = true;
@@ -1134,11 +2269,14 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     // class value, not blindly the default.
     let mut outline_from_signal = false;
     for boundary in structure.children("boundary") {
-        let boundary_cl = boundary
-            .child("clearance_class")
-            .and_then(|c| c.arg())
-            .map(|n| resolve_clearance_class(&mut board.rules, n))
-            .unwrap_or_else(BoardRules::default_clearance_class);
+        let explicit_boundary_cl =
+            explicit_clearance_class(&board.rules, boundary, "structure boundary")?;
+        let boundary_cl = match explicit_boundary_cl {
+            Some(class) => class,
+            None => board
+                .rules
+                .item_clearance_class_for(0, crate::rules::ItemClass::Area),
+        };
         let boundary_cl_value = board
             .rules
             .clearance_matrix
@@ -1156,6 +2294,7 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
         };
         if let Some(path) = boundary.child("path").or_else(|| boundary.child("polygon")) {
             let layer_token = path.arg().unwrap_or("").to_string();
+            keepout_layer_reference(&board.layer_structure, &layer_token, "structure boundary")?;
             let coords: Vec<f64> = path.args().skip(2).filter_map(|a| a.parse().ok()).collect();
             let corners: Vec<IntPoint> = coords
                 .chunks_exact(2)
@@ -1164,13 +2303,14 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
             keep_outline(&mut board, &corners, &layer_token, &mut outline_from_signal);
             // the strip width follows the boundary's RESOLVED clearance
             // value, not blindly the board default
-            insert_boundary_keepouts(&mut board, &corners, boundary_cl_value / 2, boundary_cl);
+            insert_boundary_keepouts(&mut board, &corners, boundary_cl_value);
         } else if let Some(rect) = boundary.child("rect") {
             // (boundary (rect <layer> x1 y1 x2 y2)): a rectangular outline.
             // Previously only `path` boundaries produced keepouts, so
             // rect-outline boards were unconfined and routes could escape the
             // board. Java reads `rect` as a first-class boundary shape.
             let layer_token = rect.arg().unwrap_or("").to_string();
+            keepout_layer_reference(&board.layer_structure, &layer_token, "structure boundary")?;
             let coords: Vec<f64> = rect.args().skip(1).filter_map(|a| a.parse().ok()).collect();
             if coords.len() >= 4 {
                 let (xmin, xmax) = (coords[0].min(coords[2]), coords[0].max(coords[2]));
@@ -1182,7 +2322,7 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                     IntPoint::new(scale(xmin), scale(ymax)),
                 ];
                 keep_outline(&mut board, &corners, &layer_token, &mut outline_from_signal);
-                insert_boundary_keepouts(&mut board, &corners, boundary_cl_value / 2, boundary_cl);
+                insert_boundary_keepouts(&mut board, &corners, boundary_cl_value);
             }
         }
     }
@@ -1200,14 +2340,26 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
         .and_then(|fs| fs.arg())
         .is_some_and(|v| v.eq_ignore_ascii_case("rotate_first"));
     let mut placed_padstacks: HashMap<(usize, i32, bool), usize> = HashMap::new();
+    // `ItemBase` stores a compact numeric component identity rather than the
+    // DSN refdes.  Allocate one identity per `(place ...)`, not one global
+    // sentinel: the KiCad writer groups pads by this field, so reusing `1`
+    // would collapse every footprint in a multi-component board into one
+    // component on round-trip.
+    let mut next_component_no = 1i32;
     for placement in pcb.children("placement") {
         for component in placement.children("component") {
-            let image_name = component.arg().unwrap_or_default();
-            let Some(image) = images.get(image_name) else {
-                continue;
-            };
+            let image_name = component
+                .arg()
+                .ok_or_else(|| err("placement component is missing its image name"))?;
+            let image = images.get(image_name).ok_or_else(|| {
+                err(format!(
+                    "placement component references unknown image {image_name:?}"
+                ))
+            })?;
             let image_pins = &image.pins;
             for place in component.children("place") {
+                let component_no = next_component_no;
+                next_component_no = next_component_no.saturating_add(1).max(1);
                 let args: Vec<&str> = place.args().collect();
                 if args.len() < 4 {
                     continue;
@@ -1232,19 +2384,34 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 };
                 // per-pin clearance-class overrides in the placement
                 // (Java Network.insert_component: `(pin N (clearance_class NAME))`)
-                let mut pin_overrides: HashMap<&str, &str> = HashMap::new();
+                let mut pin_overrides: HashMap<&str, usize> = HashMap::new();
                 for pin_node in place.children("pin") {
-                    if let (Some(pin_name), Some(cc)) = (
-                        pin_node.arg(),
-                        pin_node.child("clearance_class").and_then(|c| c.arg()),
-                    ) {
-                        pin_overrides.insert(pin_name, cc);
+                    let Some(pin_name) = pin_node.arg() else {
+                        continue;
+                    };
+                    if let Some(clearance_class) = explicit_clearance_class(
+                        &board.rules,
+                        pin_node,
+                        &format!("placement {refdes:?} pin {pin_name:?}"),
+                    )? {
+                        if pin_overrides.insert(pin_name, clearance_class).is_some() {
+                            return Err(err(format!(
+                                "placement {refdes:?} has duplicate clearance overrides for pin {pin_name:?}"
+                            )));
+                        }
                     }
                 }
                 for pin in image_pins {
-                    let Some(&padstack_no) = padstack_nos.get(&pin.padstack_name) else {
-                        continue;
-                    };
+                    let padstack_no = board
+                        .padstacks
+                        .get(&pin.padstack_name)
+                        .map(|padstack| padstack.no)
+                        .ok_or_else(|| {
+                            err(format!(
+                                "image {image_name:?} pin {:?} references unknown padstack {:?}",
+                                pin.pin_name, pin.padstack_name
+                            ))
+                        })?;
                     let padstack_no = if quarter != 0 || !on_front {
                         match placed_padstacks.get(&(padstack_no, quarter, on_front)) {
                             Some(&no) => no,
@@ -1277,7 +2444,16 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                                                 n - 1 - l,
                                             )
                                         };
-                                        shapes[target] = Some(s);
+                                        // TileShape transforms intentionally
+                                        // return a generic simplex, but the
+                                        // raw constructor does not sort or
+                                        // remove redundant borders. Normalize
+                                        // each placed variant before it enters
+                                        // the shared padstack library; without
+                                        // this, rotated/back pads can look
+                                        // two-dimensional while remaining
+                                        // unbounded to the search tree.
+                                        shapes[target] = Some(normalize_imported_tile_shape(s));
                                     }
                                     (
                                         format!(
@@ -1311,7 +2487,7 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                     }
                     let center = IntPoint::new(scale(x + dx), scale(y + dy));
                     let pin_ref = format!("{refdes}-{}", pin.pin_name);
-                    let net_nos = pin_nets.get(&pin_ref).map(|n| vec![*n]).unwrap_or_default();
+                    let net_nos = pin_nets.get(&pin_ref).cloned().unwrap_or_default();
                     let (attach_allowed, smd) = board
                         .padstacks
                         .get_by_no(padstack_no)
@@ -1325,8 +2501,9 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                     // (smd pad -> Smd, through-pin -> Pin), so a classed net's
                     // smd pad uses the class clearance while a plain net's smd
                     // pad stays on the tight smd class (#2).
-                    let clearance_class = match pin_overrides.get(pin.pin_name.as_str()) {
-                        Some(cc) => resolve_clearance_class(&mut board.rules, cc),
+                    let resolved_explicit = pin_overrides.get(pin.pin_name.as_str()).copied();
+                    let clearance_class = match resolved_explicit {
+                        Some(cc) => cc,
                         None => {
                             let item_class = if smd {
                                 crate::rules::ItemClass::Smd
@@ -1348,7 +2525,10 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                     );
                     // pins belong to their component: protected from ripup
                     // and not written to session files
-                    board.set_component_no(id, 1);
+                    board.set_component_no(id, component_no);
+                    if resolved_explicit.is_some() {
+                        board.set_item_clearance_class_explicit(id, true);
+                    }
                 }
                 // component keepouts (finding #1): instantiate each image
                 // keepout at this placement, transformed exactly like the pins
@@ -1376,8 +2556,11 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                         None => (0..layer_count).collect(),
                     };
                     for layer in layers {
+                        let mut base =
+                            crate::board::ItemBase::new(0, Vec::new(), ko.clearance_class);
+                        base.clearance_class_explicit = ko.clearance_class_explicit;
                         let mut item = crate::board::Item::new_obstacle_area(
-                            crate::board::ItemBase::new(0, Vec::new(), ko.clearance_class),
+                            base,
                             area.clone(),
                             layer,
                             "",
@@ -1408,30 +2591,46 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 Some(p) => (p, false),
                 None => match wire_node.child("polyline_path") {
                     Some(p) => (p, true),
-                    None => continue,
+                    None => return Err(err("wiring wire is missing a path")),
                 },
             };
-            let Some(layer) = path.arg().and_then(|n| board.layer_structure.get_no(n)) else {
-                continue;
-            };
-            let nums: Vec<f64> = path.args().skip(1).filter_map(|a| a.parse().ok()).collect();
-            if nums.len() < 5 {
-                continue;
+            let layer_name = path
+                .arg()
+                .ok_or_else(|| err("wiring path is missing its layer"))?;
+            let layer = board.layer_structure.get_no(layer_name).ok_or_else(|| {
+                err(format!(
+                    "wiring path references unknown layer {layer_name:?}"
+                ))
+            })?;
+            let raw_numbers: Vec<&str> = path.args().skip(1).collect();
+            if raw_numbers.len() < 5 || !(raw_numbers.len() - 1).is_multiple_of(2) {
+                return Err(err(
+                    "wiring path needs a width and at least two coordinate pairs",
+                ));
+            }
+            let nums: Vec<f64> = raw_numbers
+                .iter()
+                .map(|atom| {
+                    atom.parse::<f64>()
+                        .map_err(|_| err(format!("wiring path contains non-numeric atom {atom:?}")))
+                })
+                .collect::<Result<_, _>>()?;
+            if !nums[0].is_finite()
+                || nums[0] <= 0.0
+                || nums[1..].iter().any(|value| !value.is_finite())
+            {
+                return Err(err(
+                    "wiring path width and coordinates must be finite; width must be positive",
+                ));
+            }
+            if is_polyline_path && !(nums[1..].len()).is_multiple_of(4) {
+                return Err(err("wiring polyline_path needs groups of four coordinates"));
             }
             let half_width = (scale(nums[0]) / 2).max(1);
-            let net_nos = wire_node
-                .child("net")
-                .and_then(|n| n.arg())
-                .and_then(|name| {
-                    board
-                        .rules
-                        .nets
-                        .get_by_name(name)
-                        .first()
-                        .map(|n| n.net_number)
-                })
-                .map(|n| vec![n])
-                .unwrap_or_default();
+            let net_nos = match wire_node.child("net") {
+                Some(node) => net_numbers_for_reference(&board.rules, node).map_err(err)?,
+                None => Vec::new(),
+            };
             let fixed_state = wiring_fixed_state(wire_node);
             let polyline = if is_polyline_path {
                 let lines: Vec<crate::geometry::planar::Line> = nums[1..]
@@ -1451,58 +2650,91 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 crate::geometry::planar::Polyline::from_int_points(&corners)
             };
             if polyline.is_empty() {
+                // Legacy DSN writers emit zero-length protection segments.
+                // Their numeric payload is valid but carries no geometry;
+                // preserve Java's compatibility behavior by ignoring only
+                // this degenerate case (malformed atoms were rejected above).
                 continue;
             }
             // an explicit wiring-level (clearance_class ...) wins (Java
             // Wiring.read_wire_scope); otherwise the wire keeps its net's
             // clearance class, not the default
-            let clearance_class = wiring_clearance_class(&board, wire_node).unwrap_or_else(|| {
+            let explicit_clearance =
+                wiring_clearance_class(&board, wire_node, "wiring wire")?;
+            let clearance_class = explicit_clearance.unwrap_or_else(|| {
                 net_nos
                     .first()
                     .map(|&n| board.rules.get_trace_clearance_class(n))
                     .unwrap_or_else(BoardRules::default_clearance_class)
             });
             let id = board.insert_trace(polyline, layer, half_width, net_nos, clearance_class);
+            if explicit_clearance.is_some() {
+                board.set_item_clearance_class_explicit(id, true);
+            }
             board.set_fixed_state(id, fixed_state);
         }
         for via_node in wiring.children("via") {
             let args: Vec<&str> = via_node.args().collect();
-            if args.len() < 3 {
-                continue;
+            if args.len() != 3 {
+                return Err(err(
+                    "wiring via needs exactly a padstack name and x/y coordinates",
+                ));
             }
-            let Some(&padstack_no) = padstack_nos.get(args[0]) else {
-                continue;
+            let padstack_no = board
+                .padstacks
+                .get(args[0])
+                .map(|padstack| padstack.no)
+                .ok_or_else(|| {
+                    err(format!(
+                        "wiring via references unknown padstack {:?}",
+                        args[0]
+                    ))
+                })?;
+            let x = args[1]
+                .parse::<f64>()
+                .map_err(|_| err("wiring via x coordinate is not numeric"))?;
+            let y = args[2]
+                .parse::<f64>()
+                .map_err(|_| err("wiring via y coordinate is not numeric"))?;
+            if !x.is_finite() || !y.is_finite() {
+                return Err(err("wiring via coordinates must be finite"));
+            }
+            let net_nos = match via_node.child("net") {
+                Some(node) => net_numbers_for_reference(&board.rules, node).map_err(err)?,
+                None => Vec::new(),
             };
-            let (Ok(x), Ok(y)) = (args[1].parse::<f64>(), args[2].parse::<f64>()) else {
-                continue;
-            };
-            let net_nos = via_node
-                .child("net")
-                .and_then(|n| n.arg())
-                .and_then(|name| {
-                    board
-                        .rules
-                        .nets
-                        .get_by_name(name)
-                        .first()
-                        .map(|n| n.net_number)
-                })
-                .map(|n| vec![n])
-                .unwrap_or_default();
             let fixed_state = wiring_fixed_state(via_node);
-            let clearance_class = wiring_clearance_class(&board, via_node).unwrap_or_else(|| {
+            let explicit_clearance =
+                wiring_clearance_class(&board, via_node, "wiring via")?;
+            let clearance_class = explicit_clearance.unwrap_or_else(|| {
                 net_nos
                     .first()
-                    .map(|&n| board.rules.get_trace_clearance_class(n))
+                    .map(
+                        |&n| match board.rules.via_clearance_class_for_padstack(n, padstack_no) {
+                            Some(0) => board.rules.get_trace_clearance_class(n),
+                            Some(class) => class,
+                            None => board
+                                .rules
+                                .item_clearance_class_for(n, crate::rules::ItemClass::Via),
+                        },
+                    )
                     .unwrap_or_else(BoardRules::default_clearance_class)
             });
-            // Java Wiring.read_via_scope: attach_allowed =
-            // via_at_smd_allowed && padstack.attach_allowed
-            let attach = board.rules.via_at_smd_allowed
-                && board
-                    .padstacks
-                    .get_by_no(padstack_no)
-                    .is_some_and(|p| p.attach_allowed);
+            // A bound ViaInfo is the authoritative attach rule for this net
+            // and padstack. Falling back to the board/padstack defaults is
+            // only for legacy designs without a named ViaInfo; otherwise an
+            // attach-off class silently reloads as attach-on copper.
+            let attach = net_nos
+                .first()
+                .and_then(|&net| board.rules.via_info_for_padstack(net, padstack_no))
+                .map(|info| info.attach_smd_allowed())
+                .unwrap_or_else(|| {
+                    board.rules.via_at_smd_allowed
+                        && board
+                            .padstacks
+                            .get_by_no(padstack_no)
+                            .is_some_and(|p| p.attach_allowed)
+                });
             let id = board.insert_via(
                 padstack_no,
                 IntPoint::new(scale(x), scale(y)),
@@ -1510,6 +2742,9 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                 clearance_class,
                 attach,
             );
+            if explicit_clearance.is_some() {
+                board.set_item_clearance_class_explicit(id, true);
+            }
             board.set_fixed_state(id, fixed_state);
         }
     }
@@ -1526,6 +2761,9 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
     for id in via_ids {
         board.split_traces_at_via(id);
     }
+    if let Some(error) = scale_error.into_inner() {
+        return Err(err(error));
+    }
     Ok(board)
 }
 
@@ -1536,14 +2774,45 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
 pub(crate) fn insert_boundary_keepouts(
     board: &mut BasicBoard,
     corners: &[IntPoint],
-    half_width: i32,
-    clearance_class: usize,
+    desired_clearance: i32,
 ) {
     use crate::geometry::planar::{PolygonShape, PolylineArea};
     if corners.len() < 2 {
         return;
     }
-    let half_width = half_width.max(1);
+    // Keep the synthetic geometry close to a zero-width outline and carry the
+    // requested copper-to-edge distance in its matrix row.  The old code used
+    // half the requested clearance as strip geometry *and* the full value in
+    // the matrix, enforcing 1.5x the configured spacing and disagreeing with
+    // the final DRC near custom-clearance outlines.
+    const GEOMETRY_HALF_WIDTH: i32 = 1;
+    let desired_clearance = desired_clearance.max(0);
+    let matrix_clearance = desired_clearance.saturating_sub(2 * GEOMETRY_HALF_WIDTH);
+    let mut class_name = "__boundary_geometry".to_string();
+    let mut suffix = 2usize;
+    while board.rules.clearance_matrix.get_no(&class_name).is_some() {
+        class_name = format!("__boundary_geometry_{suffix}");
+        suffix += 1;
+    }
+    board.rules.clearance_matrix.append_class(&class_name);
+    let clearance_class = board
+        .rules
+        .clearance_matrix
+        .get_no(&class_name)
+        .unwrap_or_else(BoardRules::default_clearance_class);
+    let class_count = board.rules.clearance_matrix.get_class_count();
+    for other in 1..class_count {
+        board.rules.clearance_matrix.set_value_on_all_layers(
+            clearance_class,
+            other,
+            matrix_clearance,
+        );
+        board.rules.clearance_matrix.set_value_on_all_layers(
+            other,
+            clearance_class,
+            matrix_clearance,
+        );
+    }
     let layer_count = board.layer_structure.layer_count();
     let mut edges: Vec<(IntPoint, IntPoint)> = corners
         .windows(2)
@@ -1557,8 +2826,8 @@ pub(crate) fn insert_boundary_keepouts(
     for (a, b) in edges {
         // a thin rectangle strip around the edge
         let line = crate::geometry::planar::FloatLine::new(a.to_float(), b.to_float());
-        let left = line.translate(half_width as f64);
-        let right = line.translate(-(half_width as f64));
+        let left = line.translate(GEOMETRY_HALF_WIDTH as f64);
+        let right = line.translate(-(GEOMETRY_HALF_WIDTH as f64));
         let strip = PolygonShape::from_int_points(&[
             left.a.round(),
             left.b.round(),
@@ -1570,7 +2839,7 @@ pub(crate) fn insert_boundary_keepouts(
         }
         let area = PolylineArea::new(strip, vec![]);
         for layer in 0..layer_count {
-            board.insert_area(
+            let id = board.insert_area(
                 area.clone(),
                 layer,
                 "boundary",
@@ -1578,6 +2847,8 @@ pub(crate) fn insert_boundary_keepouts(
                 clearance_class,
                 false,
             );
+            board.set_item_clearance_class_explicit(id, false);
+            board.set_fixed_state(id, crate::board::FixedState::SystemFixed);
         }
     }
 }
@@ -1598,6 +2869,12 @@ fn keepout_corners(
     };
     if kind.eq_ignore_ascii_case("polygon") {
         // (polygon LAYER aperture x1 y1 ...)
+        // A malformed keepout such as `(polygon F.Cu)` has no aperture or
+        // coordinates.  Treat it as an unusable shape instead of slicing an
+        // empty vector and panicking during import.
+        if nums.len() < 3 {
+            return Vec::new();
+        }
         nums[1..]
             .chunks_exact(2)
             .map(|c| Point::Int(IntPoint::new(scale(c[0]), scale(c[1]))))
@@ -1663,11 +2940,13 @@ fn read_pad_shape(node: &SExpr, scale: &dyn Fn(f64) -> i32) -> Option<(TileShape
         if nums.len() < 4 {
             return None;
         }
+        let (x0, x1) = non_degenerate_bounds(scale(nums[0]), scale(nums[2]));
+        let (y0, y1) = non_degenerate_bounds(scale(nums[1]), scale(nums[3]));
         TileShape::Box(IntBox::from_coords(
-            scale(nums[0].min(nums[2])),
-            scale(nums[1].min(nums[3])),
-            scale(nums[0].max(nums[2])),
-            scale(nums[1].max(nums[3])),
+            x0.min(x1),
+            y0.min(y1),
+            x0.max(x1),
+            y0.max(y1),
         ))
     } else if kind.eq_ignore_ascii_case("path") {
         // (path LAYER width x1 y1 x2 y2 ...): an oval / thick segment,
@@ -1690,7 +2969,11 @@ fn read_pad_shape(node: &SExpr, scale: &dyn Fn(f64) -> i32) -> Option<(TileShape
                 None => o,
             });
         }
-        TileShape::Octagon(oct?)
+        // Unions of octagons can leave redundant diagonal bounds that make
+        // the raw intersection appear one-dimensional even though the
+        // stroked path has area. Normalize after the union so tiny/zero-length
+        // DSN paths remain valid two-dimensional pad geometry.
+        TileShape::Octagon(oct?.normalize())
     } else if kind.eq_ignore_ascii_case("polygon") {
         // (polygon LAYER aperture x1 y1 ...): bounding box approximation
         if nums.len() < 5 {
@@ -1698,11 +2981,19 @@ fn read_pad_shape(node: &SExpr, scale: &dyn Fn(f64) -> i32) -> Option<(TileShape
         }
         let xs: Vec<f64> = nums[1..].iter().step_by(2).copied().collect();
         let ys: Vec<f64> = nums[2..].iter().step_by(2).copied().collect();
-        TileShape::Box(IntBox::from_coords(
+        let (x0, x1) = non_degenerate_bounds(
             scale(xs.iter().cloned().fold(f64::MAX, f64::min)),
-            scale(ys.iter().cloned().fold(f64::MAX, f64::min)),
             scale(xs.iter().cloned().fold(f64::MIN, f64::max)),
+        );
+        let (y0, y1) = non_degenerate_bounds(
+            scale(ys.iter().cloned().fold(f64::MAX, f64::min)),
             scale(ys.iter().cloned().fold(f64::MIN, f64::max)),
+        );
+        TileShape::Box(IntBox::from_coords(
+            x0.min(x1),
+            y0.min(y1),
+            x0.max(x1),
+            y0.max(y1),
         ))
     } else {
         return None;
@@ -1710,9 +3001,206 @@ fn read_pad_shape(node: &SExpr, scale: &dyn Fn(f64) -> i32) -> Option<(TileShape
     Some((shape, layer_name))
 }
 
+/// Preserve a minimum two-dimensional footprint when a very small DSN shape
+/// rounds to a zero-width integer interval at the board resolution. A one
+/// board-unit half expansion is the same minimum used for circles/paths and
+/// avoids silently turning a physical pad into a line or point.
+fn non_degenerate_bounds(a: i32, b: i32) -> (i32, i32) {
+    if a != b {
+        return (a, b);
+    }
+    (a.saturating_sub(1), b.saturating_add(1))
+}
+
+/// Canonicalizes a shape produced by a component placement transform.
+/// `TileShape::turn_90_degree` and `mirror_vertical` preserve the boundary
+/// lines but intentionally construct a raw simplex; sorting and removing
+/// redundant borders is required before boundedness/dimension queries are
+/// meaningful.
+fn normalize_imported_tile_shape(shape: TileShape) -> TileShape {
+    match shape {
+        TileShape::Box(box_shape) => TileShape::Box(box_shape),
+        TileShape::Octagon(octagon) => TileShape::Octagon(octagon.normalize()),
+        TileShape::Simplex(simplex) => TileShape::get_instance(simplex.border_lines().to_vec()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn resolution_design(declaration: &str) -> String {
+        format!(
+            r#"(pcb "resolution.dsn"
+  {declaration}
+  (structure
+    (layer F.Cu (type signal))
+    (boundary (rect pcb 0 0 1000 1000))
+    (rule (width 20) (clearance 20)))
+  (placement)
+  (library)
+  (network))"#
+        )
+    }
+
+    #[test]
+    fn resolution_metadata_is_validated_before_scaling_the_board() {
+        let omitted =
+            import_dsn(&resolution_design("")).expect("omitted resolution uses DSN default");
+        assert_eq!(omitted.unit, "um");
+        assert_eq!(omitted.resolution, 1);
+
+        let integral_decimal = import_dsn(&resolution_design("(resolution MIL 10.0)"))
+            .expect("an integral numeric spelling is lossless");
+        assert_eq!(integral_decimal.unit, "MIL");
+        assert_eq!(integral_decimal.resolution, 10);
+
+        for (declaration, expected) in [
+            ("(resolution parsec 10)", "unsupported resolution unit"),
+            ("(resolution)", "missing its physical unit"),
+            ("(resolution um)", "missing its numeric value"),
+            ("(resolution um 10 extra)", "exactly a unit and a value"),
+            ("(resolution um not-a-number)", "is not numeric"),
+            ("(resolution um NaN)", "finite and positive"),
+            ("(resolution um inf)", "finite and positive"),
+            ("(resolution um 0)", "finite and positive"),
+            ("(resolution um -1)", "finite and positive"),
+            ("(resolution um 1.5)", "must be an integer"),
+            (
+                "(resolution um 2147483648)",
+                "exceeds the board coordinate limit",
+            ),
+        ] {
+            let error = import_dsn(&resolution_design(declaration))
+                .expect_err("invalid resolution metadata must fail closed")
+                .to_string();
+            assert!(
+                error.contains(expected),
+                "{declaration} produced unexpected error: {error}"
+            );
+        }
+
+        let duplicate = resolution_design("(resolution um 10) (resolution mil 10)");
+        let error = import_dsn(&duplicate)
+            .expect_err("duplicate resolution scopes must not pick one implicitly")
+            .to_string();
+        assert!(
+            error.contains("more than one resolution declaration"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn scaled_geometry_outside_board_integer_range_is_rejected() {
+        let dsn = resolution_design("(resolution um 10)").replace(
+            "(boundary (rect pcb 0 0 1000 1000))",
+            "(boundary (rect pcb 0 0 300000000 1000))",
+        );
+        let error = import_dsn(&dsn)
+            .expect_err("scaled coordinates must not saturate into a valid board")
+            .to_string();
+        assert!(
+            error.contains("does not fit the board coordinate range"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn completed_dsn_graph_is_validated_before_exposure() {
+        let duplicate_layers = resolution_design("").replace(
+            "(layer F.Cu (type signal))",
+            "(layer F.Cu (type signal)) (layer f.cu (type signal))",
+        );
+        let error = import_dsn(&duplicate_layers)
+            .expect_err("duplicate layer identities must not escape the importer")
+            .to_string();
+        assert!(error.contains("layers[1].name"), "{error}");
+
+        let empty_padstack =
+            resolution_design("").replace("(library)", "(library (padstack \"empty\"))");
+        let error = import_dsn(&empty_padstack)
+            .expect_err("an empty padstack must not escape the importer")
+            .to_string();
+        assert!(error.contains("padstacks[1].shapes"), "{error}");
+    }
+
+    #[test]
+    fn malformed_known_numeric_scopes_fail_instead_of_defaulting_or_skipping() {
+        for (dsn, expected) in [
+            (
+                resolution_design("").replace("(width 20)", "(width nope)"),
+                "width contains non-numeric atom",
+            ),
+            (
+                resolution_design("").replace(
+                    "(boundary (rect pcb 0 0 1000 1000))",
+                    "(boundary (rect pcb 0 nope 1000 1000))",
+                ),
+                "rect contains non-numeric atom",
+            ),
+            (
+                resolution_design("").replace(
+                    "(library)",
+                    "(library (padstack P\n  (shape (rect F.Cu -10 -10 10 10))\n  (shape (rect F.Cu -10 bad 10 10))))",
+                ),
+                "shape contains non-numeric atom",
+            ),
+            (
+                resolution_design("").replace("(network)", "(network (net N1 nope))"),
+                "subnet \"nope\" is not an integer",
+            ),
+        ] {
+            let error = import_dsn(&dsn)
+                .expect_err("malformed known numeric scope must fail closed")
+                .to_string();
+            assert!(error.contains(expected), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn normalizes_tiny_line_like_pad_shapes_to_area() {
+        let scale = |value: f64| value.round() as i32;
+        let polygon = parse_dsn("(polygon F.Cu 0 0 -3.5 0 3.5)").expect("polygon");
+        let shape = read_pad_shape(&polygon, &scale).expect("polygon shape").0;
+        assert_eq!(shape.dimension(), 2);
+        assert!(!shape.is_empty());
+
+        let path = parse_dsn("(path F.Cu 1 0 0 0 0)").expect("path");
+        let shape = read_pad_shape(&path, &scale).expect("path shape").0;
+        assert_eq!(shape.dimension(), 2);
+        assert!(!shape.is_empty());
+    }
+
+    #[test]
+    fn repeated_structure_widths_are_applied_in_document_order() {
+        let dsn = r#"(pcb "width-order.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal)
+      (rule (width 300) (width 500)))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb 0 0 50000 50000))
+    (rule (width 100) (width 400) (clearance 200))
+  )
+  (placement)
+  (library)
+  (network
+    (net "N1")
+    (class "C" "N1"
+      (rule (width 600) (width 800))
+      (layer_rule F.Cu (rule (width 700) (width 900)))))
+)"#;
+        let board = import_dsn(dsn).expect("import");
+        let default = board.rules.net_classes.get(0);
+        assert_eq!(default.get_trace_half_width(0), 2500);
+        assert_eq!(default.get_trace_half_width(1), 2000);
+        let class = board
+            .rules
+            .net_classes
+            .get(board.rules.net_classes.get_by_name("C").expect("class C"));
+        assert_eq!(class.get_trace_half_width(0), 4500);
+        assert_eq!(class.get_trace_half_width(1), 4000);
+    }
 
     #[test]
     fn outline_prefers_the_signal_boundary() {
@@ -1775,6 +3263,40 @@ mod tests {
     }
 
     #[test]
+    fn wiring_surgery_honors_quoted_parentheses_and_trailing_comments() {
+        let dsn = r#"(pcb "quoted.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (rule (width 200) (clearance 200))
+  )
+  (placement)
+  (library)
+  (network (net " )rail") (net ' (return)'))
+  (wiring
+    (wire (path F.Cu 400 10000 10000 20000 10000) (net " )rail") (type route))
+    (wire (path F.Cu 400 10000 20000 20000 20000) (net ' (return)') (type route))
+  )
+)
+# a trailing comment may contain a misleading close: )
+"#;
+        let board = import_dsn(dsn).expect("import");
+        let trace_count = |candidate: &BasicBoard| {
+            candidate
+                .items()
+                .filter(|(_, item)| matches!(item.kind, crate::board::ItemKind::PolylineTrace(_)))
+                .count()
+        };
+        assert_eq!(trace_count(&board), 2);
+        let out = crate::io::dsn_export::export_dsn(&board).expect("export");
+        let reloaded = import_dsn(&out).expect("re-import");
+        assert_eq!(trace_count(&reloaded), 2);
+        assert!(!reloaded.rules.nets.get_by_name(" )rail").is_empty());
+        assert!(!reloaded.rules.nets.get_by_name(" (return)").is_empty());
+    }
+
+    #[test]
     fn single_quoted_class_members_join_their_class() {
         // Issue721 shape: (class GND 'GND' ...) — the single-quoted member
         // must resolve to the net, not remain a 'GND' atom in no class
@@ -1823,6 +3345,7 @@ mod tests {
     (wire (path F.Cu 400 10000 20000 20000 20000) (net "N1") (type protect))
     (wire (path F.Cu 400 10000 30000 20000 30000) (net "N1") (type fix))
     (wire (path F.Cu 400 10000 40000 20000 40000) (net "N1") (type route))
+    (wire (path F.Cu 400 10000 50000 20000 50000) (net "N1"))
   )
 )"#;
         let states = |b: &BasicBoard| -> Vec<crate::board::FixedState> {
@@ -1838,7 +3361,7 @@ mod tests {
         use crate::board::FixedState::*;
         assert_eq!(
             states(&board),
-            vec![Unfixed, ShoveFixed, UserFixed, SystemFixed]
+            vec![Unfixed, ShoveFixed, UserFixed, UserFixed, SystemFixed]
         );
         let out = crate::io::dsn_export::export_dsn(&board).expect("export");
         let board2 = import_dsn(&out).expect("re-import");
@@ -1909,7 +3432,8 @@ mod tests {
     fn class_use_layer_and_shove_fixed_are_imported() {
         // (circuit (use_layer ...)) leaves ONLY the listed layers active and
         // zeroes the width on inactive layers (Java
-        // Network.create_active_trace_layers); (shove_fixed on) is recorded
+        // Network.create_active_trace_layers); the remaining class state is
+        // read from the same standard scopes used by `.rules` sidecars.
         let dsn = r#"(pcb "ul.dsn"
   (resolution um 10)
   (structure
@@ -1923,8 +3447,9 @@ mod tests {
   (network
     (net "TOP1")
     (class toponly "TOP1"
-      (circuit (use_layer F.Cu))
+      (circuit (use_layer F.Cu) (length 987.6 123.4))
       (shove_fixed on)
+      (pull_tight off)
       (rule (width 300) (clearance 200))
     )
   )
@@ -1941,6 +3466,9 @@ mod tests {
         );
         assert!(class.get_trace_half_width(0) > 0);
         assert!(class.is_shove_fixed(), "(shove_fixed on) must be recorded");
+        assert!(!class.get_pull_tight(), "(pull_tight off) must be recorded");
+        assert_eq!(class.get_minimum_trace_length(), 1234.0);
+        assert_eq!(class.get_maximum_trace_length(), 9876.0);
         let n = net.net_number;
         assert!(board.rules.is_active_routing_layer(n, 0));
         assert!(!board.rules.is_active_routing_layer(n, 1));
@@ -2027,7 +3555,9 @@ mod tests {
     (layer F.Cu (type signal))
     (layer B.Cu (type signal))
     (boundary (rect pcb 0 0 100000 100000))
-    (keepout "cutout" (polygon F.Cu 0 40000 40000 60000 40000 60000 60000 40000 60000))
+    (keepout "cutout"
+      (polygon F.Cu 0 40000 40000 60000 40000 60000 60000 40000 60000)
+      (clearance_class strict))
     (via_keepout (rect signal 10000 10000 20000 20000))
     (rule (width 200) (clearance 200))
   )
@@ -2058,6 +3588,17 @@ mod tests {
             2,
             "via keepout on both signal layers"
         );
+        let cutout = board
+            .items()
+            .find(|(_, item)| {
+                matches!(&item.kind, ItemKind::ObstacleArea(area) if area.name == "cutout")
+            })
+            .map(|(_, item)| item)
+            .expect("named keepout");
+        assert!(
+            cutout.base.clearance_class_explicit,
+            "an explicit keepout class must remain pinned during sidecar reconciliation"
+        );
         // the rect boundary must produce confining keepout strips (previously
         // only `path` boundaries did, leaving rect-outline boards unconfined)
         let boundary_strips = board
@@ -2068,6 +3609,28 @@ mod tests {
             boundary_strips > 0,
             "rect boundary must produce confining keepouts"
         );
+    }
+
+    #[test]
+    fn malformed_polygon_keepout_is_ignored_without_panicking() {
+        let dsn = r#"(pcb "malformed-keepout.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (keepout "broken" (polygon F.Cu))
+    (rule (width 200) (clearance 200))
+  )
+  (placement)
+  (library)
+  (network (net "N1"))
+)"#;
+        let board = import_dsn(dsn).expect("malformed keepout should not abort the board");
+        assert!(!board.items().any(|(_, item)| {
+            matches!(&item.kind, crate::board::ItemKind::ObstacleArea(area)
+                if area.name == "broken")
+        }));
     }
 
     #[test]
@@ -2325,6 +3888,49 @@ mod tests {
     }
 
     #[test]
+    fn prerouted_via_uses_bound_via_info_attach_rule() {
+        let dsn = r#"(pcb "attach.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb 0 0 200000 200000))
+    (control (via_at_smd on))
+    (rule (width 200) (clearance 200))
+  )
+  (placement)
+  (library
+    (padstack "Via1"
+      (shape (circle F.Cu 600 0 0))
+      (shape (circle B.Cu 600 0 0))
+      (attach on)
+    )
+  )
+  (network
+    (net "N")
+    (via "NoAttach" "Via1" default)
+    (via_rule "StrictVias" "NoAttach")
+    (class "strict" "N" (via_rule "StrictVias"))
+  )
+  (wiring
+    (via "Via1" 1000 1000 (net "N") (type route))
+  )
+)"#;
+        let board = import_dsn(dsn).expect("import");
+        let route_via = board
+            .items()
+            .find_map(|(_, item)| match &item.kind {
+                crate::board::ItemKind::Via(via) if item.base.component_no == 0 => Some(via),
+                _ => None,
+            })
+            .expect("pre-routed via");
+        assert!(
+            !route_via.attach_allowed,
+            "the selected ViaInfo must override the permissive global and padstack defaults"
+        );
+    }
+
+    #[test]
     fn imports_real_fixture() {
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
         let path = format!("{root}/fixtures/Issue093-interf_u.dsn");
@@ -2384,6 +3990,63 @@ mod tests {
         // but the interior is free
         let inside = TileShape::Box(IntBox::from_coords(1500000, -800000, 1500200, -799800));
         assert!(!board.is_blocked(&inside, 0, 1));
+    }
+
+    #[test]
+    fn preserves_subnets_fromto_groups_and_wiring_references() {
+        let dsn = r#"(pcb "subnets.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (rule (width 200) (clearance 200))
+  )
+  (placement)
+  (library)
+  (network
+    (net "GND" 2
+      (fromto A-1 B-1)
+      (fromto B-1 C-1))
+  )
+  (wiring
+    (wire (path F.Cu 200 1000 1000 2000 1000) (net "GND" 3)))
+)"#;
+        let board = import_dsn(dsn).expect("subnet design imports");
+        assert!(board.rules.nets.get("GND", 1).is_none());
+        let subnet2 = board.rules.nets.get("GND", 2).expect("first fromto subnet");
+        let subnet3 = board
+            .rules
+            .nets
+            .get("GND", 3)
+            .expect("second fromto subnet");
+        let routed = board
+            .items()
+            .find_map(|(_, item)| match &item.kind {
+                crate::board::ItemKind::PolylineTrace(_) => Some(item),
+                _ => None,
+            })
+            .expect("subnet wiring");
+        assert_eq!(routed.base.net_nos, vec![subnet3.net_number]);
+
+        let exported = crate::io::dsn_export::export_dsn(&board).expect("export");
+        assert!(
+            exported.contains("(net \"GND\" 3)"),
+            "wiring references must retain the subnet number"
+        );
+        let reloaded = import_dsn(&exported).expect("re-import");
+        let reloaded_trace = reloaded
+            .items()
+            .find_map(|(_, item)| match &item.kind {
+                crate::board::ItemKind::PolylineTrace(_) => Some(item),
+                _ => None,
+            })
+            .expect("reloaded subnet wiring");
+        assert_eq!(
+            reloaded_trace.base.net_nos,
+            vec![reloaded.rules.nets.get("GND", 3).unwrap().net_number]
+        );
+        assert_eq!(subnet2.subnet_number, 2);
     }
 
     #[test]
@@ -2462,6 +4125,250 @@ mod tests {
             .collect();
         assert!(traces.len() > 1900, "only {} wires imported", traces.len());
         assert!(traces.iter().all(|(_, i)| i.base.net_count() > 0));
+    }
+
+    #[test]
+    fn class_scoped_same_net_clearance_reaches_drc_table_once() {
+        use crate::rules::ItemClass;
+        let dsn = r#"(pcb "same-net.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (rule (width 200) (clearance 200))
+  )
+  (placement)
+  (library)
+  (network
+    (net "N1")
+    (class strict "N1"
+      (rule (clearance 70 (type via_via_same_net))))
+  )
+)"#;
+        let board = import_dsn(dsn).expect("import");
+        assert_eq!(
+            board
+                .rules
+                .get_same_net_clearance(ItemClass::Via, ItemClass::Via),
+            Some(700),
+            "class-scoped via_via_same_net must be applied"
+        );
+        assert!(
+            board
+                .rules
+                .clearance_matrix
+                .get_no("via_via_same_net")
+                .is_none(),
+            "special same-net token must not create a matrix class"
+        );
+    }
+
+    #[test]
+    fn class_pairs_are_resolved_after_all_network_classes() {
+        let dsn = r#"(pcb "cross-network-class-pair.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (rule (width 200) (clearance 200))
+  )
+  (placement)
+  (library)
+  (network
+    (net "N1")
+    (class A "N1" (rule (clearance 300)))
+    (class_class (classes A B) (rule (clearance 900)))
+  )
+  (network
+    (net "N2")
+    (class B "N2" (rule (clearance 400)))
+  )
+)"#;
+        let board = import_dsn(dsn).expect("import");
+        let a = board.rules.clearance_matrix.get_no("A").expect("A class");
+        let b = board.rules.clearance_matrix.get_no("B").expect("B class");
+        assert_eq!(
+            board.rules.clearance_matrix.get_value(a, b, 0, false),
+            9000,
+            "class_class must see classes declared in a later network"
+        );
+    }
+
+    #[test]
+    fn mixed_wire_clearance_does_not_rebind_net_class_trace_classes() {
+        let dsn = r#"(pcb "mixed-wire.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (rule
+      (width 200)
+      (clearance 200)
+      (clearance 250 (type base_a_base_a))
+      (clearance 350 (type base_b_base_b))
+    )
+  )
+  (placement)
+  (library)
+  (network
+    (net "N1")
+    (class A "N1" (clearance_class base_a))
+    (net "N2")
+    (class B "N2" (clearance_class base_b))
+    (class_class (classes A B) (rule (clearance 900 (type wire_wire))))
+  )
+)"#;
+        let board = import_dsn(dsn).expect("import");
+        let base_a = board
+            .rules
+            .clearance_matrix
+            .get_no("base_a")
+            .expect("base_a class");
+        let base_b = board
+            .rules
+            .clearance_matrix
+            .get_no("base_b")
+            .expect("base_b class");
+        let n1 = board.rules.nets.get_by_name("N1")[0].net_number;
+        let n2 = board.rules.nets.get_by_name("N2")[0].net_number;
+        assert_eq!(
+            board.rules.get_trace_clearance_class(n1),
+            base_a,
+            "mixed wire rule must not rebind class A's trace clearance"
+        );
+        assert_eq!(
+            board.rules.get_trace_clearance_class(n2),
+            base_b,
+            "mixed wire rule must not rebind class B's trace clearance"
+        );
+        let a = board.rules.clearance_matrix.get_no("A").expect("A class");
+        let b = board.rules.clearance_matrix.get_no("B").expect("B class");
+        assert_eq!(
+            board.rules.clearance_matrix.get_value(a, b, 0, false),
+            9000,
+            "mixed wire pair must still update its matrix endpoints"
+        );
+    }
+
+    #[test]
+    fn typed_class_clearance_precedes_clearance_class_reference() {
+        let dsn = r#"(pcb "typed-class-reference.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (rule
+      (width 200)
+      (clearance 200)
+      (clearance 250 (type base_base))
+    )
+  )
+  (placement)
+  (library)
+  (network
+    (net "N1")
+    (class C "N1"
+      (clearance_class base)
+      (rule (clearance 300 (type smd_to_turn_gap)))
+    )
+  )
+)"#;
+        let board = import_dsn(dsn).expect("import");
+        let net = board.rules.nets.get_by_name("N1")[0].net_number;
+        let trace_class = board.rules.get_trace_clearance_class(net);
+        let class_column = board
+            .rules
+            .clearance_matrix
+            .get_no("C")
+            .expect("typed class column");
+        let referenced = board
+            .rules
+            .clearance_matrix
+            .get_no("base")
+            .expect("referenced class column");
+        assert_eq!(trace_class, class_column);
+        assert_ne!(
+            trace_class, referenced,
+            "an inline typed rule must outrank the class-level reference"
+        );
+        assert_eq!(board.rules.get_pin_edge_to_turn_dist(), 3000.0);
+    }
+
+    #[test]
+    fn network_via_padstack_lookup_is_case_insensitive() {
+        let dsn = r#"(pcb "via-case.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (rule (width 200) (clearance 200))
+  )
+  (placement)
+  (library
+    (padstack "ViaPad" (shape (circle F.Cu 600 0 0)) (shape (circle B.Cu 600 0 0)))
+  )
+  (network
+    (net "N1")
+    (via "V1" "viapad" default)
+    (via_rule "VR" "V1")
+    (class C "N1" (via_rule "VR"))
+  )
+)"#;
+        let board = import_dsn(dsn).expect("import");
+        let info = board
+            .rules
+            .via_infos
+            .get_by_name("V1")
+            .expect("via declaration must bind despite case difference");
+        let padstack = board
+            .padstacks
+            .get_by_no(board.rules.via_infos.get(info).get_padstack())
+            .expect("resolved padstack");
+        assert_eq!(padstack.name, "ViaPad");
+        let class = board.rules.net_classes.get_by_name("C").expect("class C");
+        assert!(board.rules.net_classes.get(class).get_via_rule().is_some());
+    }
+
+    #[test]
+    fn untyped_class_clearance_sets_self_exactly_and_cross_pairs_by_max() {
+        let dsn = r#"(pcb "class-clearance-order.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (rule (width 200) (clearance 200))
+  )
+  (placement)
+  (library)
+  (network
+    (net "N1")
+    (class A "N1"
+      (rule (clearance 1200 (type wire_via)))
+      (rule (clearance 500)))
+  )
+)"#;
+        let board = import_dsn(dsn).expect("import");
+        let a = board.rules.clearance_matrix.get_no("A").expect("A class");
+        let via = board
+            .rules
+            .clearance_matrix
+            .get_no("A-via")
+            .expect("A-via class");
+        assert_eq!(
+            board.rules.clearance_matrix.get_value(a, a, 0, false),
+            5000,
+            "the later untyped class clearance must set its own cell exactly"
+        );
+        assert_eq!(
+            board.rules.clearance_matrix.get_value(a, via, 0, false),
+            12000,
+            "a stricter existing cross-pair must not be weakened"
+        );
     }
 
     #[test]

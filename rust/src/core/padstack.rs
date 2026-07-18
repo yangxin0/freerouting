@@ -49,6 +49,18 @@ impl Padstack {
         self.shapes.get(layer).and_then(|s| s.as_ref())
     }
 
+    /// Returns whether copper pads exist at both ends of a via transition.
+    /// A plated barrel may cross an intermediate layer without an annular
+    /// pad there; that layer simply cannot be a route endpoint.
+    pub fn has_shapes_at_transition_endpoints(&self, from_layer: usize, to_layer: usize) -> bool {
+        let low = from_layer.min(to_layer);
+        let high = from_layer.max(to_layer);
+        low <= high
+            && high < self.shapes.len()
+            && self.get_shape(low).is_some()
+            && self.get_shape(high).is_some()
+    }
+
     /// The first layer with a shape.
     pub fn from_layer(&self) -> usize {
         self.shapes

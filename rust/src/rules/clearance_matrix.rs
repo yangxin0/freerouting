@@ -100,6 +100,11 @@ impl ClearanceMatrix {
         self.layer_structure.layer_count()
     }
 
+    /// The physical layer identity backing each matrix layer index.
+    pub fn layer_structure(&self) -> &LayerStructure {
+        &self.layer_structure
+    }
+
     /// Sets the value of all clearance classes with number >= 1 to `value`
     /// on all layers.
     pub fn set_default_value(&mut self, value: i32) {
@@ -162,7 +167,10 @@ impl ClearanceMatrix {
             return 0;
         };
         if add_safety_margin {
-            value + CLEARANCE_SAFETY_MARGIN
+            // A valid matrix may approach i32::MAX.  Keep the conservative
+            // safety margin finite instead of wrapping (or panicking in a
+            // debug build) when it is added at the representable limit.
+            value.saturating_add(CLEARANCE_SAFETY_MARGIN)
         } else {
             *value
         }
@@ -203,7 +211,9 @@ impl ClearanceMatrix {
     /// The clearance compensation value of `clearance_class_no` on `layer`:
     /// half the clearance of the class to itself.
     pub fn clearance_compensation_value(&self, clearance_class_no: usize, layer: usize) -> i32 {
-        (self.get_value(clearance_class_no, clearance_class_no, layer, false) + 1) / 2
+        self.get_value(clearance_class_no, clearance_class_no, layer, false)
+            .saturating_add(1)
+            / 2
     }
 
     /// Appends a new clearance class initialized with the values of the
@@ -296,6 +306,22 @@ mod tests {
         assert_eq!(m.get_value(1, 1, 0, false), 0);
         m.set_value(1, 1, 0, i32::MAX);
         assert_eq!(m.get_value(1, 1, 0, false), i32::MAX - 1);
+    }
+
+    #[test]
+    fn large_clearances_do_not_overflow_safety_or_compensation() {
+        let mut m = matrix();
+        m.set_value(1, 1, 0, i32::MAX);
+        assert_eq!(
+            m.get_value(1, 1, 0, true),
+            i32::MAX,
+            "safety margin must saturate rather than wrap"
+        );
+        assert_eq!(
+            m.clearance_compensation_value(1, 0),
+            (i32::MAX - 1) / 2,
+            "compensation must remain finite at the maximum matrix value"
+        );
     }
 
     #[test]

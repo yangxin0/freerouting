@@ -52,7 +52,7 @@ fn import_route_export_real_board() {
     assert!(board.net_is_completely_connected(ack));
 
     // export the session and check it parses with the routed net inside
-    let ses = export_ses(&board, "interf_u", 10);
+    let ses = export_ses(&board, "interf_u", 10).expect("session export");
     let parsed = parse_dsn(&ses).expect("SES not parseable");
     assert_eq!(parsed.name(), Some("session"));
     let network_out = parsed

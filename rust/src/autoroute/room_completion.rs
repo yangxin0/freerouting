@@ -92,7 +92,6 @@ pub fn complete_shape_tracked(
     // (Java: clearance compensation in the autoroute search tree); the
     // door shrink by the trace half width then keeps the copper edges
     // `clearance` apart.
-    let matrix = &board.rules.clearance_matrix;
     // the query must include the margin: an obstacle just OUTSIDE the
     // room's start shape still restrains it when its inflated shape
     // reaches inside (missing this was a DRC leak — obstacles behind a
@@ -104,8 +103,13 @@ pub fn complete_shape_tracked(
     // (Java avoids this by storing pre-compensated shapes in the tree).
     // Over-collection is harmless: the restrain loop intersects exactly.
     let max_margin = trace_half_width as f64
-        + (matrix.max_value(room.layer).max(0)
-            + crate::rules::clearance_matrix::CLEARANCE_SAFETY_MARGIN) as f64;
+        + board
+            .rules
+            .clearance_matrix
+            .max_value(room.layer)
+            .max(board.rules.max_same_net_clearance())
+            .max(0) as f64
+        + crate::rules::clearance_matrix::CLEARANCE_SAFETY_MARGIN as f64;
     // coarse (bbox-level) query on a grown box: the exact cut happens per
     // inflated shape below, so per-candidate exact intersections (and
     // offsetting the start simplex itself) would be wasted work
@@ -121,12 +125,10 @@ pub fn complete_shape_tracked(
         };
         // is_trace_obstacle: items of a foreign net block the room
         if item.base.contains_net(net_no) || (ignore_rippable && is_rippable(item, net_no)) {
-            let clearance = matrix.get_value(
-                item.base.clearance_class,
-                trace_clearance_class,
-                room.layer,
-                true,
-            );
+            let clearance =
+                crate::drc::clearance_for_new_item(board, item, trace_clearance_class, room.layer)
+                    as i32
+                    + crate::rules::clearance_matrix::CLEARANCE_SAFETY_MARGIN;
             let margin = (trace_half_width + clearance).max(0);
             if let Some(inflated) = board.inflated_shapes(item_id, margin) {
                 for (shape, bbox, layer) in inflated.iter() {
@@ -149,12 +151,10 @@ pub fn complete_shape_tracked(
         // with the safety margin (Java: add_safety_margin) — the room
         // guarantee otherwise EQUALS the requirement exactly, and corner
         // rounding (≤1 unit) tips boundary-riding paths into violation
-        let clearance = matrix.get_value(
-            item.base.clearance_class,
-            trace_clearance_class,
-            room.layer,
-            true,
-        );
+        let clearance =
+            crate::drc::clearance_for_new_item(board, item, trace_clearance_class, room.layer)
+                as i32
+                + crate::rules::clearance_matrix::CLEARANCE_SAFETY_MARGIN;
         // trace half width + full clearance: the maze may run the
         // centerline anywhere inside a room (including on its border), so
         // correctness requires the whole margin in the room geometry.

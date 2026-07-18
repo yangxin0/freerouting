@@ -31,13 +31,8 @@ pub fn cutout_trace(
         return Vec::new();
     };
     // enlarge the shape in 2 steps for symmetry reasons (Java comment)
-    let cl_offset = board.rules.clearance_matrix.get_value(
-        item.base.clearance_class,
-        cl_class,
-        trace.layer,
-        false,
-    ) as f64
-        + C_OFFSET_ADD;
+    let cl_offset =
+        crate::drc::clearance_for_new_item(board, item, cl_class, trace.layer) + C_OFFSET_ADD;
     let offset_shape = shape.offset(trace.half_width as f64).offset(cl_offset);
     let pieces = offset_shape.cutout_polyline(&trace.polyline);
     if pieces.len() == 1 && pieces[0] == trace.polyline {
@@ -48,18 +43,20 @@ pub fn cutout_trace(
     let half_width = trace.half_width;
     let net_nos = item.base.net_nos.clone();
     let clearance_class = item.base.clearance_class;
+    let clearance_class_explicit = item.base.clearance_class_explicit;
     board.remove_item(trace_id);
     let mut inserted = Vec::new();
     for piece in pieces {
         if piece.is_empty() {
             continue;
         }
-        inserted.push(board.insert_trace(
+        inserted.push(board.insert_trace_with_provenance(
             piece,
             layer,
             half_width,
             net_nos.clone(),
             clearance_class,
+            clearance_class_explicit,
         ));
     }
     inserted
@@ -73,6 +70,7 @@ struct EntryPoint {
     net_nos: Vec<i32>,
     half_width: i32,
     clearance_class: usize,
+    clearance_class_explicit: bool,
     #[allow(dead_code)]
     trace_line_no: usize,
     /// The trace's polyline line at `trace_line_no`, cached because the
@@ -208,17 +206,20 @@ impl ShapeTraceEntries {
     }
 
     /// The next substitute trace piece: its polyline plus (layer,
-    /// half width, net numbers, clearance class); `None` at the end.
+    /// half width, net numbers, clearance class, explicit provenance);
+    /// `None` at the end.
     #[allow(clippy::type_complexity)]
     pub fn next_substitute_trace_piece(
         &mut self,
         board: &BasicBoard,
-    ) -> Option<(Polyline, usize, i32, Vec<i32>, usize)> {
+    ) -> Option<(Polyline, usize, i32, Vec<i32>, usize, bool)> {
         loop {
             let (first, last) = self.pop_piece()?;
+            // The substitute is a new trace, therefore the matrix lookup is
+            // (new aggressor, existing victim), matching the final DRC.
             let cl_offset = board.rules.clearance_matrix.get_value(
-                first.clearance_class,
                 self.cl_class,
+                first.clearance_class,
                 self.layer,
                 false,
             ) as f64
@@ -247,6 +248,7 @@ impl ShapeTraceEntries {
                 first.half_width,
                 first.net_nos.clone(),
                 first.clearance_class,
+                first.clearance_class_explicit,
             ));
         }
     }
@@ -290,12 +292,7 @@ impl ShapeTraceEntries {
         let ItemKind::PolylineTrace(trace) = &item.kind else {
             return true;
         };
-        let cl_offset = board.rules.clearance_matrix.get_value(
-            item.base.clearance_class,
-            self.cl_class,
-            trace.layer,
-            false,
-        ) as f64
+        let cl_offset = crate::drc::clearance_for_new_item(board, item, self.cl_class, trace.layer)
             + C_OFFSET_ADD;
         // offset (not enlarge) because of the comparison in EntryPoint
         let offset_shape = self.shape.offset(trace.half_width as f64).offset(cl_offset);
@@ -307,6 +304,7 @@ impl ShapeTraceEntries {
                 item.base.net_nos.clone(),
                 trace.half_width,
                 item.base.clearance_class,
+                item.base.clearance_class_explicit,
                 line_no,
                 trace.polyline.arr[line_no],
                 edge_no,
@@ -355,14 +353,14 @@ impl ShapeTraceEntries {
                                 .unwrap_or(0.0);
                             let mut via_trace_diff = via_radius - trace.half_width as f64;
                             let via_clearance = board.rules.clearance_matrix.get_value(
-                                contact.base.clearance_class,
                                 self.cl_class,
+                                contact.base.clearance_class,
                                 self.layer,
                                 false,
                             );
                             let trace_clearance = board.rules.clearance_matrix.get_value(
-                                item.base.clearance_class,
                                 self.cl_class,
+                                item.base.clearance_class,
                                 self.layer,
                                 false,
                             );
@@ -396,6 +394,7 @@ impl ShapeTraceEntries {
                                 item.base.net_nos.clone(),
                                 trace.half_width,
                                 item.base.clearance_class,
+                                item.base.clearance_class_explicit,
                                 trace_line_segment_no,
                                 trace.polyline.arr[trace_line_segment_no],
                                 projection_side,
@@ -616,6 +615,15 @@ impl ShapeTraceEntries {
                 &self.entries[last_idx + 1].net_nos,
                 &self.entries[first_idx].net_nos,
             )
+            // One substitute item cannot carry two widths or two numeric
+            // clearance classes. Keep a boundary between otherwise adjacent
+            // same-net entries so a strict/large source trace is never
+            // recreated with the first entry's weaker geometry/rules.
+            && self.entries[last_idx + 1].half_width == self.entries[first_idx].half_width
+            && self.entries[last_idx + 1].clearance_class
+                == self.entries[first_idx].clearance_class
+            && self.entries[last_idx + 1].clearance_class_explicit
+                == self.entries[first_idx].clearance_class_explicit
         {
             last_idx += 1;
         }
@@ -643,6 +651,7 @@ impl ShapeTraceEntries {
         net_nos: Vec<i32>,
         half_width: i32,
         clearance_class: usize,
+        clearance_class_explicit: bool,
         trace_line_no: usize,
         trace_line: crate::geometry::planar::Line,
         edge_no: usize,
@@ -653,6 +662,7 @@ impl ShapeTraceEntries {
             net_nos,
             half_width,
             clearance_class,
+            clearance_class_explicit,
             trace_line_no,
             trace_line,
             entry_approx,
@@ -703,6 +713,7 @@ mod tests {
         let polyline =
             Polyline::from_int_points(&[IntPoint::new(-10000, 0), IntPoint::new(10000, 0)]);
         let trace = board.insert_trace(polyline, 0, 100, vec![1], 1);
+        board.set_item_clearance_class_explicit(trace, true);
         let shape = TileShape::Box(IntBox::from_coords(-1000, -1000, 1000, 1000));
         let pieces = cutout_trace(&mut board, trace, &shape, 1);
         assert_eq!(pieces.len(), 2);
@@ -714,6 +725,7 @@ mod tests {
             let ItemKind::PolylineTrace(t) = &item.kind else {
                 panic!("piece is a trace");
             };
+            assert!(item.base.clearance_class_explicit);
             for c in t.polyline.corner_approx_arr() {
                 assert!(
                     c.x.abs() >= 1300.0,
@@ -730,6 +742,7 @@ mod tests {
         let polyline =
             Polyline::from_int_points(&[IntPoint::new(-10000, 0), IntPoint::new(10000, 0)]);
         let trace = board.insert_trace(polyline, 0, 100, vec![2], 1);
+        board.set_item_clearance_class_explicit(trace, true);
         let shape = TileShape::Box(IntBox::from_coords(-1000, -1000, 1000, 1000));
         let mut entries = ShapeTraceEntries::new(
             shape.clone(),
@@ -741,10 +754,11 @@ mod tests {
         assert!(entries.store_items(&board, &[trace], false, false));
         assert_eq!(entries.substitute_trace_count(), 1);
         assert_eq!(entries.stack_depth(), 1);
-        let (piece, layer, half_width, net_nos, _) = entries
+        let (piece, layer, half_width, net_nos, _, explicit) = entries
             .next_substitute_trace_piece(&board)
             .expect("a substitute piece");
         assert_eq!((layer, half_width, net_nos), (0, 100, vec![2]));
+        assert!(explicit);
         // the substitute goes around the shove shape: no corner inside
         for c in piece.corner_approx_arr() {
             assert!(
@@ -757,6 +771,38 @@ mod tests {
         }
         // and no more pieces
         assert!(entries.next_substitute_trace_piece(&board).is_none());
+    }
+
+    #[test]
+    fn substitute_grouping_keeps_explicit_and_inherited_sources_separate() {
+        let shape = TileShape::Box(IntBox::from_coords(-1_000, -1_000, 1_000, 1_000));
+        let mut entries = ShapeTraceEntries::new(
+            shape,
+            0,
+            vec![1],
+            1,
+            crate::board::CalcFromSide::NOT_CALCULATED,
+        );
+        let line =
+            crate::geometry::planar::Line::new(IntPoint::new(-2_000, 0), IntPoint::new(2_000, 0));
+        for (trace, edge, explicit) in
+            [(10, 0, false), (10, 1, false), (11, 2, true), (11, 3, true)]
+        {
+            let entry = entries.shape.corner_approx(edge);
+            entries.insert_entry_point(trace, vec![2], 100, 1, explicit, 0, line, edge, entry);
+        }
+        for entry in &mut entries.entries {
+            entry.stack_level = 1;
+        }
+        entries.max_stack_level = 1;
+        entries.trace_piece_count = 2;
+
+        let (first, last) = entries.pop_piece().expect("inherited group");
+        assert!(!first.clearance_class_explicit);
+        assert!(!last.clearance_class_explicit);
+        let (first, last) = entries.pop_piece().expect("explicit group");
+        assert!(first.clearance_class_explicit);
+        assert!(last.clearance_class_explicit);
     }
 
     #[test]

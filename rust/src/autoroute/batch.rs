@@ -7,7 +7,7 @@
 //! between two components becomes the next connection to route.
 
 use crate::autoroute::maze_search::{
-    maze_route_with_engine, maze_route_with_ripup, MazeRouteRequest,
+    maze_route_with_engine, maze_route_with_ripup, MazeRouteRequest, RoutedConnection,
 };
 use crate::board::basic_board::{BasicBoard, ItemId};
 
@@ -29,9 +29,9 @@ pub struct BatchRequest {
     /// `ViaInfo`'s clearance class, which may be stricter than the trace
     /// class). 0 = fall back to `clearance_class`.
     pub via_clearance_class: usize,
-    /// Layer-change vias may land on drillable (SMD) pads of their net
-    /// (Java `AutorouteControl.attach_smd_allowed`); the inserted via
-    /// carries the flag for the DRC's fanout exemption.
+    /// The declared ViaInfo attach bit.  The maze may widen its *search*
+    /// permission for a pure-SMD net, but that routing exception must not be
+    /// persisted on the inserted via (Java keeps these two bits separate).
     pub via_attach_allowed: bool,
     pub via_cost: f64,
     /// Expansion budget per connection (see
@@ -42,6 +42,47 @@ pub struct BatchRequest {
     pub ripup_penalty: f64,
     /// Optional wall-clock deadline honored inside searches and cascades.
     pub deadline: Option<crate::datastructures::TimeLimit>,
+}
+
+impl BatchRequest {
+    /// Validates the caller-supplied base request before any maze state is
+    /// allocated or board mutation begins. Per-net overrides are derived by
+    /// `request_for_net`; this check only covers the fields the caller owns.
+    pub fn validate(&self, board: &BasicBoard) -> Result<(), String> {
+        if self.trace_half_width <= 0
+            || self.trace_half_width > crate::geometry::planar::limits::CRIT_INT
+        {
+            return Err("trace_half_width must be positive".into());
+        }
+        if self.clearance_class >= board.rules.clearance_matrix.get_class_count() {
+            return Err(format!(
+                "clearance_class {} is outside the board matrix",
+                self.clearance_class
+            ));
+        }
+        if self.via_clearance_class >= board.rules.clearance_matrix.get_class_count() {
+            return Err(format!(
+                "via_clearance_class {} is outside the board matrix",
+                self.via_clearance_class
+            ));
+        }
+        if self.via_padstack != 0 && board.padstacks.get_by_no(self.via_padstack).is_none() {
+            return Err(format!(
+                "via_padstack {} is not present in the board library",
+                self.via_padstack
+            ));
+        }
+        if !self.via_cost.is_finite() || self.via_cost < 0.0 {
+            return Err("via_cost must be finite and nonnegative".into());
+        }
+        if !self.ripup_penalty.is_finite() || self.ripup_penalty < 0.0 {
+            return Err("ripup_penalty must be finite and nonnegative".into());
+        }
+        if self.max_expansions == 0 {
+            return Err("max_expansions must be positive".into());
+        }
+        Ok(())
+    }
 }
 
 /// The connected components of the connectable items of `net_no`.
@@ -125,10 +166,56 @@ fn closest_pair(
     best.map(|(_, a, b)| (a, b))
 }
 
-/// Routes all incomplete connections of `net_no`. Returns (routed,
-/// failed) counts; stops trying a net after the first failed connection.
+enum RouteAttemptResult {
+    Progress(RoutedConnection),
+    NoProgress,
+    Failed,
+}
+
+/// Resolves the snapshot opened immediately before one maze attempt. A
+/// successful insertion is not progress until it reduces the target net's
+/// component count; keeping the snapshot open through that check is required
+/// because shove and normalization may have modified pre-existing items.
+fn finish_route_attempt(
+    board: &mut BasicBoard,
+    net_no: i32,
+    previous_component_count: usize,
+    connection: Option<RoutedConnection>,
+    keep_no_progress: bool,
+) -> RouteAttemptResult {
+    let Some(connection) = connection else {
+        board.undo();
+        return RouteAttemptResult::Failed;
+    };
+    if net_components(board, net_no).len() < previous_component_count {
+        board.pop_snapshot();
+        RouteAttemptResult::Progress(connection)
+    } else {
+        if keep_no_progress {
+            board.pop_snapshot();
+        } else {
+            board.undo();
+        }
+        RouteAttemptResult::NoProgress
+    }
+}
+
+/// Routes all incomplete connections of `net_no` from a base request.
+/// Per-net width, clearance, ViaRule, attach policy, active layers and plane
+/// via cost are always derived here, so the public single-net entry point has
+/// the same rule contract as [`batch_route`] and the pass scheduler.
 pub fn route_net(board: &mut BasicBoard, net_no: i32, request: &BatchRequest) -> BatchResult {
-    route_net_with_store(board, net_no, request, &mut None)
+    if board.rules.nets.get_by_no(net_no).is_none()
+        || net_components(board, net_no).is_empty()
+        || request.validate(board).is_err()
+    {
+        return BatchResult {
+            failed_connections: 1,
+            ..BatchResult::default()
+        };
+    }
+    let net_request = request_for_net(board, net_no, request);
+    route_net_with_store(board, net_no, &net_request, &mut None)
 }
 
 /// Like [`route_net`], reusing the caller's engine store across calls:
@@ -136,15 +223,13 @@ pub fn route_net(board: &mut BasicBoard, net_no: i32, request: &BatchRequest) ->
 /// (Java: maintain_database), synchronized against board changes and
 /// switched between nets before every connection. Ripup-mode requests
 /// bypass the store (they rip and shove foreign items mid-connection).
-pub fn route_net_with_store(
+pub(crate) fn route_net_with_store(
     board: &mut BasicBoard,
     net_no: i32,
     request: &BatchRequest,
     store: &mut Option<crate::autoroute::engine::AutorouteEngine>,
 ) -> BatchResult {
     let mut result = BatchResult::default();
-    let mut prev_component_count = usize::MAX;
-    let mut last_items: Vec<ItemId> = Vec::new();
     let mut use_sets = true;
     loop {
         if request.deadline.is_some_and(|t| t.limit_exceeded()) {
@@ -155,28 +240,6 @@ pub fn route_net_with_store(
         if components.len() <= 1 {
             break;
         }
-        if components.len() >= prev_component_count {
-            // a routed connection did not reduce the component count:
-            // remove its items (junk that only obstructs other nets)
-            if std::env::var_os("FR_KEEP_JUNK").is_some() {
-                last_items.clear();
-                result.failed_connections += 1;
-                break;
-            }
-            for id in last_items.drain(..) {
-                board.remove_item(id);
-            }
-            if use_sets {
-                // retry the connection single-pair: set arrivals can pick
-                // a target whose contact never registers (stacked pads)
-                use_sets = false;
-                prev_component_count = usize::MAX;
-                continue;
-            }
-            result.failed_connections += 1;
-            break;
-        }
-        prev_component_count = components.len();
         // route between the two closest components overall (minimum
         // spanning behavior, important for many-pin nets like power)
         let candidate_sets: Vec<Vec<ItemId>> = components
@@ -289,6 +352,11 @@ pub fn route_net_with_store(
             ripup_penalty: request.ripup_penalty,
             deadline: request.deadline,
         };
+        // The transaction spans insertion AND the progress check below.
+        // insert_connection's inner snapshot only makes insertion failures
+        // atomic; committing it early used to leak shove/normalization changes
+        // when a nominally successful route did not join two components.
+        board.generate_snapshot();
         let connection = if request.ripup_penalty > 0.0 {
             maze_route_with_ripup(board, &maze_request)
         } else {
@@ -316,13 +384,28 @@ pub fn route_net_with_store(
             engine.switch_net(board, net_no);
             maze_route_with_engine(board, engine, &maze_request)
         };
-        if let Some(connection) = connection {
-            result.routed_connections += 1;
-            last_items = connection.new_items.clone();
-            result.ripped_nets.extend(connection.ripped_nets);
-        } else {
-            result.failed_connections += 1;
-            break; // give up on this net (the pass may retry with ripup)
+        let keep_no_progress = std::env::var_os("FR_KEEP_JUNK").is_some();
+        match finish_route_attempt(
+            board,
+            net_no,
+            components.len(),
+            connection,
+            keep_no_progress,
+        ) {
+            RouteAttemptResult::Progress(connection) => {
+                result.routed_connections += 1;
+                result.ripped_nets.extend(connection.ripped_nets);
+            }
+            RouteAttemptResult::NoProgress if use_sets && !keep_no_progress => {
+                // Set arrivals can pick a target whose contact never
+                // registers (for example stacked pads); retry one exact pair
+                // from the fully restored board.
+                use_sets = false;
+            }
+            RouteAttemptResult::NoProgress | RouteAttemptResult::Failed => {
+                result.failed_connections += 1;
+                break; // give up on this net (the pass may retry with ripup)
+            }
         }
     }
     result
@@ -334,11 +417,16 @@ pub fn route_net_with_store(
 /// derives them like the pass scheduler does, so external callers cannot
 /// route with the base request's rules by accident.
 pub fn batch_route(board: &mut BasicBoard, request: &BatchRequest) -> BatchResult {
+    if request.validate(board).is_err() {
+        return BatchResult {
+            failed_connections: 1,
+            ..BatchResult::default()
+        };
+    }
     let net_nos: Vec<i32> = (1..=board.rules.nets.max_net_no()).collect();
     let mut result = BatchResult::default();
     for net_no in net_nos {
-        let net_request = request_for_net(board, net_no, request);
-        let net_result = route_net(board, net_no, &net_request);
+        let net_result = route_net(board, net_no, request);
         result.routed_connections += net_result.routed_connections;
         result.failed_connections += net_result.failed_connections;
     }
@@ -348,9 +436,9 @@ pub fn batch_route(board: &mut BasicBoard, request: &BatchRequest) -> BatchResul
 /// Like [`route_net`], but on failure retries with in-search ripup:
 /// the maze may route through rippable foreign items paying
 /// `ripup_penalty` per item, the crossed items are removed, and all
-/// victims are rerouted immediately. Transactional: commits only if the
-/// failed net and every victim end up completely connected, otherwise
-/// the board state is restored.
+/// victims are rerouted immediately. This public entry point is strict: it
+/// commits only if the failed net and every victim end up completely
+/// connected, otherwise the board state is restored.
 ///
 /// `request` is the BASE request: the per-net rules (width, clearance
 /// class, via rule, attach policy, plane via cost) are derived here for
@@ -363,8 +451,32 @@ pub fn route_net_with_ripup(
     request: &BatchRequest,
     ripup_penalty: f64,
 ) -> BatchResult {
+    route_net_with_ripup_policy(board, net_no, request, ripup_penalty, false)
+}
+
+/// Internal pass-loop policy. A bounded one-for-one failure-set rotation is
+/// useful to the scheduler because a later pass can attack the broken victim;
+/// it is never exposed through the public single-net API.
+fn route_net_with_ripup_policy(
+    board: &mut BasicBoard,
+    net_no: i32,
+    request: &BatchRequest,
+    ripup_penalty: f64,
+    allow_one_broken_victim: bool,
+) -> BatchResult {
+    if board.rules.nets.get_by_no(net_no).is_none()
+        || net_components(board, net_no).is_empty()
+        || request.validate(board).is_err()
+        || !ripup_penalty.is_finite()
+        || ripup_penalty < 0.0
+    {
+        return BatchResult {
+            failed_connections: 1,
+            ..BatchResult::default()
+        };
+    }
     let net_request = request_for_net(board, net_no, request);
-    let mut result = route_net(board, net_no, &net_request);
+    let mut result = route_net_with_store(board, net_no, &net_request, &mut None);
     if result.failed_connections == 0 || ripup_penalty <= 0.0 {
         return result;
     }
@@ -383,7 +495,7 @@ pub fn route_net_with_ripup(
         deadline: Some(sub_deadline),
         ..net_request
     };
-    let retry = route_net(board, net_no, &rip_request);
+    let retry = route_net_with_store(board, net_no, &rip_request, &mut None);
     let mut extra_routed = retry.routed_connections;
     let mut success = retry.failed_connections == 0 && board.net_is_completely_connected(net_no);
     let mut broken_victims = 0usize;
@@ -411,7 +523,7 @@ pub fn route_net_with_ripup(
                 deadline: Some(sub_deadline),
                 ..request_for_net(board, ripped, request)
             };
-            let r = route_net(board, ripped, &victim_request);
+            let r = route_net_with_store(board, ripped, &victim_request, &mut None);
             extra_routed += r.routed_connections;
             if r.failed_connections > 0 || !board.net_is_completely_connected(ripped) {
                 broken_victims += 1;
@@ -420,7 +532,11 @@ pub fn route_net_with_ripup(
                 }
             }
         }
-        success = broken_victims <= 1;
+        success = if allow_one_broken_victim {
+            broken_victims <= 1
+        } else {
+            broken_victims == 0
+        };
     }
     if success {
         result.routed_connections += extra_routed;
@@ -498,6 +614,7 @@ pub(crate) fn request_for_net(
         .selected_via_for_net(net_no, &board.padstacks, last_layer);
     let (via_padstack, via_clearance_class) = match selected_via {
         Some(info) => (info.get_padstack(), info.get_clearance_class()),
+        None if board.rules.has_bound_via_rule(net_no) => (0, 0),
         None => (base.via_padstack, 0),
     };
     BatchRequest {
@@ -513,6 +630,8 @@ pub(crate) fn request_for_net(
         },
         via_padstack,
         via_clearance_class,
+        // Preserve the selected ViaInfo's declared attach bit. Pure-SMD
+        // escape permission is represented separately on the routed via.
         via_attach_allowed: via_attach_allowed_for_net(board, net_no, base.via_padstack),
         via_cost: if contains_plane {
             base.via_cost / 10.0
@@ -523,12 +642,8 @@ pub(crate) fn request_for_net(
     }
 }
 
-/// Whether the net's layer-change vias may land on its own drillable
-/// (SMD) pads: the via rule's flag (Java `ViaInfo.attach_smd_allowed`),
-/// falling back to `via_at_smd && padstack attach` like Java's default
-/// via infos, and relaxed for pure-SMD nets on multilayer boards
-/// (Java `AutorouteControl.rebuild_via_info`), which otherwise could
-/// never escape their component layer.
+/// The declared ViaInfo attach bit for the via selected for this net.
+/// Pure-SMD escape permission is search state and does not rewrite this rule.
 pub(crate) fn via_attach_allowed_for_net(
     board: &BasicBoard,
     net_no: i32,
@@ -537,10 +652,11 @@ pub(crate) fn via_attach_allowed_for_net(
     // the same span-aware selection as request_for_net, so the attach
     // flag belongs to the via actually being inserted
     let last_layer = board.layer_structure.layer_count().saturating_sub(1);
-    let attach = board
+    let declared_attach = board
         .rules
         .selected_via_for_net(net_no, &board.padstacks, last_layer)
         .map(|info| info.attach_smd_allowed())
+        .or_else(|| board.rules.has_bound_via_rule(net_no).then_some(false))
         .unwrap_or_else(|| {
             board.rules.via_at_smd_allowed
                 && board
@@ -548,24 +664,38 @@ pub(crate) fn via_attach_allowed_for_net(
                     .get_by_no(base_padstack)
                     .is_some_and(|p| p.attach_allowed)
         });
-    if attach || board.layer_structure.layer_count() <= 1 {
-        return attach;
+    declared_attach
+}
+
+/// Whether all original component pads of a net are single-layer SMD pads.
+/// Route-created traces/vias have `component_no == 0` and are ignored, so the
+/// result remains stable after the first fanout connection is inserted.
+pub(crate) fn pure_smd_search_relaxation(board: &BasicBoard, net_no: i32) -> bool {
+    if board.layer_structure.layer_count() <= 1 {
+        return false;
     }
-    // pure-SMD net: every connectable item is a single-layer pin
-    let mut any = false;
+    let mut any_pin = false;
     for (_, item) in board.items() {
         if !item.base.contains_net(net_no) || !item.is_connectable() {
             continue;
         }
-        any = true;
-        let is_smd_pin = matches!(item.kind, crate::board::ItemKind::Via(_))
-            && item.base.component_no > 0
-            && item.first_layer(&board.padstacks) == item.last_layer(&board.padstacks);
-        if !is_smd_pin {
+        // Component-owned drill items are the original pins.  Ignore
+        // route-created items (component_no == 0), but reject a through-hole
+        // pin and any board-level connectable area.
+        if item.base.component_no == 0 {
+            if matches!(item.kind, crate::board::ItemKind::ObstacleArea(_)) {
+                return false;
+            }
+            continue;
+        }
+        any_pin = true;
+        if !matches!(item.kind, crate::board::ItemKind::Via(_))
+            || item.first_layer(&board.padstacks) != item.last_layer(&board.padstacks)
+        {
             return false;
         }
     }
-    any
+    any_pin
 }
 
 /// The nets involved in repairable clearance violations plus the count
@@ -646,14 +776,13 @@ fn repair_violations(
             deadline: time_limit.copied().or(request.deadline),
             ..*request
         };
-        crate::board::basic_board::set_birth_tag(5);
+        let _birth_tag = crate::board::basic_board::birth_tag_scope(5);
         for &net_no in &nets {
             if time_limit.is_some_and(|t| t.limit_exceeded()) {
                 break;
             }
-            route_net_with_ripup(board, net_no, &repair_request, ripup_penalty);
+            route_net_with_ripup_policy(board, net_no, &repair_request, ripup_penalty, false);
         }
-        crate::board::basic_board::set_birth_tag(0);
         let no_net_broken = complete_before
             .iter()
             .all(|&n| board.net_is_completely_connected(n));
@@ -696,6 +825,12 @@ pub fn batch_route_passes_with_time_limit(
     passes: usize,
     time_limit: Option<&crate::datastructures::TimeLimit>,
 ) -> BatchResult {
+    if request.validate(board).is_err() {
+        return BatchResult {
+            failed_connections: 1,
+            ..BatchResult::default()
+        };
+    }
     let mut net_nos: Vec<i32> = (1..=board.rules.nets.max_net_no()).collect();
     // many-pin (power) nets route FIRST on the open board — they need
     // whole corridor systems and are unroutable into leftover congestion
@@ -780,13 +915,13 @@ pub fn batch_route_passes_with_time_limit(
             let result = if ripup_penalty > 0.0 {
                 // takes the BASE request: target and victim rules are
                 // derived per net inside
-                route_net_with_ripup(board, net_no, &pass_request, ripup_penalty)
+                route_net_with_ripup_policy(board, net_no, &pass_request, ripup_penalty, true)
             } else {
                 let net_request = request_for_net(board, net_no, &pass_request);
                 if cross_net {
                     route_net_with_store(board, net_no, &net_request, &mut engine_store)
                 } else {
-                    route_net(board, net_no, &net_request)
+                    route_net_with_store(board, net_no, &net_request, &mut None)
                 }
             };
             if crate::debug::stats() && net_start.elapsed().as_secs() >= 15 {
@@ -928,7 +1063,8 @@ pub fn batch_route_passes_with_time_limit(
             if restart_limit.is_some_and(|t| t.limit_exceeded()) {
                 break;
             }
-            let result = route_net_with_ripup(board, net_no, &restart_request, ripup_penalty);
+            let result =
+                route_net_with_ripup_policy(board, net_no, &restart_request, ripup_penalty, true);
             restart.routed_connections += result.routed_connections;
             restart.failed_connections += result.failed_connections;
             if lock_restart
@@ -1056,6 +1192,36 @@ mod tests {
     }
 
     #[test]
+    fn public_single_net_routes_reject_invalid_contracts_without_mutation() {
+        let mut board = test_board(1);
+        let before_items = board.items().count();
+
+        let missing = route_net(&mut board, 999, &request());
+        assert_eq!(missing.routed_connections, 0);
+        assert_eq!(missing.failed_connections, 1);
+        assert_eq!(board.items().count(), before_items);
+
+        let missing_ripup = route_net_with_ripup(&mut board, 999, &request(), 1.0);
+        assert_eq!(missing_ripup.routed_connections, 0);
+        assert_eq!(missing_ripup.failed_connections, 1);
+        assert_eq!(board.items().count(), before_items);
+
+        let empty = route_net(&mut board, 1, &request());
+        assert_eq!(empty.routed_connections, 0);
+        assert_eq!(empty.failed_connections, 1);
+        assert_eq!(board.items().count(), before_items);
+
+        let zero_budget = BatchRequest {
+            max_expansions: 0,
+            ..request()
+        };
+        let rejected = route_net(&mut board, 1, &zero_budget);
+        assert_eq!(rejected.routed_connections, 0);
+        assert_eq!(rejected.failed_connections, 1);
+        assert_eq!(board.items().count(), before_items);
+    }
+
+    #[test]
     fn optimizer_never_rips_shove_fixed_routes() {
         use crate::geometry::planar::Polyline;
         let mut board = test_board(1);
@@ -1116,6 +1282,194 @@ mod tests {
     }
 
     #[test]
+    fn no_progress_attempt_restores_preexisting_shove_mutations() {
+        use crate::geometry::planar::Polyline;
+
+        let mut board = test_board(2);
+        board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        board.insert_via(1, IntPoint::new(10_000, 0), vec![1], 1, false);
+        let victim = board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(-5_000, 2_000), IntPoint::new(5_000, 2_000)]),
+            0,
+            100,
+            vec![2],
+            1,
+        );
+        let victim_before = board.get_item(victim).cloned().unwrap();
+        let ids_before: Vec<_> = board.items().map(|(id, _)| *id).collect();
+        let components_before = net_components(&board, 1).len();
+        assert_eq!(components_before, 2);
+
+        // Model the nested insertion transaction: a shove replaces an item
+        // that predates the route attempt, insertion commits its own snapshot,
+        // but the new target-net trace does not join the two components.
+        board.generate_snapshot(); // route-attempt snapshot
+        board.generate_snapshot(); // insert_connection snapshot
+        board.remove_item(victim);
+        board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(-5_000, 3_000), IntPoint::new(5_000, 3_000)]),
+            0,
+            100,
+            vec![2],
+            1,
+        );
+        board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(20_000, 0), IntPoint::new(21_000, 0)]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        assert!(board.pop_snapshot());
+
+        let outcome = finish_route_attempt(
+            &mut board,
+            1,
+            components_before,
+            Some(RoutedConnection {
+                ripped_nets: Vec::new(),
+            }),
+            false,
+        );
+        assert!(matches!(outcome, RouteAttemptResult::NoProgress));
+        assert_eq!(
+            board.get_item(victim),
+            Some(&victim_before),
+            "rollback must restore the pre-existing shoved item"
+        );
+        assert_eq!(
+            board.items().map(|(id, _)| *id).collect::<Vec<_>>(),
+            ids_before,
+            "rollback must remove every item created by the attempt"
+        );
+        assert_eq!(net_components(&board, 1).len(), components_before);
+    }
+
+    #[test]
+    fn pure_smd_attach_relaxation_survives_route_items() {
+        use crate::rules::{ViaInfo, ViaRule};
+
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true), Layer::new("B.Cu", true)]);
+        let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
+        let mut rules = BoardRules::new(stack.clone(), matrix);
+        let default_class = rules.get_default_net_class();
+        let net_no = rules.nets.add("smd_net", default_class, false);
+        let mut padstacks = Padstacks::new(2);
+        let via_shape = TileShape::Box(IntBox::from_coords(-400, -400, 400, 400));
+        let via_padstack = padstacks.add(
+            "via_attach_off",
+            vec![Some(via_shape.clone()), Some(via_shape.clone())],
+            false,
+            false,
+        );
+        let smd_front = padstacks.add(
+            "smd_front",
+            vec![Some(via_shape.clone()), None],
+            false,
+            false,
+        );
+        let smd_back = padstacks.add("smd_back", vec![None, Some(via_shape)], false, false);
+        let via_info = rules
+            .via_infos
+            .add(ViaInfo::new("via_attach_off", via_padstack, 1, false))
+            .unwrap();
+        let mut via_rule = ViaRule::new("smd_rule");
+        via_rule.append_via(via_info);
+        rules.via_rules.push(via_rule);
+        rules
+            .net_classes
+            .get_mut(default_class)
+            .set_via_rule(Some(0));
+        let mut board = BasicBoard::new(stack, rules, padstacks);
+
+        let pin_a = board.insert_via(smd_front, IntPoint::new(0, 0), vec![net_no], 1, false);
+        board.set_component_no(pin_a, 1);
+        let pin_b = board.insert_via(smd_back, IntPoint::new(8000, 0), vec![net_no], 1, false);
+        board.set_component_no(pin_b, 2);
+
+        assert!(pure_smd_search_relaxation(&board, net_no));
+        assert!(!via_attach_allowed_for_net(&board, net_no, via_padstack));
+
+        let net_request = request_for_net(&board, net_no, &request());
+        assert!(
+            !net_request.via_attach_allowed,
+            "ViaInfo declaration stays off"
+        );
+        let routed = route_net(&mut board, net_no, &request());
+        assert_eq!(routed.failed_connections, 0);
+        assert!(board.net_is_completely_connected(net_no));
+
+        let escape_vias: Vec<_> = board
+            .items()
+            .filter_map(|(_, item)| match &item.kind {
+                crate::board::ItemKind::Via(via)
+                    if item.base.component_no == 0 && via.is_escape_via =>
+                {
+                    Some(via)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !escape_vias.is_empty(),
+            "the layer transition must escape a pad"
+        );
+        assert!(escape_vias
+            .iter()
+            .all(|via| { !via.attach_allowed && via.escape_smd_layer.is_some() }));
+        assert!(crate::drc::check_board(&board).violations.is_empty());
+
+        // A route-created via away from every SMD pin is ordinary and must
+        // not inherit the net-wide search relaxation as persistent metadata.
+        let ordinary = board.insert_via(
+            via_padstack,
+            IntPoint::new(4000, 6000),
+            vec![net_no],
+            1,
+            false,
+        );
+        let crate::board::ItemKind::Via(ordinary) = &board.get_item(ordinary).unwrap().kind else {
+            unreachable!()
+        };
+        assert!(!ordinary.is_escape_via);
+        assert_eq!(ordinary.escape_smd_layer, None);
+
+        // A routed via has component_no == 0. It must not turn the original
+        // all-SMD pin classification off for the next connection request.
+        assert!(pure_smd_search_relaxation(&board, net_no));
+        assert!(!via_attach_allowed_for_net(&board, net_no, via_padstack));
+    }
+
+    #[test]
+    fn bound_empty_via_rule_does_not_fall_back_to_base_via() {
+        use crate::rules::ViaRule;
+
+        let mut board = test_board(1);
+        board.rules.via_rules.push(ViaRule::new("no_vias"));
+        let default_class = board.rules.get_default_net_class();
+        board
+            .rules
+            .net_classes
+            .get_mut(default_class)
+            .set_via_rule(Some(0));
+
+        let restricted = request_for_net(&board, 1, &request());
+        assert_eq!(restricted.via_padstack, 0, "bound-empty means no via");
+        assert!(!restricted.via_attach_allowed);
+
+        board
+            .rules
+            .net_classes
+            .get_mut(default_class)
+            .set_via_rule(None);
+        assert_eq!(
+            request_for_net(&board, 1, &request()).via_padstack,
+            request().via_padstack,
+            "an unbound class retains the legacy request fallback"
+        );
+    }
+
+    #[test]
     fn routes_net_with_three_pads() {
         let mut board = test_board(1);
         board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
@@ -1126,6 +1480,85 @@ mod tests {
         // three pads need two connections
         assert_eq!(result.routed_connections, 2);
         assert!(board.net_is_completely_connected(1));
+    }
+
+    #[test]
+    fn public_route_net_derives_the_net_class_from_a_base_request() {
+        let mut board = test_board(1);
+        board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        board.insert_via(1, IntPoint::new(10_000, 0), vec![1], 1, false);
+
+        // The base request is intentionally much narrower than the default
+        // class (100 vs 1500).  The formerly public raw helper inserted the
+        // caller width verbatim; the supported single-net API must derive the
+        // same per-net request as batch routing.
+        let base = request();
+        assert_eq!(base.trace_half_width, 100);
+        assert_eq!(board.rules.get_trace_half_width_max_active(1), 1_500);
+        let result = route_net(&mut board, 1, &base);
+
+        assert_eq!(result.failed_connections, 0);
+        assert!(board.items().any(|(_, item)| {
+            matches!(
+                &item.kind,
+                crate::board::ItemKind::PolylineTrace(trace)
+                    if item.base.contains_net(1) && trace.half_width == 1_500
+            )
+        }));
+        assert!(!board.items().any(|(_, item)| {
+            matches!(
+                &item.kind,
+                crate::board::ItemKind::PolylineTrace(trace)
+                    if item.base.contains_net(1) && trace.half_width == base.trace_half_width
+            )
+        }));
+    }
+
+    #[test]
+    fn public_route_net_cannot_land_a_via_on_an_inactive_layer() {
+        use crate::rules::{ViaInfo, ViaRule};
+
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true), Layer::new("B.Cu", true)]);
+        let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
+        let mut rules = BoardRules::new(stack.clone(), matrix);
+        let class_idx = rules.get_default_net_class();
+        rules.set_default_trace_half_widths(100);
+        let net_no = rules.nets.add("masked", class_idx, false);
+        let shape = TileShape::Box(IntBox::from_coords(-300, -300, 300, 300));
+        let mut padstacks = Padstacks::new(2);
+        let through = padstacks.add(
+            "through",
+            vec![Some(shape.clone()), Some(shape.clone())],
+            false,
+            false,
+        );
+        let front = padstacks.add("front", vec![Some(shape.clone()), None], false, false);
+        let back = padstacks.add("back", vec![None, Some(shape)], false, false);
+        let via_info = rules
+            .via_infos
+            .add(ViaInfo::new("through_info", through, 1, false))
+            .unwrap();
+        let mut via_rule = ViaRule::new("through_rule");
+        via_rule.append_via(via_info);
+        rules.via_rules.push(via_rule);
+        rules.net_classes.get_mut(class_idx).set_via_rule(Some(0));
+        rules
+            .net_classes
+            .get_mut(class_idx)
+            .set_active_routing_layer(1, false);
+        let mut board = BasicBoard::new(stack, rules, padstacks);
+        let a = board.insert_via(front, IntPoint::new(0, 0), vec![net_no], 1, false);
+        let b = board.insert_via(back, IntPoint::new(10_000, 0), vec![net_no], 1, false);
+        board.set_component_no(a, 1);
+        board.set_component_no(b, 2);
+        let before = board.item_count();
+
+        let result = route_net(&mut board, net_no, &request());
+
+        assert_eq!(result.routed_connections, 0);
+        assert_eq!(result.failed_connections, 1);
+        assert_eq!(board.item_count(), before, "failed route leaked copper");
+        assert!(!board.net_is_completely_connected(net_no));
     }
 
     #[test]

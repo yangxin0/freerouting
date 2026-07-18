@@ -11,10 +11,10 @@ pub mod ses_export;
 pub mod ses_import;
 
 pub use dsn::{parse_dsn, SExpr};
-pub use dsn_export::export_dsn;
+pub use dsn_export::{export_dsn, DsnWriteError};
 pub use dsn_import::{import_dsn, strip_wiring, ImportError};
 pub use kicad_json::import_kicad_json;
-pub use kicad_json_writer::export_kicad_json;
-pub use rules_io::{read_rules, write_rules};
-pub use ses_export::export_ses;
+pub use kicad_json_writer::{export_kicad_json, export_kicad_json_checked, KicadJsonWriteError};
+pub use rules_io::{read_rules, write_rules, RulesWriteError};
+pub use ses_export::{export_ses, SesWriteError};
 pub use ses_import::{import_ses, SesImportSummary};

@@ -17,7 +17,7 @@ use crate::datastructures::TimeLimit;
 use crate::io::{export_ses, import_dsn};
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -76,7 +76,9 @@ pub fn serve(port: u16, route_seconds: u64) -> std::io::Result<()> {
     Ok(())
 }
 
-fn handle(mut stream: TcpStream, jobs: Jobs, route_seconds: u64) -> std::io::Result<()> {
+fn handle<S: Read + Write>(mut stream: S, jobs: Jobs, route_seconds: u64) -> std::io::Result<()> {
+    const MAX_HEADER_BYTES: usize = 64 * 1024;
+    const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     // read until headers complete, then body per content-length
@@ -84,45 +86,179 @@ fn handle(mut stream: TcpStream, jobs: Jobs, route_seconds: u64) -> std::io::Res
     loop {
         let n = stream.read(&mut tmp)?;
         if n == 0 {
+            if find_headers_end(&buf).is_none() {
+                write_http_response(
+                    &mut stream,
+                    "400 Bad Request",
+                    "application/json",
+                    "{\"error\": \"incomplete HTTP headers\"}",
+                )?;
+                return Ok(());
+            }
             break;
         }
         buf.extend_from_slice(&tmp[..n]);
+        if find_headers_end(&buf).is_none() && buf.len() > MAX_HEADER_BYTES {
+            write_http_response(
+                &mut stream,
+                "431 Request Header Fields Too Large",
+                "application/json",
+                "{\"error\": \"request headers too large\"}",
+            )?;
+            return Ok(());
+        }
+        if buf.len() > MAX_HEADER_BYTES + MAX_BODY_BYTES {
+            write_http_response(
+                &mut stream,
+                "413 Payload Too Large",
+                "application/json",
+                "{\"error\": \"request too large\"}",
+            )?;
+            return Ok(());
+        }
         if let Some(header_end) = find_headers_end(&buf) {
-            let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
-            let mut lines = headers.lines();
-            if let Some(request_line) = lines.next() {
-                let mut parts = request_line.split_whitespace();
-                method = parts.next().unwrap_or("").to_string();
-                path = parts.next().unwrap_or("").to_string();
+            if header_end > MAX_HEADER_BYTES {
+                write_http_response(
+                    &mut stream,
+                    "431 Request Header Fields Too Large",
+                    "application/json",
+                    "{\"error\": \"request headers too large\"}",
+                )?;
+                return Ok(());
             }
-            let content_length: usize = headers
-                .lines()
-                .find_map(|l| {
-                    let (k, v) = l.split_once(':')?;
-                    k.eq_ignore_ascii_case("content-length")
-                        .then(|| v.trim().parse().ok())?
-                })
-                .unwrap_or(0);
+            let headers = match std::str::from_utf8(&buf[..header_end]) {
+                Ok(headers) => headers,
+                Err(_) => {
+                    write_http_response(
+                        &mut stream,
+                        "400 Bad Request",
+                        "application/json",
+                        "{\"error\": \"headers must be valid UTF-8\"}",
+                    )?;
+                    return Ok(());
+                }
+            };
+            let mut lines = headers.lines();
+            let Some(request_line) = lines.next() else {
+                write_http_response(
+                    &mut stream,
+                    "400 Bad Request",
+                    "application/json",
+                    "{\"error\": \"missing request line\"}",
+                )?;
+                return Ok(());
+            };
+            let mut parts = request_line.split_whitespace();
+            method = parts.next().unwrap_or("").to_string();
+            path = parts.next().unwrap_or("").to_string();
+            let version = parts.next().unwrap_or("");
+            if method.is_empty()
+                || path.is_empty()
+                || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+                || parts.next().is_some()
+            {
+                write_http_response(
+                    &mut stream,
+                    "400 Bad Request",
+                    "application/json",
+                    "{\"error\": \"malformed request line\"}",
+                )?;
+                return Ok(());
+            }
+            let mut content_length = None;
+            let mut transfer_encoding = None;
+            for line in lines {
+                if line.is_empty() {
+                    continue;
+                }
+                let Some((key, value)) = line.split_once(':') else {
+                    write_http_response(
+                        &mut stream,
+                        "400 Bad Request",
+                        "application/json",
+                        "{\"error\": \"malformed header\"}",
+                    )?;
+                    return Ok(());
+                };
+                if key.eq_ignore_ascii_case("content-length") {
+                    if content_length.is_some() {
+                        write_http_response(
+                            &mut stream,
+                            "400 Bad Request",
+                            "application/json",
+                            "{\"error\": \"duplicate Content-Length\"}",
+                        )?;
+                        return Ok(());
+                    }
+                    let value = value.trim();
+                    let Ok(parsed) = value.parse::<usize>() else {
+                        write_http_response(
+                            &mut stream,
+                            "400 Bad Request",
+                            "application/json",
+                            "{\"error\": \"invalid Content-Length\"}",
+                        )?;
+                        return Ok(());
+                    };
+                    if parsed > MAX_BODY_BYTES {
+                        write_http_response(
+                            &mut stream,
+                            "413 Payload Too Large",
+                            "application/json",
+                            "{\"error\": \"request body too large\"}",
+                        )?;
+                        return Ok(());
+                    }
+                    content_length = Some(parsed);
+                } else if key.eq_ignore_ascii_case("transfer-encoding") {
+                    transfer_encoding = Some(value.trim());
+                }
+            }
+            if transfer_encoding.is_some() {
+                write_http_response(
+                    &mut stream,
+                    "400 Bad Request",
+                    "application/json",
+                    "{\"error\": \"Transfer-Encoding is not supported\"}",
+                )?;
+                return Ok(());
+            }
+            let content_length = content_length.unwrap_or(0);
             let mut rest = buf[header_end..].to_vec();
             while rest.len() < content_length {
                 let n = stream.read(&mut tmp)?;
                 if n == 0 {
-                    break;
+                    write_http_response(
+                        &mut stream,
+                        "400 Bad Request",
+                        "application/json",
+                        "{\"error\": \"request body is shorter than Content-Length\"}",
+                    )?;
+                    return Ok(());
                 }
                 rest.extend_from_slice(&tmp[..n]);
             }
-            body = rest;
+            body = rest.into_iter().take(content_length).collect();
             break;
         }
     }
     let (status, content_type, payload) = route(&method, &path, &body, &jobs, route_seconds);
+    write_http_response(&mut stream, status, content_type, &payload)?;
+    Ok(())
+}
+
+fn write_http_response<S: Write>(
+    stream: &mut S,
+    status: &str,
+    content_type: &str,
+    payload: &str,
+) -> std::io::Result<()> {
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         payload.len()
     );
     stream.write_all(response.as_bytes())?;
-    stream.write_all(payload.as_bytes())?;
-    Ok(())
+    stream.write_all(payload.as_bytes())
 }
 
 fn find_headers_end(buf: &[u8]) -> Option<usize> {
@@ -187,13 +323,57 @@ fn route(
             let Ok(id) = id.parse::<u64>() else {
                 return not_found;
             };
+            {
+                let map = jobs.lock().unwrap();
+                let Some(job) = map.get(&id) else {
+                    return not_found;
+                };
+                if !matches!(job.state, JobState::Queued | JobState::ReadyToStart) {
+                    return (
+                        "409 Conflict",
+                        "application/json",
+                        format!(
+                            "{{\"error\": \"job is {} and no longer accepts input\"}}",
+                            job.state.as_str()
+                        ),
+                    );
+                }
+            }
+            if body.is_empty() {
+                return (
+                    "400 Bad Request",
+                    "application/json",
+                    "{\"error\": \"dsn input must not be empty\"}".to_string(),
+                );
+            }
+            let input = match std::str::from_utf8(body) {
+                Ok(input) => input,
+                Err(_) => {
+                    return (
+                        "400 Bad Request",
+                        "application/json",
+                        "{\"error\": \"dsn input must be valid UTF-8\"}".to_string(),
+                    )
+                }
+            };
+            // Reject malformed designs before they become job state. The
+            // worker imports again from the retained source, but deferring
+            // this check until start made READY_TO_START mean only "UTF-8",
+            // not "a routable design".
+            if let Err(error) = import_dsn(input) {
+                return (
+                    "400 Bad Request",
+                    "application/json",
+                    format!("{{\"error\": {}}}", json_string(&error.to_string())),
+                );
+            }
             let mut map = jobs.lock().unwrap();
             let Some(job) = map.get_mut(&id) else {
                 return not_found;
             };
-            // input may only be (re)uploaded before the job starts: an
-            // unconditional READY_TO_START reopened cancelled jobs and
-            // could arm a second worker on a running one
+            // Input may only be (re)uploaded before the job starts. Check
+            // under the same lock used for the state mutation, so a worker
+            // cannot start between validation and commit.
             if !matches!(job.state, JobState::Queued | JobState::ReadyToStart) {
                 return (
                     "409 Conflict",
@@ -204,7 +384,7 @@ fn route(
                     ),
                 );
             }
-            job.input_dsn = Some(String::from_utf8_lossy(body).to_string());
+            job.input_dsn = Some(input.to_string());
             job.state = JobState::ReadyToStart;
             ("200 OK", "application/json", job_json(job))
         }
@@ -326,9 +506,20 @@ fn mcp_dispatch(request: &str, jobs: &Jobs, route_seconds: u64) -> String {
     let Ok(req) = parse_json(request) else {
         return mcp_error(Json::Null, -32700, "Parse error");
     };
+    if !matches!(req, Json::Obj(_)) {
+        return mcp_error(Json::Null, -32600, "Invalid Request");
+    }
     let id = req.get("id").cloned().unwrap_or(Json::Null);
-    let method = req.str_or("method", "");
-    match method.as_str() {
+    if !matches!(id, Json::Null | Json::Num { .. } | Json::Str(_)) {
+        return mcp_error(Json::Null, -32600, "Invalid Request");
+    }
+    if req.get("jsonrpc").and_then(Json::as_str) != Some("2.0") {
+        return mcp_error(id, -32600, "Invalid Request");
+    }
+    let Some(method) = req.get("method").and_then(Json::as_str) else {
+        return mcp_error(id, -32600, "Invalid Request");
+    };
+    match method {
         "initialize" => mcp_result(
             &id,
             &format!(
@@ -341,34 +532,60 @@ fn mcp_dispatch(request: &str, jobs: &Jobs, route_seconds: u64) -> String {
             &id,
             r#"{"tools": [
               {"name": "enqueue_job", "description": "Create a new routing job", "inputSchema": {"type": "object", "properties": {}}},
-              {"name": "set_job_input", "description": "Upload the Specctra DSN design of a job", "inputSchema": {"type": "object", "properties": {"job_id": {"type": "number"}, "dsn": {"type": "string"}}, "required": ["job_id", "dsn"]}},
-              {"name": "start_job", "description": "Start routing a job", "inputSchema": {"type": "object", "properties": {"job_id": {"type": "number"}}, "required": ["job_id"]}},
-              {"name": "get_job_details", "description": "The state and score of a job", "inputSchema": {"type": "object", "properties": {"job_id": {"type": "number"}}, "required": ["job_id"]}},
-              {"name": "get_job_output", "description": "The routed session file of a completed job", "inputSchema": {"type": "object", "properties": {"job_id": {"type": "number"}}, "required": ["job_id"]}},
+              {"name": "set_job_input", "description": "Upload the Specctra DSN design of a job", "inputSchema": {"type": "object", "properties": {"job_id": {"type": "integer", "minimum": 0}, "dsn": {"type": "string"}}, "required": ["job_id", "dsn"]}},
+              {"name": "start_job", "description": "Start routing a job", "inputSchema": {"type": "object", "properties": {"job_id": {"type": "integer", "minimum": 0}}, "required": ["job_id"]}},
+              {"name": "get_job_details", "description": "The state and score of a job", "inputSchema": {"type": "object", "properties": {"job_id": {"type": "integer", "minimum": 0}}, "required": ["job_id"]}},
+              {"name": "get_job_output", "description": "The routed session file of a completed job", "inputSchema": {"type": "object", "properties": {"job_id": {"type": "integer", "minimum": 0}}, "required": ["job_id"]}},
               {"name": "system_status", "description": "Server health and version", "inputSchema": {"type": "object", "properties": {}}}
             ]}"#,
         ),
         "tools/call" => {
-            let params = req.get("params").cloned().unwrap_or(Json::Null);
-            let name = params.str_or("name", "");
-            let args = params.get("arguments").cloned().unwrap_or(Json::Null);
-            // a job id must be a non-negative INTEGER exactly representable
-            // as f64 — a bare `as u64` cast silently accepted missing,
-            // fractional, negative or imprecise ids
-            let needs_id = !matches!(name.as_str(), "enqueue_job" | "system_status");
-            let job_id = match args.get("job_id").and_then(|v| v.as_f64()) {
-                Some(v) if v >= 0.0 && v.fract() == 0.0 && v <= (1u64 << 53) as f64 => v as u64,
-                Some(_) => return mcp_error(id, -32602, "job_id must be a non-negative integer"),
-                None if needs_id => return mcp_error(id, -32602, "job_id is required"),
-                None => 0,
+            let Some(Json::Obj(_)) = req.get("params") else {
+                return mcp_error(id, -32602, "params must be an object");
             };
-            let (verb, path, payload): (&str, String, Vec<u8>) = match name.as_str() {
+            let params = req.get("params").expect("validated params object");
+            let Some(name) = params.get("name").and_then(Json::as_str) else {
+                return mcp_error(id, -32602, "tool name must be a string");
+            };
+            let args = match params.get("arguments") {
+                Some(value @ Json::Obj(_)) => value,
+                Some(_) => return mcp_error(id, -32602, "arguments must be an object"),
+                None => {
+                    return mcp_error(id, -32602, "arguments must be an object");
+                }
+            };
+            // Validate the original JSON number lexeme. Converting through
+            // f64 first would turn 9007199254740993 into 9007199254740992.
+            let needs_id = !matches!(name, "enqueue_job" | "system_status");
+            let job_id = if let Some(value) = args.get("job_id") {
+                match value.as_exact_u64() {
+                    Some(value) => value,
+                    None => {
+                        return mcp_error(id, -32602, "job_id must be a non-negative integer")
+                    }
+                }
+            } else if needs_id {
+                return mcp_error(id, -32602, "job_id is required");
+            } else {
+                0
+            };
+            let (verb, path, payload): (&str, String, Vec<u8>) = match name {
                 "enqueue_job" => ("POST", "/v1/jobs/enqueue".into(), Vec::new()),
-                "set_job_input" => (
-                    "POST",
-                    format!("/v1/jobs/{job_id}/input"),
-                    args.str_or("dsn", "").into_bytes(),
-                ),
+                "set_job_input" => {
+                    let dsn = match args.get("dsn") {
+                        Some(crate::io::json::Json::Str(value)) if !value.is_empty() => value,
+                        Some(crate::io::json::Json::Str(_)) => {
+                            return mcp_error(id, -32602, "dsn must be a non-empty string")
+                        }
+                        Some(_) => return mcp_error(id, -32602, "dsn must be a string"),
+                        None => return mcp_error(id, -32602, "dsn is required"),
+                    };
+                    (
+                        "POST",
+                        format!("/v1/jobs/{job_id}/input"),
+                        dsn.as_bytes().to_vec(),
+                    )
+                }
                 "start_job" => ("PUT", format!("/v1/jobs/{job_id}/start"), Vec::new()),
                 "get_job_details" => ("GET", format!("/v1/jobs/{job_id}"), Vec::new()),
                 "get_job_output" => ("GET", format!("/v1/jobs/{job_id}/output"), Vec::new()),
@@ -398,7 +615,7 @@ fn json_string(s: &str) -> String {
 
 fn mcp_result(id: &crate::io::json::Json, result: &str) -> String {
     let id_s = match id {
-        crate::io::json::Json::Num(n) => format!("{n}"),
+        crate::io::json::Json::Num { raw, .. } => raw.clone(),
         // a valid string id may contain quotes/backslashes: escape it
         crate::io::json::Json::Str(s) => json_string(s),
         _ => "null".to_string(),
@@ -408,7 +625,7 @@ fn mcp_result(id: &crate::io::json::Json, result: &str) -> String {
 
 fn mcp_error(id: crate::io::json::Json, code: i32, message: &str) -> String {
     let id_s = match id {
-        crate::io::json::Json::Num(n) => format!("{n}"),
+        crate::io::json::Json::Num { raw, .. } => raw,
         crate::io::json::Json::Str(s) => json_string(&s),
         _ => "null".to_string(),
     };
@@ -474,7 +691,7 @@ fn run_job(
     }
     let stats = crate::scoring::BoardStatistics::collect(&board);
     let score = stats.normalized_score(&crate::scoring::ScoringSettings::default());
-    let ses = export_ses(&board, "api_job", board.resolution);
+    let ses = export_ses(&board, "api_job", board.resolution).map_err(|e| e.to_string())?;
     // final gate (the CLI's exit-2/exit-3 equivalent): a routing result
     // that is incomplete or violates clearances must not read as success
     let report = crate::drc::check_board(&board);
@@ -488,4 +705,192 @@ fn run_job(
         ))
     };
     Ok((ses, score, issues))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Shutdown;
+    #[cfg(unix)]
+    use std::os::unix::net::UnixStream;
+
+    fn empty_jobs() -> Jobs {
+        Arc::new(Mutex::new(HashMap::new()))
+    }
+
+    fn queued_jobs(id: u64) -> Jobs {
+        let jobs = empty_jobs();
+        jobs.lock().unwrap().insert(
+            id,
+            RoutingJob {
+                id,
+                state: JobState::Queued,
+                input_dsn: None,
+                output_ses: None,
+                score: None,
+                error: None,
+                cancel: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        jobs
+    }
+
+    #[cfg(unix)]
+    fn http_exchange(request: &[u8]) -> String {
+        // A Unix stream pair exercises the same blocking read/write contract
+        // without consuming a real TCP listener.  This keeps parser tests
+        // deterministic in sandboxed CI environments where bind(2) is denied.
+        let (mut client, server_stream) = UnixStream::pair().expect("test stream pair");
+        let server = std::thread::spawn(move || {
+            handle(server_stream, empty_jobs(), 1).expect("handle test request");
+        });
+        client.write_all(request).expect("write test request");
+        client
+            .shutdown(Shutdown::Write)
+            .expect("finish test request");
+        let mut response = String::new();
+        client
+            .read_to_string(&mut response)
+            .expect("read test response");
+        server.join().expect("join test server");
+        response
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn http_parser_rejects_ambiguous_or_unsupported_framing() {
+        for request in [
+            b"GET /v1/system/status HTTP/1.1 extra\r\n\r\n".as_slice(),
+            b"POST /v1/mcp HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n",
+            b"POST /v1/mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
+            b"GET /v1/system/status HTTP/1.1\r\n",
+        ] {
+            let response = http_exchange(request);
+            assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+        }
+        let response = http_exchange(b"GET /v1/system/status HTTP/1.1\r\n\r\n");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+
+        let mut oversized = b"GET /v1/system/status HTTP/1.1\r\nX-Pad: ".to_vec();
+        oversized.extend(std::iter::repeat_n(b'x', 65 * 1024));
+        oversized.extend_from_slice(b"\r\n\r\n");
+        let response = http_exchange(&oversized);
+        assert!(response.starts_with("HTTP/1.1 431"), "{response}");
+    }
+
+    #[test]
+    fn mcp_preserves_job_ids_above_f64_exact_range() {
+        let id = 9_007_199_254_740_993_u64; // 2^53 + 1
+        let jobs = empty_jobs();
+        jobs.lock().unwrap().insert(
+            id,
+            RoutingJob {
+                id,
+                state: JobState::Queued,
+                input_dsn: None,
+                output_ses: None,
+                score: None,
+                error: None,
+                cancel: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"get_job_details","arguments":{{"job_id":{id}}}}}}}"#
+        );
+        let response = mcp_dispatch(&request, &jobs, 1);
+        assert!(
+            response.contains("QUEUED"),
+            "exact id must resolve: {response}"
+        );
+        assert!(response.contains("\"isError\": false"));
+    }
+
+    #[test]
+    fn mcp_rejects_non_integer_job_ids_before_routing() {
+        let jobs = empty_jobs();
+        for literal in ["-1", "1.0", "1e3", "9007199254740993.0"] {
+            let request = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"get_job_details","arguments":{{"job_id":{literal}}}}}}}"#
+            );
+            let response = mcp_dispatch(&request, &jobs, 1);
+            assert!(response.contains("job_id must be a non-negative integer"));
+        }
+    }
+
+    #[test]
+    fn mcp_rejects_missing_non_string_and_empty_dsn_input() {
+        let jobs = empty_jobs();
+        let requests = [
+            (r#"{"job_id": 1}"#, "dsn is required"),
+            (r#"{"job_id": 1, "dsn": 42}"#, "dsn must be a string"),
+            (
+                r#"{"job_id": 1, "dsn": ""}"#,
+                "dsn must be a non-empty string",
+            ),
+        ];
+        for (arguments, message) in requests {
+            let request = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"set_job_input","arguments":{arguments}}}}}"#
+            );
+            let response = mcp_dispatch(&request, &jobs, 1);
+            assert!(response.contains(message), "{message}: {response}");
+        }
+    }
+
+    #[test]
+    fn mcp_rejects_invalid_json_rpc_envelopes_and_parameter_shapes() {
+        let jobs = empty_jobs();
+        for request in [
+            r#"[]"#,
+            r#"{"id":1,"method":"tools/list"}"#,
+            r#"{"jsonrpc":"1.0","id":1,"method":"tools/list"}"#,
+            r#"{"jsonrpc":"2.0","id":1}"#,
+        ] {
+            let response = mcp_dispatch(request, &jobs, 1);
+            assert!(response.contains("\"code\": -32600"), "{response}");
+        }
+        for request in [
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call"}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":[]}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"system_status","arguments":[]}}"#,
+        ] {
+            let response = mcp_dispatch(request, &jobs, 1);
+            assert!(response.contains("\"code\": -32602"), "{response}");
+        }
+    }
+
+    #[test]
+    fn rest_rejects_empty_and_non_utf8_dsn_input() {
+        for (body, expected) in [
+            (Vec::new(), "dsn input must not be empty"),
+            (vec![0xff], "dsn input must be valid UTF-8"),
+        ] {
+            let jobs = queued_jobs(7);
+            let (status, _, payload) = route("POST", "/v1/jobs/7/input", &body, &jobs, 1);
+            assert_eq!(status, "400 Bad Request");
+            assert!(payload.contains(expected), "{expected}: {payload}");
+            assert_eq!(
+                jobs.lock().unwrap().get(&7).unwrap().state,
+                JobState::Queued
+            );
+        }
+    }
+
+    #[test]
+    fn rest_rejects_invalid_dsn_before_changing_job_state() {
+        let jobs = queued_jobs(7);
+        let (status, _, payload) = route(
+            "POST",
+            "/v1/jobs/7/input",
+            b"(pcb broken (resolution parsec 1) (structure (layer F.Cu)))",
+            &jobs,
+            1,
+        );
+        assert_eq!(status, "400 Bad Request");
+        assert!(payload.contains("DSN import error"), "{payload}");
+        let jobs = jobs.lock().unwrap();
+        let job = jobs.get(&7).unwrap();
+        assert_eq!(job.state, JobState::Queued);
+        assert!(job.input_dsn.is_none());
+    }
 }

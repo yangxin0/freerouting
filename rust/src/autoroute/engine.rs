@@ -50,7 +50,11 @@ pub struct AutorouteEngine {
     obstacle_rooms: crate::datastructures::FxHashMap<(ItemId, usize), RoomId>,
     /// Drill pages for via-location candidates (Java: DrillPageArray),
     /// created on first use, cache synced against board changes.
-    pub drill_pages: Option<crate::autoroute::drill_pages::DrillPageArray>,
+    /// Drill-page caches keyed by via padstack.  A single engine is reused
+    /// across nets and via rules; sharing the first net's page geometry with
+    /// a later blind/through padstack produces invalid candidates.
+    pub drill_pages:
+        crate::datastructures::FxHashMap<usize, crate::autoroute::drill_pages::DrillPageArray>,
     /// Consumed prefix of the board's change log.
     seen_log: usize,
     /// The board change epoch this graph was built against.
@@ -92,7 +96,7 @@ impl AutorouteEngine {
             expanded: Vec::new(),
             net_dependent: Vec::new(),
             obstacle_rooms: crate::datastructures::FxHashMap::default(),
-            drill_pages: None,
+            drill_pages: crate::datastructures::FxHashMap::default(),
             seen_log: 0,
             seen_epoch: 0,
             grid: crate::datastructures::FxHashMap::default(),
@@ -585,12 +589,13 @@ impl AutorouteEngine {
             {
                 continue;
             }
-            let clearance = matrix.get_value(
-                item.base.clearance_class,
-                self.trace_clearance_class,
-                layer,
-                true,
-            );
+            // The pending trace is inserted after every existing item, so
+            // use the final DRC's (new, existing) matrix orientation.  This
+            // matters when a board deliberately uses an asymmetric matrix.
+            let clearance =
+                crate::drc::clearance_for_new_item(board, item, self.trace_clearance_class, layer)
+                    as i32
+                    + crate::rules::clearance_matrix::CLEARANCE_SAFETY_MARGIN;
             let margin = (self.trace_half_width + clearance).max(0);
             let Some(inflated) = board.inflated_shapes(item_id, margin) else {
                 continue;

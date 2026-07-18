@@ -68,6 +68,34 @@ flowchart TD
 | `integrations/` | Packaging and integration assets for external PCB tool workflows. |
 | `scripts/` | Automation, benchmarking, and comparison scripts. |
 | `src_v19/` | The v1.9 reference tree, used for behavior comparison and parity checks. |
+| `rust/` | The incremental Rust port, including its board/rules model, maze router, checked interchange boundaries, CLI/API entry points, and contract tests. |
+
+## Rust Port Contract Boundaries
+
+The Rust port follows the same pipeline, but its supported boundaries are
+deliberately narrower than its internal modules expose within the crate:
+
+`checked import -> validated board/rules graph -> per-net request derivation -> transactional maze routing -> canonical DRC -> checked export`
+
+- `rust/src/board/validation.rs` owns format-independent board invariants.
+  Checked writers call it before their format-specific representability
+  checks, so invalid references or geometry cannot be serialized differently
+  by each format.
+- `rust/src/drc.rs` owns pair ordering and required-clearance evaluation.
+  Search preflights, board mutations, and optimizer acceptance reuse those
+  predicates instead of reconstructing clearance rules locally.
+- `rust/src/autoroute/batch.rs` is the supported routing entry point. It
+  derives width, clearance, active-layer, via-rule, attach, and plane costs
+  independently for every target and rip-up victim. Raw maze requests remain
+  crate-private because they represent already-derived internal state.
+- DSN, SES, KiCad JSON, and `.rules` writers are checked semantic boundaries.
+  They preserve supported metadata and reject state their target format cannot
+  represent. Cross-format tests compare normalized semantics rather than only
+  checking whether a writer can read its own output.
+
+These boundaries are the primary regression surface for the Rust port. New
+format fields, routing entry points, or mutation paths must either reuse them
+or add an equivalent contract test before becoming public.
 
 ## Navigation Guide
 

@@ -29,6 +29,7 @@ pub fn pull_tight_trace(board: &mut BasicBoard, id: ItemId) -> (ItemId, usize) {
     let layer = trace.layer;
     let half_width = trace.half_width;
     let clearance_class = item.base.clearance_class;
+    let clearance_class_explicit = item.base.clearance_class_explicit;
     let mut corners: Vec<IntPoint> = trace
         .polyline
         .corner_approx_arr()
@@ -116,14 +117,17 @@ pub fn pull_tight_trace(board: &mut BasicBoard, id: ItemId) -> (ItemId, usize) {
     } else {
         (trace.polyline.clone(), 0)
     };
-    crate::board::basic_board::set_birth_tag(3);
-    let new_id = board.insert_trace(
-        polyline,
-        layer,
-        half_width,
-        item.base.net_nos.clone(),
-        clearance_class,
-    );
+    let new_id = {
+        let _birth_tag = crate::board::basic_board::birth_tag_scope(3);
+        board.insert_trace_with_provenance(
+            polyline,
+            layer,
+            half_width,
+            item.base.net_nos.clone(),
+            clearance_class,
+            clearance_class_explicit,
+        )
+    };
     if original_birth != 0 {
         board.set_birth(new_id, original_birth);
     }
@@ -168,7 +172,7 @@ pub fn pull_tight_all(board: &mut BasicBoard, max_rounds: usize) -> usize {
 /// corner). Reduces the fragmentation left by junction splitting and
 /// shove cutouts. Returns the number of removed items.
 pub fn combine_all_traces(board: &mut BasicBoard) -> usize {
-    crate::board::basic_board::set_birth_tag(4);
+    let _birth_tag = crate::board::basic_board::birth_tag_scope(4);
     let before = board.items().count();
     let ids: Vec<crate::board::ItemId> = board
         .items()
@@ -372,6 +376,7 @@ mod tests {
             vec![1],
             1,
         );
+        board.set_item_clearance_class_explicit(trace, true);
         assert!(board.net_is_completely_connected(1));
         let before = total_trace_length(&board);
 
@@ -386,6 +391,11 @@ mod tests {
         assert!(board.net_is_completely_connected(1));
         assert!(board.get_item(a).is_some() && board.get_item(b).is_some());
         assert!(board.get_item(trace).is_none(), "trace was replaced");
+        assert!(board.items().any(|(_, item)| {
+            matches!(item.kind, ItemKind::PolylineTrace(_))
+                && item.base.contains_net(1)
+                && item.base.clearance_class_explicit
+        }));
     }
 
     #[test]
