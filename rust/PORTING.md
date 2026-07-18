@@ -4,7 +4,7 @@ Incremental port of the Java sources (`src/main/java/app/freerouting`, 484 files
 to the `rust/` crate. Updated by each `/loop` iteration; the next iteration
 should pick up the first unchecked item below.
 
-## Contract consolidation (2026-07-17)
+## Contract consolidation (2026-07-18)
 
 This section is the current authoritative status. The round-by-round audit
 sections below are historical context and are not a current open-defect list.
@@ -22,8 +22,17 @@ an ambiguous coincident via-move bridge is rejected transactionally.
 
 Rules export preserves class bindings, zero and per-layer matrix values, and
 document order; asymmetric matrices are rejected instead of silently changed.
+The imported outline's strip width is a scalar geometry compensation against
+the default area class; final outline/item pair checks still use the canonical
+lower-ID/higher-ID matrix cell. This intentional outline policy is distinct
+from runtime clearance evaluation.
 DSN, SES, and KiCad interchange paths preserve units, outlines, netless copper
 where the schema permits it, item classes, and explicit-vs-inherited state.
+Logical DSN terminals retain separate component/pin identities and remain
+owned by their exact subnet even when their placement geometry is unavailable.
+The router may connect the physical copper that exists, but completion,
+scoring, API gates, and checked cross-format export retain the unresolved
+obligation instead of turning it into a vacuous success.
 Where a format has no representation, its checked writer fails closed instead
 of silently dropping state: SES omits SystemFixed copper already present in
 the base DSN and rejects explicit/incompatible clearance, attach, escape, or
@@ -34,7 +43,8 @@ names, while malformed legacy outline polygons are normalized on import.
 KiCad JSON carries a versioned Freerouting routing-metadata extension for
 per-layer widths, active layers, item clearance bindings, and class flags;
 legacy scalar JSON remains readable. CLI and API/MCP validation, routing
-budgets, and exit status are covered by end-to-end tests.
+budgets, and exit status are covered across integration and protocol-boundary
+tests.
 
 The common invariant boundary is `board::validate_board_references`: every
 checked writer runs format-specific representability checks and then this
@@ -49,11 +59,12 @@ rather than guessed or silently skipped.
 
 Verification on this tree:
 
-- `cargo test --all-targets --no-fail-fast`: 391 passed, 0 failed, 0 ignored
+- `cargo test --all-targets --no-fail-fast`: 403 passed, 0 failed, 0 ignored
 - `cargo fmt --all -- --check`: clean
 - `cargo clippy --all-targets -- -D warnings`: clean
 
-Remaining differences are deliberate model/performance boundaries: the tile
+Remaining differences within this audited contract-consolidation scope are
+deliberate model/performance boundaries: the tile
 router retains the documented occupy-on-push maze tradeoff; the cost model
 still represents trace width as one scalar per layer and does not yet model
 all directional `layer_rule` costs; and the compact board model cannot
@@ -67,7 +78,7 @@ round-trip through the checked writer; SES rejects route items whose class or
 via metadata would be reconstructed differently (while retaining ordinary
 component-pin vias); and DSN records a typed non-wiring import baseline and
 returns `StaleSource` for changed rules, outline, padstack, net, or static-item
-state while still allowing route-only edits. The 391 tests comprise 379
+state while still allowing route-only edits. The 403 tests comprise 391
 library tests, three CLI unit tests, six CLI/DRC integration tests, and one
 each for cross-format semantics, replay, and the real-board fixture targets.
 
@@ -81,13 +92,12 @@ each for cross-format semantics, replay, and the real-board fixture targets.
 > netless copper / matrix order / hole-clearance labels / unit-independent
 > tolerance; KiCad/rules/SES unit handling) and a second round fixed the
 > KiCad duplicate-default round-trip and the optimizer's local-DRC/metric
-> parity. A third and fourth round then closed the rest of the audit's
+> parity. A third and fourth round then closed the rest of that audit's
 > functional findings: image keepouts, net-class SMD clearance, DRC same-net /
 > conduction, the single-thread optimizer, J2 routing completeness (now 24/24),
-> and the named-clearance-class grammar. What remains OPEN is narrower — see the
-> "Second-round audit" section: router PERFORMANCE vs Java (not correctness),
-> and two non-clearance features (named via-rule registry, autoroute
-> `layer_rule`). Do not read the historical sections as current truth.
+> and the named-clearance-class grammar. Those statements record the state at
+> that point in the chronology; the current scoped boundaries are listed above.
+> Do not read the historical sections as current truth.
 
 ## Historical status (as of iteration 118)
 
@@ -800,13 +810,13 @@ Issue029 146/163 @769.62, Issue593 59/94 @332.05).
 
 FIXED:
 
-- **Routing preflights use the final DRC's matrix order.** The pending
-  trace/via always receives a HIGHER id than existing items, so
-  `check_board` looks up (new, old); `via_site_clearance` and
-  `trace_run_is_clear` used the transposed (old, new) cell, and the
-  optimizer's target-net gate now id-orders its pairs too — with
-  `M[1,2]=0, M[2,1]=5000` the router could route what the final DRC then
-  rejected.
+- **Routing preflights use the final DRC's matrix order.** This historical
+  round correctly identified the need for one order but described its
+  direction backwards. Java iterates the HIGHER-id item first and queries
+  `(other, this)`, so the actual cell is `(lower-id, higher-id)` =
+  `(existing, new)`. Contract consolidation reverified that call chain and
+  now canonicalizes `required_clearance` internally; insertion preflights use
+  the same adapter, so callers cannot transpose an asymmetric matrix.
 - **Via rules select span-aware and vias carry the ViaInfo's class.**
   `selected_via_for_net` picks the rule's first via whose padstack spans
   every routing layer (a blind-first/through-second rule no longer locks

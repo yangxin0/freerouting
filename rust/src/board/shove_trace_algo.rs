@@ -64,11 +64,11 @@ pub fn shove_aside(
             board.pop_snapshot();
             true
         } else {
-            board.undo();
+            board.rollback_snapshot();
             false
         }
     } else {
-        board.undo();
+        board.rollback_snapshot();
         false
     }
 }

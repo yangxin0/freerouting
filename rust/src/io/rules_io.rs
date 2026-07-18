@@ -1506,7 +1506,7 @@ mod tests {
     }
 
     #[test]
-    fn future_via_symbols_do_not_leak_into_earlier_classes() {
+    fn unknown_via_clearance_does_not_create_a_matrix_class() {
         const VIA_DSN: &str = r#"(pcb "via.dsn"
   (resolution um 10)
   (structure
@@ -1533,16 +1533,20 @@ mod tests {
         let early = board.rules.net_classes.get_by_name("Early").unwrap();
         let late = board.rules.net_classes.get_by_name("Late").unwrap();
         let explicit = board.rules.net_classes.get_by_name("Explicit").unwrap();
-        let via_class = board.rules.clearance_matrix.get_no("via").unwrap();
-        assert_ne!(
+        // A `(via ... CLEARANCE)` token is an item attribute, not a class
+        // declaration. Java's Network.read_via_info falls back to the
+        // default item class when the symbol has not been declared.
+        assert!(board.rules.clearance_matrix.get_no("via").is_none());
+        let default_via_class = crate::rules::BoardRules::default_clearance_class();
+        assert_eq!(
             board
                 .rules
                 .net_classes
                 .get(early)
                 .default_item_clearance_classes
                 .get(ItemClass::Via),
-            via_class,
-            "the future `via` symbol must not alter Early"
+            default_via_class,
+            "an unknown via clearance falls back to the default class"
         );
         assert_eq!(
             board
@@ -1551,8 +1555,8 @@ mod tests {
                 .get(late)
                 .default_item_clearance_classes
                 .get(ItemClass::Via),
-            via_class,
-            "Late inherits the semantic declaration now in force"
+            default_via_class,
+            "the fallback remains stable for later classes"
         );
         assert_eq!(
             board.rules.net_classes.get(explicit).get_via_rule(),
@@ -1566,7 +1570,7 @@ mod tests {
     }
 
     #[test]
-    fn future_via_clearance_class_is_created_at_its_source_position() {
+    fn unknown_via_clearance_falls_back_without_leaking_into_rules() {
         const VIA_DSN: &str = r#"(pcb "via-order.dsn"
   (resolution um 10)
   (structure
@@ -1594,18 +1598,25 @@ mod tests {
             .clearance_matrix
             .get_no("power")
             .expect("power class");
-        let strict = board
-            .rules
-            .clearance_matrix
-            .get_no("strict")
-            .expect("strict class");
+        assert!(
+            board.rules.clearance_matrix.get_no("strict").is_none(),
+            "unknown via clearance names must not create matrix columns"
+        );
+        let via = board.rules.via_infos.get_by_name("V").expect("via info");
         assert_eq!(
-            board
-                .rules
-                .clearance_matrix
-                .get_value(strict, power, 0, false),
+            board.rules.via_infos.get(via).get_clearance_class(),
+            crate::rules::BoardRules::default_clearance_class(),
+            "unknown via clearance falls back to the default item class"
+        );
+        assert_eq!(
+            board.rules.clearance_matrix.get_value(
+                crate::rules::BoardRules::default_clearance_class(),
+                power,
+                0,
+                false
+            ),
             5000,
-            "strict must inherit the default-to-power value in force at the via declaration"
+            "the declared typed rule still applies to the existing power class"
         );
         let class = board.rules.net_classes.get_by_name("C").expect("class C");
         assert!(

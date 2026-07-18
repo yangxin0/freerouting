@@ -103,7 +103,7 @@ pub(crate) fn insert_forced_via_with_escape(
             if crate::debug::shove() {
                 eprintln!("FORCED VIA shove failed at {location:?} layer {layer}");
             }
-            board.undo();
+            board.rollback_snapshot();
             return None;
         }
         // the space must actually be free now (unshovable items remain)
@@ -120,7 +120,7 @@ pub(crate) fn insert_forced_via_with_escape(
             if crate::debug::shove() {
                 eprintln!("FORCED VIA blocked at {location:?} layer {layer}");
             }
-            board.undo();
+            board.rollback_snapshot();
             return None;
         }
     }
@@ -153,7 +153,7 @@ pub(crate) fn insert_forced_via_with_escape(
         if crate::debug::shove() {
             eprintln!("FORCED VIA violates drill clearance at {location:?}");
         }
-        board.undo();
+        board.rollback_snapshot();
         return None;
     }
     board.pop_snapshot();
@@ -181,7 +181,7 @@ pub fn check_forced_via(
         false,
     )
     .is_some();
-    board.undo();
+    board.rollback_snapshot();
     ok
 }
 

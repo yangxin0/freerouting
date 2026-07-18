@@ -590,7 +590,7 @@ impl AutorouteEngine {
                 continue;
             }
             // The pending trace is inserted after every existing item, so
-            // use the final DRC's (new, existing) matrix orientation.  This
+            // use the final DRC's `(existing, new)` matrix orientation. This
             // matters when a board deliberately uses an asymmetric matrix.
             let clearance =
                 crate::drc::clearance_for_new_item(board, item, self.trace_clearance_class, layer)

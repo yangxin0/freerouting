@@ -422,6 +422,20 @@ fn validate_nets(board: &BasicBoard) -> Result<(), BoardValidationError> {
             ));
         }
     }
+    for (net_no, endpoint) in board.unresolved_net_endpoints() {
+        if board.rules.nets.get_by_no(net_no).is_none() {
+            return Err(BoardValidationError::new(
+                format!("unresolved_net_endpoints[{net_no}]"),
+                "references a missing net",
+            ));
+        }
+        if endpoint.component.is_empty() || endpoint.pin.is_empty() {
+            return Err(BoardValidationError::new(
+                format!("unresolved_net_endpoints[{net_no}]"),
+                "contains an empty component or pin name",
+            ));
+        }
+    }
     Ok(())
 }
 

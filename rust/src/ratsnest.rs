@@ -18,6 +18,40 @@ pub struct AirLine {
     pub to: (f64, f64),
 }
 
+/// Canonical connection-obligation count. Physical connected components and
+/// unresolved logical terminals are components of the same logical net, so a
+/// net with `C + U` components needs `max(C + U - 1, 0)` connections. Empty or
+/// single-unresolved declarations are import/export terminal failures rather
+/// than airlines; [`routing_failure_count`] keeps those fail-closed without
+/// distorting Java-compatible optimizer and score metrics.
+pub fn incomplete_connection_count(board: &BasicBoard) -> usize {
+    (1..=board.rules.nets.max_net_no())
+        .map(|net_no| {
+            let physical_components = net_components(board, net_no).len();
+            let unresolved = board.unresolved_net_endpoint_count(net_no);
+            physical_components
+                .saturating_add(unresolved)
+                .saturating_sub(1)
+        })
+        .sum()
+}
+
+/// Final routing/API failure count. A net whose logical connection count is
+/// zero can still be unusable because it has no represented terminal (or one
+/// unresolved terminal). Count that terminal-state error once so callers do
+/// not report success, while multi-component nets retain their airline count.
+pub fn routing_failure_count(board: &BasicBoard) -> usize {
+    let incomplete = incomplete_connection_count(board);
+    incomplete
+        + (1..=board.rules.nets.max_net_no())
+            .filter(|&net_no| {
+                let component_count = net_components(board, net_no).len()
+                    + board.unresolved_net_endpoint_count(net_no);
+                component_count <= 1 && !board.net_is_completely_connected(net_no)
+            })
+            .count()
+}
+
 /// A representative point of an item for airline computation: via/pin
 /// centers, both trace endpoints, area centroids (Java: the corners the
 /// Delaunay triangulation stores per NetItem).
@@ -187,5 +221,30 @@ mod tests {
         let lines = ratsnest(&board);
         assert_eq!(lines.len(), 2, "3 components need 2 airlines");
         assert!(ratsnest_json(&board).contains("\"net\": \"N1\""));
+    }
+
+    #[test]
+    fn unresolved_only_nets_use_component_math_but_fail_closed() {
+        fn board_with_unresolved(count: usize) -> BasicBoard {
+            let stack = LayerStructure::new(vec![Layer::new("F.Cu", true)]);
+            let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
+            let mut rules = BoardRules::new(stack.clone(), matrix);
+            rules.get_default_net_class();
+            rules.nets.add("N1", 1, false);
+            let mut board = BasicBoard::new(stack, rules, Padstacks::new(1));
+            for index in 0..count {
+                board.record_unresolved_net_endpoint(
+                    1,
+                    crate::board::basic_board::LogicalEndpoint::new(format!("U{index}"), "1"),
+                );
+            }
+            board
+        }
+
+        for (unresolved, obligations, failures) in [(0, 0, 1), (1, 0, 1), (2, 1, 1)] {
+            let board = board_with_unresolved(unresolved);
+            assert_eq!(incomplete_connection_count(&board), obligations);
+            assert_eq!(routing_failure_count(&board), failures);
+        }
     }
 }

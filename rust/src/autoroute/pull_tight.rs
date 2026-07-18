@@ -238,12 +238,8 @@ fn polyline_keeps_clearance(
                     continue;
                 }
             }
-            let cl = board.rules.clearance_matrix.get_value(
-                clearance_class,
-                other.base.clearance_class,
-                layer,
-                false,
-            );
+            let cl =
+                crate::drc::clearance_for_new_item(board, other, clearance_class, layer) as i32;
             // direction a: our inflated segment vs their copper
             let check = seg.offset(cl.max(0) as f64);
             if other
@@ -288,12 +284,7 @@ pub fn audit_foreign_clearance(board: &BasicBoard, id: ItemId, tag: &str) {
                     continue;
                 }
             }
-            let cl = board.rules.clearance_matrix.get_value(
-                item.base.clearance_class,
-                other.base.clearance_class,
-                *l,
-                false,
-            ) as f64;
+            let cl = crate::drc::required_clearance(board, &item, other, *l).unwrap_or(0.0);
             let check = s.offset(cl - 2.0);
             if other
                 .tile_shapes(&board.padstacks)

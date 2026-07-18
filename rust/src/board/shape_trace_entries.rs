@@ -215,11 +215,12 @@ impl ShapeTraceEntries {
     ) -> Option<(Polyline, usize, i32, Vec<i32>, usize, bool)> {
         loop {
             let (first, last) = self.pop_piece()?;
-            // The substitute is a new trace, therefore the matrix lookup is
-            // (new aggressor, existing victim), matching the final DRC.
+            // Java `ShapeTraceEntries` queries `(victim trace, shove shape)`;
+            // this is also the final `(existing, new)` DRC order when the
+            // substitute trace is inserted.
             let cl_offset = board.rules.clearance_matrix.get_value(
-                self.cl_class,
                 first.clearance_class,
+                self.cl_class,
                 self.layer,
                 false,
             ) as f64
@@ -353,14 +354,14 @@ impl ShapeTraceEntries {
                                 .unwrap_or(0.0);
                             let mut via_trace_diff = via_radius - trace.half_width as f64;
                             let via_clearance = board.rules.clearance_matrix.get_value(
-                                self.cl_class,
                                 contact.base.clearance_class,
+                                self.cl_class,
                                 self.layer,
                                 false,
                             );
                             let trace_clearance = board.rules.clearance_matrix.get_value(
-                                self.cl_class,
                                 item.base.clearance_class,
+                                self.cl_class,
                                 self.layer,
                                 false,
                             );

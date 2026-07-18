@@ -52,6 +52,12 @@ impl<K: Ord + Clone, V: Clone + PartialEq> UndoableObjects<K, V> {
         }
     }
 
+    /// Whether an undo operation has exposed a redo branch that has not yet
+    /// been invalidated by a subsequent mutation.
+    pub fn can_redo(&self) -> bool {
+        self.redo_possible && self.stack_level < self.deleted_objects_stack.len()
+    }
+
     fn alloc(&mut self, node: Node<K, V>) -> NodeId {
         self.nodes.push(node);
         self.nodes.len() - 1
@@ -191,6 +197,22 @@ impl<K: Ord + Clone, V: Clone + PartialEq> UndoableObjects<K, V> {
         true
     }
 
+    /// Restores the situation before the last snapshot and permanently
+    /// discards the rejected branch. Unlike [`Self::undo`], this is an
+    /// internal transaction rollback: a later [`Self::redo`] must not be able
+    /// to resurrect the speculative state.
+    pub fn rollback_snapshot(
+        &mut self,
+        cancelled_objects: &mut Vec<V>,
+        restored_objects: &mut Vec<V>,
+    ) -> bool {
+        if !self.undo(cancelled_objects, restored_objects) {
+            return false;
+        }
+        self.disable_redo();
+        true
+    }
+
     /// Restores the situation before the last undo. Returns false if no
     /// redo is possible.
     pub fn redo(&mut self, cancelled_objects: &mut Vec<V>, restored_objects: &mut Vec<V>) -> bool {
@@ -310,7 +332,14 @@ impl<K: Ord + Clone, V: Clone + PartialEq> UndoableObjects<K, V> {
             let level = self.nodes[curr_node].level;
             if level > self.stack_level {
                 self.objects.remove(&key);
-            } else if level == self.stack_level {
+            } else if self.nodes[curr_node]
+                .redo_object
+                .is_some_and(|redo| self.nodes[redo].level > self.stack_level)
+            {
+                // The live version may predate the immediately enclosing
+                // snapshot when it was first modified only in the discarded
+                // level. Sever by target level, not by the live node's level,
+                // or a later empty snapshot can replay the stale branch.
                 self.nodes[curr_node].redo_object = None;
             }
         }
@@ -434,6 +463,28 @@ mod tests {
         db.insert(2, "w1".into());
         assert!(!db.redo(&mut Vec::new(), &mut Vec::new()));
         assert_eq!(alive(&db), vec![(1, "v1".into()), (2, "w1".into())]);
+    }
+
+    #[test]
+    fn rollback_snapshot_discards_the_speculative_redo_branch() {
+        let mut db: UndoableObjects<u32, String> = UndoableObjects::new();
+        db.insert(1, "v1".into());
+        db.generate_snapshot(); // enclosing transaction; object stays level 0
+        db.generate_snapshot(); // speculative transaction
+        db.save_for_undo(&1);
+        *db.get_mut(&1).unwrap() = "rejected".into();
+        db.insert(2, "temporary".into());
+
+        assert!(db.rollback_snapshot(&mut Vec::new(), &mut Vec::new()));
+        assert_eq!(alive(&db), vec![(1, "v1".into())]);
+        assert!(!db.redo(&mut Vec::new(), &mut Vec::new()));
+
+        // Opening and replaying a later empty snapshot must not follow a
+        // stale level-2 redo edge back to the discarded value.
+        db.generate_snapshot();
+        assert!(db.undo(&mut Vec::new(), &mut Vec::new()));
+        assert!(db.redo(&mut Vec::new(), &mut Vec::new()));
+        assert_eq!(alive(&db), vec![(1, "v1".into())]);
     }
 
     #[test]

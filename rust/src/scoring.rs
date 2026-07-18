@@ -52,10 +52,11 @@ impl BoardStatistics {
         let mut stats = BoardStatistics::default();
         // Java DesignRulesChecker: max_connections = Σ per net of
         // (endpoint items − 1), endpoints being pins and conduction
-        // areas; incompleteCount = the remaining airline count (the same
-        // metric the optimizer's acceptance uses), NOT a net count.
+        // areas plus unresolved logical terminals; incompleteCount = the
+        // remaining connection obligations (the same metric the optimizer's
+        // acceptance uses), NOT a net count.
         for net_no in 1..=board.rules.nets.max_net_no() {
-            let endpoints = board
+            let physical_endpoints = board
                 .items()
                 .filter(|(_, it)| {
                     it.base.contains_net(net_no)
@@ -67,9 +68,11 @@ impl BoardStatistics {
                         }
                 })
                 .count();
-            stats.maximum_count += endpoints.saturating_sub(1);
+            stats.maximum_count += physical_endpoints
+                .saturating_add(board.unresolved_net_endpoint_count(net_no))
+                .saturating_sub(1);
         }
-        stats.incomplete_count = crate::ratsnest::ratsnest(board).len();
+        stats.incomplete_count = crate::ratsnest::incomplete_connection_count(board);
         for (_, item) in board.items() {
             if item.base.component_no != 0 || item.base.net_count() == 0 {
                 continue;
@@ -152,5 +155,25 @@ mod tests {
         assert_eq!(routed.incomplete_count, 0);
         let score = routed.normalized_score(&settings);
         assert!(score > 999.0 && score <= 1000.0, "score {score}");
+    }
+
+    #[test]
+    fn unresolved_only_net_keeps_score_denominator_consistent() {
+        let stack = LayerStructure::new(vec![Layer::new("F.Cu", true)]);
+        let matrix = ClearanceMatrix::get_default_instance(stack.clone(), 200);
+        let mut rules = BoardRules::new(stack.clone(), matrix);
+        rules.get_default_net_class();
+        rules.nets.add("N1", 1, false);
+        let mut board = BasicBoard::new(stack, rules, Padstacks::new(1));
+        for component in ["U1", "U2"] {
+            board.record_unresolved_net_endpoint(
+                1,
+                crate::board::basic_board::LogicalEndpoint::new(component, "1"),
+            );
+        }
+        let stats = BoardStatistics::collect(&board);
+        assert_eq!(stats.maximum_count, 1);
+        assert_eq!(stats.incomplete_count, 1);
+        assert_eq!(stats.normalized_score(&ScoringSettings::default()), 0.0);
     }
 }

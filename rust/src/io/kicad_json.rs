@@ -193,11 +193,7 @@ fn required_non_empty_string<'a>(
     }
 }
 
-fn optional_string<'a>(
-    value: &'a Json,
-    key: &str,
-    path: &str,
-) -> Result<Option<&'a str>, String> {
+fn optional_string<'a>(value: &'a Json, key: &str, path: &str) -> Result<Option<&'a str>, String> {
     match value.get(key) {
         Some(Json::Str(text)) => Ok(Some(text)),
         Some(Json::Null) if key == "viaRuleName" => Ok(None),
@@ -218,11 +214,7 @@ fn canonical_name(name: &str) -> String {
     name.to_ascii_lowercase()
 }
 
-fn insert_unique_name(
-    seen: &mut HashSet<String>,
-    name: &str,
-    path: &str,
-) -> Result<(), String> {
+fn insert_unique_name(seen: &mut HashSet<String>, name: &str, path: &str) -> Result<(), String> {
     if seen.insert(canonical_name(name)) {
         Ok(())
     } else {
@@ -354,9 +346,9 @@ fn validate_kicad_semantics(doc: &Json) -> Result<(), String> {
                 .ok_or_else(|| format!("{path}.netNames must be an array"))?;
             let mut seen_members = HashSet::new();
             for (member_index, member) in members.iter().enumerate() {
-                let member = member.as_str().ok_or_else(|| {
-                    format!("{path}.netNames[{member_index}] must be a string")
-                })?;
+                let member = member
+                    .as_str()
+                    .ok_or_else(|| format!("{path}.netNames[{member_index}] must be a string"))?;
                 if member.is_empty() {
                     return Err(format!("{path}.netNames[{member_index}] must not be empty"));
                 }
@@ -386,9 +378,7 @@ fn validate_kicad_semantics(doc: &Json) -> Result<(), String> {
                 .ok_or_else(|| format!("{path}.layers[{layer}] must be an array"))?;
             for (column, value) in values.iter().enumerate() {
                 if value.as_f64().is_none() {
-                    return Err(format!(
-                        "{path}.layers[{layer}][{column}] must be numeric"
-                    ));
+                    return Err(format!("{path}.layers[{layer}][{column}] must be numeric"));
                 }
             }
         }
@@ -455,9 +445,9 @@ fn validate_kicad_semantics(doc: &Json) -> Result<(), String> {
         insert_unique_name(&mut via_rule_names, name, &path)?;
         let mut members = HashSet::new();
         for (member_index, member) in rule.arr("viaInfoNames").iter().enumerate() {
-            let member = member.as_str().ok_or_else(|| {
-                format!("{path}.viaInfoNames[{member_index}] must be a string")
-            })?;
+            let member = member
+                .as_str()
+                .ok_or_else(|| format!("{path}.viaInfoNames[{member_index}] must be a string"))?;
             if !via_info_names.contains(&canonical_name(member)) {
                 return Err(format!(
                     "{path}.viaInfoNames[{member_index}] references unknown viaInfo {member:?}"
@@ -491,11 +481,15 @@ fn validate_kicad_semantics(doc: &Json) -> Result<(), String> {
         require_object(component, &path)?;
         if let Some(reference) = optional_string(component, "reference", &path)? {
             if !reference.is_empty() && !component_refs.insert(canonical_name(reference)) {
-                return Err(format!("{path}.reference duplicates component {reference:?}"));
+                return Err(format!(
+                    "{path}.reference duplicates component {reference:?}"
+                ));
             }
         }
         if !component.arr("pads").is_empty() && component.get("position").is_none() {
-            return Err(format!("{path}.position is required when the component has pads"));
+            return Err(format!(
+                "{path}.position is required when the component has pads"
+            ));
         }
         for (pad_index, pad) in component.arr("pads").iter().enumerate() {
             let pad_path = format!("{path}.pads[{pad_index}]");
@@ -515,16 +509,18 @@ fn validate_kicad_semantics(doc: &Json) -> Result<(), String> {
             }
             let mut named_layers = HashSet::new();
             for (layer_index, layer) in pad.arr("layers").iter().enumerate() {
-                let layer = layer.as_str().ok_or_else(|| {
-                    format!("{pad_path}.layers[{layer_index}] must be a string")
-                })?;
+                let layer = layer
+                    .as_str()
+                    .ok_or_else(|| format!("{pad_path}.layers[{layer_index}] must be a string"))?;
                 if !known_layer(layer) {
                     return Err(format!(
                         "{pad_path}.layers[{layer_index}] references unknown layer {layer:?}"
                     ));
                 }
                 if !named_layers.insert(canonical_name(layer)) {
-                    return Err(format!("{pad_path}.layers contains duplicate layer {layer:?}"));
+                    return Err(format!(
+                        "{pad_path}.layers contains duplicate layer {layer:?}"
+                    ));
                 }
             }
         }

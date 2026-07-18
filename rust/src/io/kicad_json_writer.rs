@@ -43,6 +43,10 @@ pub enum KicadJsonWriteError {
         item_id: crate::board::basic_board::ItemId,
         reason: &'static str,
     },
+    UnresolvedEndpoint {
+        net_no: i32,
+        endpoint: String,
+    },
 }
 
 impl std::fmt::Display for KicadJsonWriteError {
@@ -71,6 +75,10 @@ impl std::fmt::Display for KicadJsonWriteError {
             Self::UnrepresentableItem { item_id, reason } => {
                 write!(f, "KiCad JSON cannot represent item {item_id}: {reason}")
             }
+            Self::UnresolvedEndpoint { net_no, endpoint } => write!(
+                f,
+                "KiCad JSON cannot represent unresolved endpoint {endpoint:?} on net {net_no}"
+            ),
         }
     }
 }
@@ -111,6 +119,13 @@ fn angle_restriction_token(value: AngleRestriction) -> &'static str {
 
 fn validate_board_for_kicad_json(board: &BasicBoard) -> Result<(), KicadJsonWriteError> {
     use std::collections::HashSet;
+
+    if let Some((net_no, endpoint)) = board.unresolved_net_endpoints().next() {
+        return Err(KicadJsonWriteError::UnresolvedEndpoint {
+            net_no,
+            endpoint: endpoint.to_string(),
+        });
+    }
 
     let layer_count = board.layer_structure.layer_count();
     if layer_count == 0 {
@@ -1964,6 +1979,19 @@ mod tests {
                 number,
                 ..
             }) if number == missing_class
+        ));
+
+        let mut board = import_dsn(MINI_DSN).expect("import");
+        board.record_unresolved_net_endpoint(
+            1,
+            crate::board::basic_board::LogicalEndpoint::new("U99", "1"),
+        );
+        assert!(matches!(
+            export_kicad_json_checked(&board),
+            Err(KicadJsonWriteError::UnresolvedEndpoint {
+                net_no: 1,
+                endpoint,
+            }) if endpoint.contains("U99")
         ));
     }
 

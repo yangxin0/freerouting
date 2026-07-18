@@ -31,12 +31,11 @@ pub fn try_shove_via_points(
     else {
         return Vec::new();
     };
-    // The old via is removed and reinserted at the candidate location, so
-    // the replacement receives a higher item id than the pending trace that
-    // owns `cl_class`.  Match the final DRC's (new via, existing trace)
-    // orientation; using (trace, old via) is observably wrong for an
-    // asymmetric clearance matrix and can either miss legal shove points or
-    // propose points that the final gate must reject.
+    // `shove_vias` clears a not-yet-inserted route shape. The moved via is
+    // reinserted before that future route item, so the final DRC's canonical
+    // cell is `(via class, pending shape class)`. Java's local projection
+    // helper queries the opposite role order; use the final gate's order here
+    // so an asymmetric matrix cannot admit a route that is rejected on insert.
     let clearance = board
         .rules
         .clearance_matrix
@@ -199,7 +198,7 @@ pub fn move_via(
     board.remove_item(via_id);
     // clear the destination on every spanned layer by shoving traces
     let Some(ps) = board.padstacks.get_by_no(padstack) else {
-        board.undo();
+        board.rollback_snapshot();
         return false;
     };
     let layer_shapes: Vec<(TileShape, usize)> = (ps.from_layer()..=ps.to_layer())
@@ -219,7 +218,7 @@ pub fn move_via(
         let cl = board.rules.clearance_matrix.max_value(*layer).max(0) as f64;
         let inflated = shape.offset(cl);
         if !shove_aside(board, &inflated, *layer, &net_nos, cl_class, &[]) {
-            board.undo();
+            board.rollback_snapshot();
             return false;
         }
         // anything still conflicting (vias, pads) fails the move unless
@@ -235,7 +234,7 @@ pub fn move_via(
             });
         if blocked {
             let _ = max_via_recursion; // deeper via-shove recursion: future work
-            board.undo();
+            board.rollback_snapshot();
             return false;
         }
     }
@@ -282,7 +281,7 @@ pub fn move_via(
         .into_iter()
         .all(|id| crate::drc::item_is_clear(board, id))
     {
-        board.undo();
+        board.rollback_snapshot();
         return false;
     }
     // connectivity gate: every previously-contacting trace must still
@@ -296,7 +295,7 @@ pub fn move_via(
         board.get_item(tid).is_none() || board.get_connected_set(tid, net).contains(&new_via)
     });
     if !connected {
-        board.undo();
+        board.rollback_snapshot();
         return false;
     }
     board.pop_snapshot();
@@ -427,9 +426,9 @@ mod tests {
         let mut board = test_board();
         assert!(board.rules.clearance_matrix.append_class("strict"));
         let strict = board.rules.clearance_matrix.get_no("strict").unwrap();
-        // The moved via is the new/high-id side of the pair.  Make the
-        // correct cell large and the transposed cell zero so the projection
-        // visibly changes.
+        // The moved via is the existing/lower-id side relative to the future
+        // route shape. Make the final `(via, pending)` cell large and its
+        // transpose zero so the projection visibly changes.
         board.rules.clearance_matrix.set_value(strict, 1, 0, 1_000);
         board.rules.clearance_matrix.set_value(1, strict, 0, 0);
         let via = board.insert_via(

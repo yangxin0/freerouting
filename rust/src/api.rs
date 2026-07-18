@@ -678,10 +678,14 @@ fn run_job(
     // (TimeLimit is Copy-plumbed through the router, so the flag cannot
     // ride inside it).
     let limit = TimeLimit::new(route_seconds.saturating_mul(1000));
-    let all_connected = |board: &crate::board::basic_board::BasicBoard| {
-        (1..=board.rules.nets.max_net_no()).all(|n| board.net_is_completely_connected(n))
+    let all_routing_work_complete = |board: &crate::board::basic_board::BasicBoard| {
+        (1..=board.rules.nets.max_net_no())
+            .all(|n| crate::autoroute::batch::net_components(board, n).len() <= 1)
     };
-    while !cancel.load(Ordering::SeqCst) && !limit.limit_exceeded() && !all_connected(&board) {
+    while !cancel.load(Ordering::SeqCst)
+        && !limit.limit_exceeded()
+        && !all_routing_work_complete(&board)
+    {
         let slice = TimeLimit::new(limit.remaining_ms().clamp(1, 2_000));
         batch_route_passes_with_time_limit(&mut board, &request, 99, Some(&slice));
     }

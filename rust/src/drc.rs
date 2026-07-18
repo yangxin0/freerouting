@@ -50,8 +50,10 @@ pub(crate) fn drill_allowed(item: &crate::board::Item, padstacks: &crate::core::
 /// - two constraint areas do not clear against each other, keepouts skip
 ///   component pins, non-obstacle conduction areas do not participate, and
 ///   via keepouts constrain only vias;
-/// - the matrix lookup is `(other, item)` like Java
-///   `Item.clearance_violations` (`item` is Java's `this`).
+/// - the matrix lookup is canonicalized internally to
+///   `(lower-id, higher-id)`. Java reaches the same cell by visiting the
+///   higher-ID item first and querying `(other, this)`; callers cannot
+///   accidentally transpose an asymmetric matrix by swapping arguments.
 pub(crate) fn required_clearance(
     board: &BasicBoard,
     item: &crate::board::Item,
@@ -140,9 +142,14 @@ pub(crate) fn required_clearance(
     // A `*_same_net` rule value takes precedence for a same-net drill pair;
     // otherwise the ordinary (foreign-net) matrix value applies.
     Some(same_net_required.unwrap_or_else(|| {
+        let (lower, higher) = if item.base.id_no <= other.base.id_no {
+            (item, other)
+        } else {
+            (other, item)
+        };
         board.rules.clearance_matrix.get_value(
-            other.base.clearance_class,
-            item.base.clearance_class,
+            lower.base.clearance_class,
+            higher.base.clearance_class,
             layer,
             false,
         ) as f64
@@ -151,10 +158,11 @@ pub(crate) fn required_clearance(
 
 /// Clearance required when `new_class` belongs to an item that is about to
 /// be inserted.  Item ids are monotonically increasing, therefore the new
-/// item is always the higher-id side of the pair when the final DRC scans
-/// it.  Keeping this tiny adapter beside `required_clearance` prevents the
-/// search/room/shove code from accidentally querying the transposed cell of
-/// an asymmetric matrix.
+/// item is always the higher-id side of the pair. Java visits that item first
+/// (its `Item.compareTo` reverses IDs), then looks up `(other, this)`, so the
+/// stable semantic order is `(existing lower-id, new higher-id)`. Keeping this
+/// adapter beside `required_clearance` prevents insertion preflights from
+/// querying the transposed cell of an asymmetric matrix.
 pub(crate) fn clearance_for_new_item(
     board: &BasicBoard,
     existing: &crate::board::Item,
@@ -164,18 +172,8 @@ pub(crate) fn clearance_for_new_item(
     board
         .rules
         .clearance_matrix
-        .get_value(new_class, existing.base.clearance_class, layer, false)
+        .get_value(existing.base.clearance_class, new_class, layer, false)
         .max(0) as f64
-}
-
-/// The authoritative clearance-violation identity used by optimization and
-/// mutation gates.  `check_board` already deduplicates by item pair/layer;
-/// exposing that identity avoids the old shape-count heuristic, which could
-/// accept a board that merely exchanged one violation for another.
-pub(crate) fn violation_keys(
-    board: &BasicBoard,
-) -> std::collections::HashSet<(ItemId, ItemId, usize)> {
-    violation_snapshot(board).into_keys().collect()
 }
 
 /// Captures the authoritative severity of every existing violation. Identity
@@ -186,8 +184,7 @@ pub(crate) fn violation_keys(
 pub(crate) fn violation_snapshot(
     board: &BasicBoard,
 ) -> std::collections::HashMap<(ItemId, ItemId, usize), f64> {
-    check_board(board)
-        .violations
+    clearance_violations(board)
         .into_iter()
         .map(|v| {
             (
@@ -196,6 +193,13 @@ pub(crate) fn violation_snapshot(
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn violation_keys(
+    board: &BasicBoard,
+) -> std::collections::HashSet<(ItemId, ItemId, usize)> {
+    violation_snapshot(board).into_keys().collect()
 }
 
 /// True when `id`'s copper keeps the required pairwise clearance to every
@@ -220,15 +224,9 @@ pub(crate) fn item_is_clear(board: &BasicBoard, id: ItemId) -> bool {
             let Some(other) = board.get_item(oid) else {
                 continue;
             };
-            // evaluate the pair in the ORDER the final DRC will: its outer
-            // item is the lower id, and the matrix lookup is
-            // (higher, lower) — for an asymmetric matrix a fixed
-            // (item, other) order could accept what check_board rejects
-            let required = if oid < id {
-                required_clearance(board, other, item, *l)
-            } else {
-                required_clearance(board, item, other, *l)
-            };
+            // `required_clearance` canonicalizes IDs to Java's semantic
+            // `(lower-id, higher-id)` cell regardless of traversal order.
+            let required = required_clearance(board, item, other, *l);
             let Some(cl) = required else {
                 continue;
             };
@@ -272,11 +270,10 @@ pub struct DrcReport {
     pub unconnected: Vec<UnconnectedNet>,
 }
 
-/// Collects all clearance violations and unconnected nets of the board
-/// (Java: `DesignRulesChecker.check`). Violations are confirmed with the
-/// exact Euclidean copper distance and deduplicated (A-B == B-A).
-pub fn check_board(board: &BasicBoard) -> DrcReport {
-    let mut report = DrcReport::default();
+/// Collects the authoritative clearance violations without also walking the
+/// connectivity graph. Optimizer transactions use this narrower scan; the
+/// public report adds unconnected nets below.
+fn clearance_violations(board: &BasicBoard) -> Vec<DrcViolation> {
     // Every item that carries copper OR constrains it (keepouts, board
     // outline) must be an outer item, so a copper-vs-earlier-obstacle pair is
     // checked from at least one side. Java's `DesignRulesChecker` scans every
@@ -296,11 +293,10 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
         })
         .map(|(id, _)| *id)
         .collect();
-    // One violation per (item pair, layer): an item with several tile shapes on
-    // the same layer (e.g. a multi-shape padstack) would otherwise report the
-    // same pairwise clearance breach several times.
-    let mut seen: std::collections::HashSet<(ItemId, ItemId, usize)> =
-        std::collections::HashSet::new();
+    // One violation per (item pair, layer), retaining the minimum actual
+    // distance across every convex piece/trace segment of both items.
+    let mut violations: std::collections::BTreeMap<(ItemId, ItemId, usize), DrcViolation> =
+        std::collections::BTreeMap::new();
     for &id in &candidates {
         let Some(item) = board.get_item(id) else {
             continue;
@@ -329,7 +325,8 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                 };
                 // one predicate decides whether (and at what value) the pair
                 // constrains: same-net drill rules, keepout/conduction/pin
-                // exclusions and the (other, item) matrix order live there
+                // exclusions and Java's (lower-id, higher-id) matrix order
+                // live there
                 let Some(required) = required_clearance(board, item, other, layer) else {
                     continue;
                 };
@@ -351,11 +348,8 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                     }
                 }
                 if let Some(actual) = worst {
-                    if !seen.insert((id, other_id, layer)) {
-                        continue; // already reported this pair on this layer
-                    }
                     let bb = shape.bounding_box();
-                    report.violations.push(DrcViolation {
+                    let candidate = DrcViolation {
                         first_item: id,
                         second_item: other_id,
                         layer,
@@ -363,11 +357,34 @@ pub fn check_board(board: &BasicBoard) -> DrcReport {
                         actual_distance: actual,
                         x: (bb.ll.x as f64 + bb.ur.x as f64) / 2.0,
                         y: (bb.ll.y as f64 + bb.ur.y as f64) / 2.0,
-                    });
+                    };
+                    let key = (id, other_id, layer);
+                    match violations.entry(key) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(candidate);
+                        }
+                        std::collections::btree_map::Entry::Occupied(mut entry)
+                            if candidate.actual_distance < entry.get().actual_distance =>
+                        {
+                            entry.insert(candidate);
+                        }
+                        std::collections::btree_map::Entry::Occupied(_) => {}
+                    }
                 }
             }
         }
     }
+    violations.into_values().collect()
+}
+
+/// Collects all clearance violations and unconnected nets of the board
+/// (Java: `DesignRulesChecker.check`). Violations are confirmed with the
+/// exact Euclidean copper distance and deduplicated (A-B == B-A).
+pub fn check_board(board: &BasicBoard) -> DrcReport {
+    let mut report = DrcReport {
+        violations: clearance_violations(board),
+        ..DrcReport::default()
+    };
     for net_no in 1..=board.rules.nets.max_net_no() {
         if !board.net_is_completely_connected(net_no) {
             report.unconnected.push(UnconnectedNet {
@@ -658,10 +675,7 @@ mod tests {
                 1,
             );
             board.insert_trace(
-                Polyline::from_int_points(&[
-                    IntPoint::new(0, offset),
-                    IntPoint::new(5000, offset),
-                ]),
+                Polyline::from_int_points(&[IntPoint::new(0, offset), IntPoint::new(5000, offset)]),
                 0,
                 100,
                 vec![2],
@@ -671,9 +685,42 @@ mod tests {
         };
         let mild = violation_snapshot(&board_with_offset(350));
         let severe = violation_snapshot(&board_with_offset(250));
-        assert_eq!(mild.keys().collect::<Vec<_>>(), severe.keys().collect());
+        assert_eq!(mild.len(), 1);
+        assert_eq!(severe.len(), 1);
         let key = *mild.keys().next().expect("one violation");
+        assert!(severe.contains_key(&key));
         assert!(severe[&key] > mild[&key]);
+
+        // One item pair can have several trace segments on the same layer.
+        // The report must retain the worst segment distance, not whichever
+        // segment happened to be visited first.
+        let mut multi = test_board();
+        multi.insert_trace(
+            Polyline::from_int_points(&[
+                IntPoint::new(0, 0),
+                IntPoint::new(5000, 0),
+                IntPoint::new(5000, 600),
+                IntPoint::new(0, 600),
+            ]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        multi.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(0, 350), IntPoint::new(4000, 350)]),
+            0,
+            100,
+            vec![2],
+            1,
+        );
+        let report = check_board(&multi);
+        assert_eq!(report.violations.len(), 1);
+        assert!(
+            report.violations[0].actual_distance < 100.0,
+            "the closest segment was not retained: {:?}",
+            report.violations[0]
+        );
     }
 
     #[test]
@@ -741,9 +788,10 @@ mod tests {
         let mut board = test_board();
         assert!(board.rules.clearance_matrix.append_class("strict"));
         let strict = board.rules.clearance_matrix.get_no("strict").unwrap();
-        // M(new strict, old default) is strict; the transposed cell is zero.
-        board.rules.clearance_matrix.set_value(strict, 1, 0, 1000);
-        board.rules.clearance_matrix.set_value(1, strict, 0, 0);
+        // Java visits the new (higher-id) strict item first, then queries
+        // M(old default, new strict). The transposed cell is deliberately zero.
+        board.rules.clearance_matrix.set_value(1, strict, 0, 1000);
+        board.rules.clearance_matrix.set_value(strict, 1, 0, 0);
         board.insert_trace(
             Polyline::from_int_points(&[IntPoint::new(0, 0), IntPoint::new(5000, 0)]),
             0,

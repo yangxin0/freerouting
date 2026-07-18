@@ -80,14 +80,22 @@ deliberately narrower than its internal modules expose within the crate:
 - `rust/src/board/validation.rs` owns format-independent board invariants.
   Checked writers call it before their format-specific representability
   checks, so invalid references or geometry cannot be serialized differently
-  by each format.
+  by each format. The board graph also retains unresolved logical
+  `(component, pin)` endpoints from Java-compatible DSNs: represented copper
+  can still route, but completeness and scoring remain fail-closed, and a
+  target format that cannot encode the endpoint rejects the export.
 - `rust/src/drc.rs` owns pair ordering and required-clearance evaluation.
   Search preflights, board mutations, and optimizer acceptance reuse those
   predicates instead of reconstructing clearance rules locally.
 - `rust/src/autoroute/batch.rs` is the supported routing entry point. It
   derives width, clearance, active-layer, via-rule, attach, and plane costs
   independently for every target and rip-up victim. Raw maze requests remain
-  crate-private because they represent already-derived internal state.
+  crate-private because they represent already-derived internal state. Public
+  rip-up routing is one outer transaction; preliminary routing and victim
+  recovery cannot inherit a caller's rip-up cost. All internal routing,
+  shoving, via-move, and optimizer speculation uses rollback-and-discard
+  checkpoints, so rejected geometry cannot reappear through the public redo
+  history.
 - DSN, SES, KiCad JSON, and `.rules` writers are checked semantic boundaries.
   They preserve supported metadata and reject state their target format cannot
   represent. Cross-format tests compare normalized semantics rather than only

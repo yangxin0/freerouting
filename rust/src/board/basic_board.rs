@@ -7,7 +7,7 @@
 //! multiple compensated trees follows later; this is the single
 //! uncompensated default tree.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -20,6 +20,30 @@ use crate::rules::BoardRules;
 
 /// Unique id of an item on the board.
 pub type ItemId = i32;
+
+/// A logical component terminal named by an interchange netlist. Component
+/// and pin stay separate because flattening them into `component-pin` is
+/// ambiguous when either identifier itself contains a hyphen.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LogicalEndpoint {
+    pub component: String,
+    pub pin: String,
+}
+
+impl LogicalEndpoint {
+    pub fn new(component: impl Into<String>, pin: impl Into<String>) -> Self {
+        Self {
+            component: component.into(),
+            pin: pin.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for LogicalEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}-{:?}", self.component, self.pin)
+    }
+}
 
 thread_local! {
     /// Diagnostic birth tag applied to newly inserted items (see
@@ -106,6 +130,12 @@ pub struct BasicBoard {
     /// Route traces/vias and derived caches are intentionally excluded by
     /// [`DsnSemanticSnapshot::capture`].
     dsn_semantic_baseline: Option<Arc<DsnSemanticSnapshot>>,
+    /// Logical net endpoints named by the interchange source but not
+    /// instantiated as physical board items. Legacy DSNs can legally retain
+    /// such obligations (for example an unplaced component or a footprint
+    /// whose pin geometry is unavailable). Keeping them explicit prevents an
+    /// incomplete import from becoming vacuously electrically complete.
+    unresolved_net_endpoints: BTreeMap<i32, BTreeSet<LogicalEndpoint>>,
     /// The undoable item database.
     item_list: UndoableObjects<ItemId, Item>,
     /// The spatial index over all item shapes.
@@ -166,6 +196,7 @@ impl Clone for BasicBoard {
             dsn_source: self.dsn_source.clone(),
             outline: self.outline.clone(),
             dsn_semantic_baseline: self.dsn_semantic_baseline.clone(),
+            unresolved_net_endpoints: self.unresolved_net_endpoints.clone(),
             item_list: self.item_list.clone(),
             search_tree: self.search_tree.clone(),
             tree_entries: self.tree_entries.clone(),
@@ -261,6 +292,7 @@ impl DsnSemanticSnapshot {
         for net in board.rules.nets.iter() {
             let _ = write!(nets, "{net:?};");
         }
+        let _ = write!(nets, "unresolved={:?};", board.unresolved_net_endpoints);
 
         let mut padstacks = Vec::with_capacity(board.padstacks.count());
         for number in 1..=board.padstacks.count() {
@@ -351,6 +383,7 @@ impl BasicBoard {
             dsn_source: None,
             outline: None,
             dsn_semantic_baseline: None,
+            unresolved_net_endpoints: BTreeMap::new(),
             item_list: UndoableObjects::new(),
             search_tree: MinAreaTree::new(),
             tree_entries: BTreeMap::new(),
@@ -382,6 +415,43 @@ impl BasicBoard {
         };
         let current = DsnSemanticSnapshot::capture(self);
         baseline.first_difference(&current).map(str::to_string)
+    }
+
+    /// Records an electrical endpoint that exists in the source netlist but
+    /// has no physical item in this board model. Importers call this instead
+    /// of either rejecting a Java-compatible DSN or silently forgetting the
+    /// missing endpoint.
+    pub(crate) fn record_unresolved_net_endpoint(
+        &mut self,
+        net_no: i32,
+        endpoint: LogicalEndpoint,
+    ) {
+        self.unresolved_net_endpoints
+            .entry(net_no)
+            .or_default()
+            .insert(endpoint);
+    }
+
+    /// All unresolved electrical obligations, in deterministic order.
+    pub fn unresolved_net_endpoints(&self) -> impl Iterator<Item = (i32, &LogicalEndpoint)> {
+        self.unresolved_net_endpoints
+            .iter()
+            .flat_map(|(&net_no, endpoints)| {
+                endpoints.iter().map(move |endpoint| (net_no, endpoint))
+            })
+    }
+
+    /// Whether `net_no` still names a logical endpoint with no board item.
+    pub fn has_unresolved_net_endpoints(&self, net_no: i32) -> bool {
+        self.unresolved_net_endpoints
+            .get(&net_no)
+            .is_some_and(|endpoints| !endpoints.is_empty())
+    }
+
+    pub fn unresolved_net_endpoint_count(&self, net_no: i32) -> usize {
+        self.unresolved_net_endpoints
+            .get(&net_no)
+            .map_or(0, BTreeSet::len)
     }
 
     /// The tile shapes of an item inflated by `margin`, with their
@@ -1284,7 +1354,7 @@ impl BasicBoard {
             .zip(&complete_before)
             .any(|(&n, &before)| before && !self.net_is_completely_connected(n));
         if degraded {
-            self.undo();
+            self.rollback_snapshot();
             return false;
         }
         self.pop_snapshot();
@@ -1338,6 +1408,9 @@ impl BasicBoard {
     /// router/DRC success gates (and was the source of several false-success
     /// reports in the API path).
     pub fn net_is_completely_connected(&self, net_no: i32) -> bool {
+        if self.has_unresolved_net_endpoints(net_no) {
+            return false;
+        }
         let net_items: Vec<ItemId> = self
             .items()
             .filter(|(_, item)| item.base.contains_net(net_no) && item.is_connectable())
@@ -1689,6 +1762,27 @@ impl BasicBoard {
         }
         self.resync_search_tree(&cancelled, &restored);
         true
+    }
+
+    /// Rolls back the latest speculative snapshot and discards its redo
+    /// branch. Internal routing transactions use this instead of [`Self::undo`]
+    /// so a rejected candidate cannot later be resurrected through the public
+    /// board redo API.
+    pub fn rollback_snapshot(&mut self) -> bool {
+        let mut cancelled = Vec::new();
+        let mut restored = Vec::new();
+        if !self
+            .item_list
+            .rollback_snapshot(&mut cancelled, &mut restored)
+        {
+            return false;
+        }
+        self.resync_search_tree(&cancelled, &restored);
+        true
+    }
+
+    pub(crate) fn can_redo(&self) -> bool {
+        self.item_list.can_redo()
     }
 
     /// Restores the situation before the last undo. Returns false if no
@@ -2441,5 +2535,22 @@ mod tests {
         assert_eq!(board.item_count(), 1);
         assert_eq!(board.overlapping_items(&query, Some(0)), vec![via]);
         assert!(!board.redo());
+    }
+
+    #[test]
+    fn rollback_snapshot_resyncs_search_tree_without_redo() {
+        let mut board = test_board();
+        let trace = board.insert_trace(trace_polyline(&[(0, 0), (5000, 0)]), 0, 100, vec![1], 1);
+        board.generate_snapshot();
+        let via = board.insert_via(1, IntPoint::new(2500, 0), vec![1], 1, false);
+        board.remove_item(trace);
+        assert_eq!(board.item_count(), 1);
+
+        assert!(board.rollback_snapshot());
+        assert_eq!(board.item_count(), 1);
+        let query = query_box(2400, -50, 2600, 50);
+        assert_eq!(board.overlapping_items(&query, Some(0)), vec![trace]);
+        assert!(!board.redo());
+        assert!(board.get_item(via).is_none());
     }
 }

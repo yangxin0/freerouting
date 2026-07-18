@@ -165,7 +165,7 @@ pub fn opt_via_location(board: &mut BasicBoard, via_id: ItemId, max_recursion: u
             board.pop_snapshot();
             return true;
         }
-        board.undo();
+        board.rollback_snapshot();
     }
     false
 }
@@ -260,7 +260,7 @@ fn opt_single_contact_via(board: &mut BasicBoard, via_id: ItemId, trace_id: Item
         board.pop_snapshot();
         true
     } else {
-        board.undo();
+        board.rollback_snapshot();
         false
     }
 }

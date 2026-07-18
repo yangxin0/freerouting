@@ -950,22 +950,10 @@ fn via_site_clearance_with_attach(
         }
     }
     Some(same_net_required.unwrap_or_else(|| {
-        // matrix order as the FINAL DRC will see it: the pending via gets
-        // a HIGHER id than every existing item, and check_board looks up
-        // (higher, lower) = (new, old) — the transposed order could
-        // accept a site the final DRC then rejects on asymmetric matrices.
-        // The VIA's class applies (the selected ViaInfo may be stricter
-        // than the trace class).
-        board
-            .rules
-            .clearance_matrix
-            .get_value(
-                request.via_class(),
-                other.base.clearance_class,
-                layer,
-                false,
-            )
-            .max(0) as f64
+        // The pending via receives a higher ID than every existing item.
+        // Preserve Java's final-DRC order `(existing, new)`; the via's class
+        // comes from the selected ViaInfo and may be stricter than the trace.
+        crate::drc::clearance_for_new_item(board, other, request.via_class(), layer)
     }))
 }
 
@@ -1199,7 +1187,7 @@ pub(crate) fn maze_route_with_ripup(
             Some(connection)
         }
         None => {
-            board.undo();
+            board.rollback_snapshot();
             None
         }
     }
@@ -1887,17 +1875,10 @@ fn trace_run_is_clear(
                     continue;
                 }
             }
-            // matrix order as the FINAL DRC will see it: the pending trace
-            // gets a HIGHER id than every existing item, so check_board
-            // looks up (higher, lower) = (new, old) for this pair
-            let cl = matrix
-                .get_value(
-                    request.clearance_class,
-                    other.base.clearance_class,
-                    layer,
-                    false,
-                )
-                .max(0) as f64;
+            // The pending trace receives a higher ID than `other`; use the
+            // same `(existing, new)` cell as the final DRC.
+            let cl =
+                crate::drc::clearance_for_new_item(board, other, request.clearance_class, layer);
             if other.tile_shapes(&board.padstacks).iter().any(|(os, ol)| {
                 *ol == layer
                     && os.intersection(&seg.offset(cl)).dimension() >= 2
@@ -1941,7 +1922,7 @@ fn insert_connection(
             Some(items)
         }
         None => {
-            board.undo();
+            board.rollback_snapshot();
             None
         }
     }

@@ -115,6 +115,15 @@ pub fn net_components(board: &BasicBoard, net_no: i32) -> Vec<Vec<ItemId>> {
     components
 }
 
+/// Whether every physical item currently represented for `net_no` is in one
+/// connected component. This is deliberately narrower than electrical
+/// completeness: unresolved source endpoints remain a final failure, but they
+/// must not prevent the router from connecting all geometry it does have.
+fn net_routing_is_complete(board: &BasicBoard, net_no: i32) -> bool {
+    let components = net_components(board, net_no);
+    !components.is_empty() && components.len() == 1
+}
+
 /// The items of a component usable as connection endpoints: drill items
 /// (pads/vias) preferred, because a trace contact requires endpoint
 /// equality (trace splitting at junctions is not yet ported).
@@ -184,7 +193,7 @@ fn finish_route_attempt(
     keep_no_progress: bool,
 ) -> RouteAttemptResult {
     let Some(connection) = connection else {
-        board.undo();
+        board.rollback_snapshot();
         return RouteAttemptResult::Failed;
     };
     if net_components(board, net_no).len() < previous_component_count {
@@ -194,7 +203,7 @@ fn finish_route_attempt(
         if keep_no_progress {
             board.pop_snapshot();
         } else {
-            board.undo();
+            board.rollback_snapshot();
         }
         RouteAttemptResult::NoProgress
     }
@@ -215,7 +224,9 @@ pub fn route_net(board: &mut BasicBoard, net_no: i32, request: &BatchRequest) ->
         };
     }
     let net_request = request_for_net(board, net_no, request);
-    route_net_with_store(board, net_no, &net_request, &mut None)
+    let mut result = route_net_with_store(board, net_no, &net_request, &mut None);
+    result.failed_connections += board.unresolved_net_endpoint_count(net_no);
+    result
 }
 
 /// Like [`route_net`], reusing the caller's engine store across calls:
@@ -230,6 +241,10 @@ pub(crate) fn route_net_with_store(
     store: &mut Option<crate::autoroute::engine::AutorouteEngine>,
 ) -> BatchResult {
     let mut result = BatchResult::default();
+    if net_components(board, net_no).is_empty() {
+        result.failed_connections = 1;
+        return result;
+    }
     let mut use_sets = true;
     loop {
         if request.deadline.is_some_and(|t| t.limit_exceeded()) {
@@ -430,6 +445,7 @@ pub fn batch_route(board: &mut BasicBoard, request: &BatchRequest) -> BatchResul
         result.routed_connections += net_result.routed_connections;
         result.failed_connections += net_result.failed_connections;
     }
+    result.failed_connections = crate::ratsnest::routing_failure_count(board);
     result
 }
 
@@ -451,7 +467,56 @@ pub fn route_net_with_ripup(
     request: &BatchRequest,
     ripup_penalty: f64,
 ) -> BatchResult {
-    route_net_with_ripup_policy(board, net_no, request, ripup_penalty, false)
+    // Validate before opening a speculative snapshot. `generate_snapshot`
+    // intentionally drops an existing user redo branch; an invalid request
+    // must be a read-only rejection rather than a history mutation.
+    if !valid_ripup_request(board, net_no, request, ripup_penalty) {
+        return BatchResult {
+            failed_connections: 1,
+            ..BatchResult::default()
+        };
+    }
+    // `generate_snapshot` necessarily invalidates an already-exposed user
+    // redo branch. Keep a full checkpoint only for that uncommon case so a
+    // rejected valid route is observationally read-only; ordinary routing
+    // retains the cheaper item-level transaction path.
+    let history_checkpoint = board.can_redo().then(|| board.clone());
+    let complete_before: Vec<bool> = (0..=board.rules.nets.max_net_no())
+        .map(|net| net > 0 && board.net_is_completely_connected(net))
+        .collect();
+    board.generate_snapshot();
+    let mut result = route_net_with_ripup_policy(board, net_no, request, ripup_penalty, false);
+    let preserves_completed_nets = (1..=board.rules.nets.max_net_no())
+        .all(|net| !complete_before[net as usize] || board.net_is_completely_connected(net));
+    if result.failed_connections == 0
+        && board.net_is_completely_connected(net_no)
+        && preserves_completed_nets
+    {
+        board.pop_snapshot();
+    } else {
+        if let Some(checkpoint) = history_checkpoint {
+            *board = checkpoint;
+        } else {
+            board.rollback_snapshot();
+        }
+        result.routed_connections = 0;
+        result.failed_connections = result.failed_connections.max(1);
+        result.ripped_nets.clear();
+    }
+    result
+}
+
+fn valid_ripup_request(
+    board: &BasicBoard,
+    net_no: i32,
+    request: &BatchRequest,
+    ripup_penalty: f64,
+) -> bool {
+    board.rules.nets.get_by_no(net_no).is_some()
+        && !net_components(board, net_no).is_empty()
+        && request.validate(board).is_ok()
+        && ripup_penalty.is_finite()
+        && ripup_penalty >= 0.0
 }
 
 /// Internal pass-loop policy. A bounded one-for-one failure-set rotation is
@@ -464,18 +529,19 @@ fn route_net_with_ripup_policy(
     ripup_penalty: f64,
     allow_one_broken_victim: bool,
 ) -> BatchResult {
-    if board.rules.nets.get_by_no(net_no).is_none()
-        || net_components(board, net_no).is_empty()
-        || request.validate(board).is_err()
-        || !ripup_penalty.is_finite()
-        || ripup_penalty < 0.0
-    {
+    if !valid_ripup_request(board, net_no, request, ripup_penalty) {
         return BatchResult {
             failed_connections: 1,
             ..BatchResult::default()
         };
     }
-    let net_request = request_for_net(board, net_no, request);
+    // The preliminary attempt is deliberately non-ripping. The caller's
+    // base request may carry a default ripup cost for other APIs; honoring it
+    // here would let the early-success return strand an unreported victim.
+    let net_request = BatchRequest {
+        ripup_penalty: 0.0,
+        ..request_for_net(board, net_no, request)
+    };
     let mut result = route_net_with_store(board, net_no, &net_request, &mut None);
     if result.failed_connections == 0 || ripup_penalty <= 0.0 {
         return result;
@@ -497,7 +563,7 @@ fn route_net_with_ripup_policy(
     };
     let retry = route_net_with_store(board, net_no, &rip_request, &mut None);
     let mut extra_routed = retry.routed_connections;
-    let mut success = retry.failed_connections == 0 && board.net_is_completely_connected(net_no);
+    let mut success = retry.failed_connections == 0 && net_routing_is_complete(board, net_no);
     let mut broken_victims = 0usize;
     if success {
         // Reroute the victims immediately without further ripup. At most
@@ -514,18 +580,19 @@ fn route_net_with_ripup_policy(
                 broken_victims = usize::MAX;
                 break;
             }
-            if board.net_is_completely_connected(ripped) {
+            if net_routing_is_complete(board, ripped) {
                 continue;
             }
             // the victim reroutes under ITS OWN net-class rules, derived
             // from the base request — not the target-adjusted one
             let victim_request = BatchRequest {
                 deadline: Some(sub_deadline),
+                ripup_penalty: 0.0,
                 ..request_for_net(board, ripped, request)
             };
             let r = route_net_with_store(board, ripped, &victim_request, &mut None);
             extra_routed += r.routed_connections;
-            if r.failed_connections > 0 || !board.net_is_completely_connected(ripped) {
+            if r.failed_connections > 0 || !net_routing_is_complete(board, ripped) {
                 broken_victims += 1;
                 if broken_victims > 1 {
                     break;
@@ -545,9 +612,22 @@ fn route_net_with_ripup_policy(
         result.failed_connections = broken_victims;
         board.pop_snapshot();
     } else {
-        board.undo();
+        board.rollback_snapshot();
     }
     result
+}
+
+/// Optimizer-facing ripup policy. Unlike the public strict entry point, this
+/// leaves a partially improving preliminary route in the caller's snapshot so
+/// the optimizer's board-wide metric/DRC gate can decide whether to keep it.
+/// Victim recovery remains transactional inside the policy itself.
+pub(crate) fn route_net_with_ripup_for_optimizer(
+    board: &mut BasicBoard,
+    net_no: i32,
+    request: &BatchRequest,
+    ripup_penalty: f64,
+) -> BatchResult {
+    route_net_with_ripup_policy(board, net_no, request, ripup_penalty, false)
 }
 
 /// The half perimeter of the bounding box of a net's connectable items,
@@ -809,7 +889,7 @@ fn repair_violations(
             board.pop_snapshot();
             repaired += violations_before - violations_after;
         } else {
-            board.undo();
+            board.rollback_snapshot();
             break; // this round's reroutes failed; keep completion
         }
     }
@@ -831,7 +911,9 @@ pub fn batch_route_passes_with_time_limit(
             ..BatchResult::default()
         };
     }
-    let mut net_nos: Vec<i32> = (1..=board.rules.nets.max_net_no()).collect();
+    let mut net_nos: Vec<i32> = (1..=board.rules.nets.max_net_no())
+        .filter(|&net| !net_components(board, net).is_empty())
+        .collect();
     // many-pin (power) nets route FIRST on the open board — they need
     // whole corridor systems and are unroutable into leftover congestion
     // (interf_u's VCC: 22 connections, routable alone in 136 ms, never
@@ -900,7 +982,7 @@ pub fn batch_route_passes_with_time_limit(
                 out_of_time = true;
                 break;
             }
-            if board.net_is_completely_connected(net_no) {
+            if net_routing_is_complete(board, net_no) {
                 continue;
             }
             // cross-net room reuse (Java: maintain_database): a clear
@@ -951,7 +1033,7 @@ pub fn batch_route_passes_with_time_limit(
             // count the remaining incomplete nets as failures and stop
             total.failed_connections += net_nos
                 .iter()
-                .filter(|&&n| !board.net_is_completely_connected(n))
+                .filter(|&&n| !net_routing_is_complete(board, n))
                 .count();
             break;
         }
@@ -1006,7 +1088,7 @@ pub fn batch_route_passes_with_time_limit(
         let mut incomplete: Vec<i32> = net_nos
             .iter()
             .copied()
-            .filter(|&n| !board.net_is_completely_connected(n))
+            .filter(|&n| !net_routing_is_complete(board, n))
             .collect();
         if incomplete.is_empty() {
             break;
@@ -1069,7 +1151,7 @@ pub fn batch_route_passes_with_time_limit(
             restart.failed_connections += result.failed_connections;
             if lock_restart
                 && incomplete.contains(&net_no)
-                && board.net_is_completely_connected(net_no)
+                && net_routing_is_complete(board, net_no)
             {
                 let ids: Vec<(ItemId, crate::board::FixedState)> = board
                     .items()
@@ -1089,12 +1171,12 @@ pub fn batch_route_passes_with_time_limit(
         }
         let complete_after = net_nos
             .iter()
-            .filter(|&&n| board.net_is_completely_connected(n))
+            .filter(|&&n| net_routing_is_complete(board, n))
             .count();
         let incomplete_after: Vec<i32> = net_nos
             .iter()
             .copied()
-            .filter(|&n| !board.net_is_completely_connected(n))
+            .filter(|&n| !net_routing_is_complete(board, n))
             .collect();
         if crate::debug::stats() {
             eprintln!(
@@ -1118,7 +1200,7 @@ pub fn batch_route_passes_with_time_limit(
                 dry_rounds += 1;
             }
         } else {
-            board.undo();
+            board.rollback_snapshot();
             dry_rounds += 1;
         }
     }
@@ -1126,13 +1208,10 @@ pub fn batch_route_passes_with_time_limit(
     // violating nets are ripped and rerouted against the now-complete
     // board (incomplete beats illegal)
     repair_violations(board, request, time_limit);
-    total.failed_connections = net_nos
-        .iter()
-        .filter(|&&n| !board.net_is_completely_connected(n))
-        .count();
+    total.failed_connections = crate::ratsnest::routing_failure_count(board);
     if crate::debug::stats() {
         for &n in &net_nos {
-            if board.net_is_completely_connected(n) {
+            if net_routing_is_complete(board, n) {
                 continue;
             }
             let name = board
@@ -1206,9 +1285,26 @@ mod tests {
         assert_eq!(missing_ripup.failed_connections, 1);
         assert_eq!(board.items().count(), before_items);
 
+        // Validation failures are read-only: an existing user redo branch
+        // must survive the rejected API call.
+        let mut history = test_board(1);
+        history.generate_snapshot();
+        let transient = history.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        assert!(history.undo());
+        assert!(history.get_item(transient).is_none());
+        let invalid = route_net_with_ripup(&mut history, 999, &request(), 1.0);
+        assert_eq!(invalid.failed_connections, 1);
+        assert!(history.redo());
+        assert!(history.get_item(transient).is_some());
+
         let empty = route_net(&mut board, 1, &request());
         assert_eq!(empty.routed_connections, 0);
         assert_eq!(empty.failed_connections, 1);
+        assert_eq!(board.items().count(), before_items);
+
+        let empty_batch = batch_route_passes(&mut board, &request(), 99);
+        assert_eq!(empty_batch.routed_connections, 0);
+        assert_eq!(empty_batch.failed_connections, 1);
         assert_eq!(board.items().count(), before_items);
 
         let zero_budget = BatchRequest {
@@ -1219,6 +1315,91 @@ mod tests {
         assert_eq!(rejected.routed_connections, 0);
         assert_eq!(rejected.failed_connections, 1);
         assert_eq!(board.items().count(), before_items);
+
+        let mut partial = test_board(1);
+        partial.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        partial.insert_via(1, IntPoint::new(8_000, 0), vec![1], 1, false);
+        partial.record_unresolved_net_endpoint(
+            1,
+            crate::board::basic_board::LogicalEndpoint::new("MISSING", "1"),
+        );
+        let partial_result = route_net(&mut partial, 1, &request());
+        assert_eq!(partial_result.routed_connections, 1);
+        assert_eq!(partial_result.failed_connections, 1);
+        assert_eq!(net_components(&partial, 1).len(), 1);
+        assert!(!partial.net_is_completely_connected(1));
+    }
+
+    #[test]
+    fn public_ripup_failure_restores_the_entire_entry_state() {
+        use crate::geometry::planar::{PolygonShape, PolylineArea};
+
+        let mut board = test_board(1);
+        for point in [
+            IntPoint::new(-8_000, 0),
+            IntPoint::new(-4_000, 0),
+            IntPoint::new(8_000, 0),
+        ] {
+            let pin = board.insert_via(1, point, vec![1], 1, false);
+            board.set_component_no(pin, 1);
+        }
+        // Enclose the third pin on both layers. The two left pins can route,
+        // but the final connection cannot; the public transaction must roll
+        // that first successful connection back as well.
+        for layer in 0..2 {
+            for (x1, y1, x2, y2) in [
+                (5_500, -2_500, 10_500, -2_000),
+                (5_500, 2_000, 10_500, 2_500),
+                (5_500, -2_000, 6_000, 2_000),
+                (10_000, -2_000, 10_500, 2_000),
+            ] {
+                let area = PolylineArea::new(
+                    PolygonShape::from_int_points(&[
+                        IntPoint::new(x1, y1),
+                        IntPoint::new(x2, y1),
+                        IntPoint::new(x2, y2),
+                        IntPoint::new(x1, y2),
+                    ]),
+                    Vec::new(),
+                );
+                board.insert_area(area, layer, "wall", Vec::new(), 1, false);
+            }
+        }
+        let before = board.item_count();
+
+        // The optimizer-facing policy is intentionally not the strict public
+        // transaction: it leaves a useful preliminary connection in the
+        // caller's snapshot when the final hard connection is impossible.
+        let mut optimizer_candidate = board.clone();
+        let candidate =
+            route_net_with_ripup_for_optimizer(&mut optimizer_candidate, 1, &request(), 20_000.0);
+        assert!(candidate.routed_connections > 0);
+        assert!(net_components(&optimizer_candidate, 1).len() < 3);
+        assert!(!optimizer_candidate.net_is_completely_connected(1));
+
+        let result = route_net_with_ripup(&mut board, 1, &request(), 20_000.0);
+
+        assert_eq!(result.routed_connections, 0);
+        assert_eq!(result.failed_connections, 1);
+        assert_eq!(board.item_count(), before);
+        assert!(!board.items().any(|(_, item)| {
+            item.base.component_no == 0
+                && matches!(item.kind, crate::board::ItemKind::PolylineTrace(_))
+        }));
+        assert!(!board.redo(), "a rejected route must not be redoable");
+
+        // A valid speculative call must also preserve a caller's preexisting
+        // redo branch. The checkpoint is only needed in this history-bearing
+        // case; ordinary rejected routes use rollback-and-discard above.
+        let mut history = board.clone();
+        history.generate_snapshot();
+        let transient = history.insert_via(1, IntPoint::new(30_000, 30_000), Vec::new(), 1, false);
+        assert!(history.undo());
+        assert!(history.can_redo());
+        let history_result = route_net_with_ripup(&mut history, 1, &request(), 20_000.0);
+        assert_eq!(history_result.routed_connections, 0);
+        assert!(history.redo(), "rejected routing must preserve user redo");
+        assert!(history.get_item(transient).is_some());
     }
 
     #[test]
@@ -1640,6 +1821,20 @@ mod tests {
         let r1 = route_net(&mut board, 1, &request);
         assert_eq!(r1.failed_connections, 0);
         assert!(board.net_is_completely_connected(1));
+
+        // A caller may reuse a base request that already carries a ripup
+        // cost. The strict public API must still keep its preliminary and
+        // victim-recovery phases non-ripping, and it may never return with the
+        // previously complete net stranded.
+        let base_with_ripup = BatchRequest {
+            ripup_penalty: 1.0,
+            ..request
+        };
+        let strict = route_net_with_ripup(&mut board, 2, &base_with_ripup, 20_000.0);
+        assert!(board.net_is_completely_connected(1));
+        if strict.failed_connections == 0 {
+            assert!(board.net_is_completely_connected(2));
+        }
 
         // multi-pass with ripup completes both nets
         let result = batch_route_passes(&mut board, &request, 4);
