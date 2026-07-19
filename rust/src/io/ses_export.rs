@@ -73,25 +73,101 @@ impl std::fmt::Display for SesWriteError {
 
 impl std::error::Error for SesWriteError {}
 
+const STRING_QUOTE: char = '"';
+
+/// SES is parsed from the beginning with Specctra's default double-quote
+/// delimiter; the parser declaration inside `(routes ...)` cannot
+/// retroactively change the session/base-design header. Keep one delimiter
+/// for the complete document. Identifiers that require quoting and contain
+/// that delimiter are unrepresentable; an embedded delimiter in an otherwise
+/// legal bare identifier is handled separately by [`atom`].
 fn quoted(value: &str, context: &'static str) -> Result<String, SesWriteError> {
-    let quote = if !value.contains('"') {
-        '"'
-    } else if !value.contains('\'') {
-        '\''
-    } else {
+    if value.contains(STRING_QUOTE)
+        || value
+            .chars()
+            .any(|character| matches!(character, '\r' | '\n' | '\0'))
+    {
         return Err(SesWriteError::UnrepresentableIdentifier {
             context,
             value: value.to_string(),
         });
+    }
+    Ok(format!("{STRING_QUOTE}{value}{STRING_QUOTE}"))
+}
+
+/// A quote is legal after the first character of a Specctra identifier. If
+/// the active delimiter occurs inside an otherwise ordinary token, emitting
+/// it bare is lossless whereas trying to quote it is impossible. Keep this
+/// intentionally narrow because the session/base-design header is scanned in
+/// the less-permissive ordinary lexer state.
+fn is_safe_bare_with_active_quote(value: &str, name_state: bool) -> bool {
+    let mut chars = value.char_indices();
+    let Some((_, first)) = chars.next() else {
+        return false;
     };
-    Ok(format!("{quote}{value}{quote}"))
+    let first_char = |character: char| {
+        character.is_ascii_alphabetic()
+            || matches!(
+                character,
+                '_' | '.'
+                    | '/'
+                    | '\\'
+                    | ':'
+                    | '$'
+                    | '&'
+                    | '>'
+                    | '<'
+                    | ','
+                    | ';'
+                    | '='
+                    | '@'
+                    | '['
+                    | ']'
+                    | '~'
+                    | '*'
+                    | '?'
+                    | '!'
+                    | '%'
+                    | '^'
+            )
+    };
+    let later_char = |character: char| {
+        first_char(character)
+            || character.is_ascii_digit()
+            || matches!(character, '#' | '-' | '+' | '\'' | '"')
+    };
+    let valid_first = first_char(first)
+        || (name_state && (first.is_ascii_digit() || matches!(first, '#' | '-' | '+')));
+    if !valid_first || !chars.all(|(_, character)| later_char(character)) {
+        return false;
+    }
+
+    let bytes = value.as_bytes();
+    for index in 1..bytes.len() {
+        let delimiter = bytes[index];
+        if matches!(delimiter, b'\'' | b'"')
+            && matches!(bytes[index - 1], b'_' | b'-')
+            && bytes[index + 1..].contains(&delimiter)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn atom(value: &str, context: &'static str) -> Result<String, SesWriteError> {
-    if !value.is_empty()
+    // These positions are read in the scanner's NAME/LAYER_NAME state.  That
+    // state accepts digits and the full Specctra special-character set as an
+    // initial character; the ordinary session scopes do not.
+    let name_state = matches!(context, "session" | "net" | "padstack" | "layer");
+    let ordinary_atom = !value.is_empty()
+        && !matches!(value.as_bytes().first(), Some(b'"' | b'\''))
+        && !matches!(value.as_bytes().first(), Some(b'0'..=b'9' | b'+' | b'-'))
         && value.chars().all(|ch| {
-            !ch.is_whitespace() && !matches!(ch, '(' | ')' | '"' | '\'' | '#' | ';' | '\\')
-        })
+            !ch.is_whitespace() && !matches!(ch, '(' | ')' | '|' | '"' | '\'' | '#' | ';' | '\\')
+        });
+    if ordinary_atom
+        || (value.contains(STRING_QUOTE) && is_safe_bare_with_active_quote(value, name_state))
     {
         Ok(value.to_string())
     } else {
@@ -144,17 +220,11 @@ pub fn export_ses(
             });
         }
         let net_no = item.base.net_nos[0];
-        let Some(net) = board.rules.nets.get_by_no(net_no) else {
+        if board.rules.nets.get_by_no(net_no).is_none() {
             return Err(SesWriteError::DanglingReference {
                 item_id: *item_id,
                 kind: "net",
                 number: net_no as i64,
-            });
-        };
-        if net.subnet_number != 1 {
-            return Err(SesWriteError::UnrepresentableRouteItem {
-                item_id: *item_id,
-                reason: "standard SES net scopes cannot identify a DSN subnet other than 1",
             });
         }
         match &item.kind {
@@ -207,19 +277,25 @@ pub fn export_ses(
         {
             continue;
         }
-        if item.base.clearance_class_explicit {
-            return Err(SesWriteError::UnrepresentableRouteItem {
-                item_id: *item_id,
-                reason: "standard SES route records cannot encode explicit clearance classes",
-            });
-        }
         let net_no = item.base.net_nos[0];
         match &item.kind {
             ItemKind::PolylineTrace(_) => {
-                if item.base.clearance_class != session_trace_clearance_class(board, net_no) {
+                let expected = session_trace_clearance_class(board, net_no);
+                // SES has no item-level clearance field. An explicit source
+                // annotation is nevertheless representable when it resolves
+                // to the same class that a session reload derives from the
+                // base design; omitting the provenance bit then cannot change
+                // spacing or routing semantics. A genuinely different
+                // override remains fail-closed rather than silently weakening
+                // it on reload.
+                if item.base.clearance_class != expected {
                     return Err(SesWriteError::UnrepresentableRouteItem {
                         item_id: *item_id,
-                        reason: "inherited trace clearance differs from the net class SES reload derives",
+                        reason: if item.base.clearance_class_explicit {
+                            "explicit trace clearance differs from the net class SES reload derives"
+                        } else {
+                            "inherited trace clearance differs from the net class SES reload derives"
+                        },
                     });
                 }
             }
@@ -228,7 +304,11 @@ pub fn export_ses(
                 if item.base.clearance_class != metadata.clearance_class {
                     return Err(SesWriteError::UnrepresentableRouteItem {
                         item_id: *item_id,
-                        reason: "inherited via clearance differs from the base-design rule SES reload derives",
+                        reason: if item.base.clearance_class_explicit {
+                            "explicit via clearance differs from the base-design rule SES reload derives"
+                        } else {
+                            "inherited via clearance differs from the base-design rule SES reload derives"
+                        },
                     });
                 }
                 if via.attach_allowed != metadata.attach_allowed {
@@ -257,8 +337,8 @@ pub fn export_ses(
         .or_else(|| design_name.strip_suffix(".ses"))
         .or_else(|| design_name.strip_suffix(".SES"))
         .unwrap_or(design_name);
-    let session_name = quoted(&format!("{stem}.ses"), "session")?;
-    let base_name = quoted(&format!("{stem}.dsn"), "base-design")?;
+    let session_name = atom(&format!("{stem}.ses"), "session")?;
+    let base_name = atom(&format!("{stem}.dsn"), "base-design")?;
     out.push_str(&format!("(session {session_name}\n"));
     out.push_str(&format!("  (base_design {base_name})\n"));
     out.push_str("  (routes \n");
@@ -269,7 +349,9 @@ pub fn export_ses(
         atom(&board.unit, "unit")?,
         board.resolution
     ));
-    out.push_str("    (parser\n      (host_cad \"freerouting-rs\")\n    )\n");
+    out.push_str(&format!(
+        "    (parser\n      (string_quote {STRING_QUOTE})\n      (space_in_quoted_tokens on)\n      (host_cad \"freerouting-rs\")\n    )\n"
+    ));
 
     // library_out: the via padstacks referenced by the session (Java:
     // SesWriter.writeLibrary), shapes written per layer in board units
@@ -300,7 +382,7 @@ pub fn export_ses(
                 number: ps_no as i64,
             }
         })?;
-        let padstack_name = quoted(&ps.name, "padstack")?;
+        let padstack_name = atom(&ps.name, "padstack")?;
         out.push_str(&format!("      (padstack {padstack_name}\n"));
         for layer in 0..board.layer_structure.layer_count() {
             let Some(shape) = ps.get_shape(layer) else {
@@ -372,7 +454,7 @@ pub fn export_ses(
                     let Some(padstack) = board.padstacks.get_by_no(v.padstack) else {
                         continue;
                     };
-                    let padstack_name = quoted(&padstack.name, "padstack")?;
+                    let padstack_name = atom(&padstack.name, "padstack")?;
                     wires.push_str(&format!(
                         "        (via {} {} {}\n        )\n",
                         padstack_name, v.center.x, v.center.y
@@ -382,14 +464,21 @@ pub fn export_ses(
             }
         }
         if !wires.is_empty() {
-            let net_name = quoted(&net.name, "net")?;
-            // SesReader (Java and Rust) resolves a session net by name; the
-            // standard SES grammar does not carry the DSN subnet number in
-            // this scope.  Emitting the numeric token here is accepted by
-            // our permissive parser but makes the session incompatible with
-            // Java's SesReader, which treats the token as an unknown child
-            // and can skip the route.  Keep the canonical `(net NAME ...)`.
+            let net_name = atom(&net.name, "net")?;
+            // `net_number` is translator metadata in the Specctra grammar,
+            // not a subnet selector. Emit the real board net id there. The
+            // namespaced extension is the unambiguous way for Freerouting to
+            // preserve an internal fromto/order subnet on a Rust/Java
+            // round-trip; third-party readers may ignore that extension and
+            // therefore retain their normal subnet-1 behavior.
             out.push_str(&format!("      (net {net_name}\n"));
+            out.push_str(&format!("        (net_number {})\n", net.net_number));
+            if net.subnet_number != 1 {
+                out.push_str(&format!(
+                    "        (freerouting_subnet {})\n",
+                    net.subnet_number
+                ));
+            }
             out.push_str(&wires);
             out.push_str("      )\n");
         }
@@ -470,8 +559,13 @@ mod tests {
         assert_eq!(
             net.args().count(),
             1,
-            "SES net scope must not emit a subnet token"
+            "net metadata must be a child, not a private positional token"
         );
+        assert_eq!(
+            net.child("net_number").and_then(|number| number.arg()),
+            Some("1")
+        );
+        assert!(net.child("freerouting_subnet").is_none());
         let wire = net.child("wire").expect("wire");
         let path = wire.child("path").expect("path");
         assert_eq!(path.arg(), Some("F.Cu"));
@@ -493,23 +587,41 @@ mod tests {
             Err(SesWriteError::ResolutionMismatch { .. })
         ));
 
-        board.rules.nets.get_by_no_mut(1).unwrap().name = "rail \"A\"".into();
-        let quoted = export_ses(&board, "test_board", 10).expect("single quote fallback");
-        let parsed = parse_dsn(&quoted).expect("fallback output parses");
+        board.rules.nets.get_by_no_mut(1).unwrap().name = "rail 'A'".into();
+        let quoted = export_ses(&board, "test_board", 10).expect("global double quote");
+        assert!(
+            quoted.contains("(string_quote \")") && quoted.contains("(space_in_quoted_tokens on)")
+        );
+        let parsed = parse_dsn(&quoted).expect("declared double-quote session parses");
         assert_eq!(
             parsed
                 .child("routes")
                 .and_then(|routes| routes.child("network_out"))
                 .and_then(|network| network.child("net"))
                 .and_then(|net| net.arg()),
-            Some("rail \"A\"")
+            Some("rail 'A'")
         );
 
-        board.rules.nets.get_by_no_mut(1).unwrap().name = "both \"double\" and 'single'".into();
-        assert!(
-            export_ses(&board, "test_board", 10).is_err(),
-            "unrepresentable names must fail instead of corrupting the session"
-        );
+        for name in ["O\"Net", "1\"V", "#PWR\"01", "-NEG\""] {
+            board.rules.nets.get_by_no_mut(1).unwrap().name = name.into();
+            let bare_quote = export_ses(&board, "test_board", 10)
+                .expect("an internal quote is legal in a bare NAME token");
+            let parsed = parse_dsn(&bare_quote).expect("bare-quote session parses");
+            assert_eq!(
+                parsed
+                    .child("routes")
+                    .and_then(|routes| routes.child("network_out"))
+                    .and_then(|network| network.child("net"))
+                    .and_then(|net| net.arg()),
+                Some(name)
+            );
+        }
+
+        board.rules.nets.get_by_no_mut(1).unwrap().name = "rail \"A\"".into();
+        assert!(matches!(
+            export_ses(&board, "test_board", 10),
+            Err(SesWriteError::UnrepresentableIdentifier { context: "net", .. })
+        ));
     }
 
     #[test]
@@ -599,11 +711,35 @@ mod tests {
             vec![subnet_two],
             1,
         );
-        assert!(matches!(
-            export_ses(&subnet, "subnet", 10),
-            Err(SesWriteError::UnrepresentableRouteItem { reason, .. })
-                if reason.contains("subnet other than 1")
-        ));
+        let session = export_ses(&subnet, "subnet", 10).expect("subnet export");
+        let parsed = parse_dsn(&session).expect("subnet session parses");
+        let subnet_scope = parsed
+            .child("routes")
+            .and_then(|routes| routes.child("network_out"))
+            .into_iter()
+            .flat_map(|network| network.children("net"))
+            .find(|net| {
+                net.child("freerouting_subnet")
+                    .and_then(|number| number.arg())
+                    == Some("2")
+            })
+            .expect("subnet 2 scope");
+        assert_eq!(subnet_scope.arg(), Some("GND"));
+
+        let mut receiver = test_board();
+        let receiver_subnet_two = receiver.rules.nets.add("GND", 2, false);
+        receiver
+            .rules
+            .nets
+            .get_by_no_mut(receiver_subnet_two)
+            .expect("receiver subnet 2")
+            .set_class(0);
+        crate::io::import_ses(&mut receiver, &session).expect("subnet session re-import");
+        let reloaded_trace = receiver
+            .items()
+            .find_map(|(_, item)| matches!(item.kind, ItemKind::PolylineTrace(_)).then_some(item))
+            .expect("reloaded subnet trace");
+        assert_eq!(reloaded_trace.base.net_nos, vec![receiver_subnet_two]);
     }
 
     #[test]
@@ -641,7 +777,82 @@ mod tests {
     }
 
     #[test]
-    fn rejects_clearance_overrides_and_noncanonical_via_metadata() {
+    fn imported_vias_without_bound_via_info_remain_exportable() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let source = std::fs::read_to_string(format!("{root}/fixtures/Issue093-interf_u.dsn"))
+            .expect("Issue093 fixture");
+        let board = crate::io::import_dsn(&source).expect("Issue093 import");
+        for (item_id, item) in board.items() {
+            let ItemKind::Via(via) = &item.kind else {
+                continue;
+            };
+            if item.base.component_no != 0 || item.base.net_nos.len() != 1 {
+                continue;
+            }
+            let metadata =
+                session_via_metadata(&board, item.base.net_nos[0], via.padstack, via.center);
+            assert_eq!(
+                item.base.clearance_class, metadata.clearance_class,
+                "imported via {item_id} clearance differs from SES reload"
+            );
+            assert_eq!(
+                via.attach_allowed, metadata.attach_allowed,
+                "imported via {item_id} attach flag differs from SES reload"
+            );
+            assert_eq!(
+                via.escape_smd_layer, metadata.escape_smd_layer,
+                "imported via {item_id} escape layer differs from SES reload"
+            );
+        }
+        let ses = export_ses(&board, "Issue093-interf_u", board.resolution)
+            .expect("pre-existing wiring vias must reconstruct identically");
+        assert!(ses.contains("(network_out"));
+    }
+
+    #[test]
+    fn imported_explicit_wire_matching_net_class_is_exportable() {
+        // KiCad/Specctra exporters commonly annotate every pre-routed wire
+        // with `(clearance_class default)`, even when that is exactly the
+        // net-class default.  SES has no place to carry that provenance bit;
+        // it must not make an otherwise valid imported board fail before the
+        // router starts.
+        let source = r#"(pcb "explicit-wire.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb 0 0 50000 50000))
+    (rule (width 200) (clearance 200)))
+  (placement)
+  (library)
+  (network (net N1))
+  (wiring
+    (wire
+      (path F.Cu 200 1000 1000 2000 1000)
+      (net N1)
+      (clearance_class default))))"#;
+        let board = crate::io::import_dsn(source).expect("explicit wire import");
+        assert!(board.items().any(|(_, item)| {
+            matches!(item.kind, ItemKind::PolylineTrace(_)) && item.base.clearance_class_explicit
+        }));
+        export_ses(&board, "explicit-wire", board.resolution)
+            .expect("equivalent explicit class must not block SES preflight");
+    }
+
+    #[test]
+    fn imported_fixture_clearance_annotations_do_not_block_ses_preflight() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let source = std::fs::read_to_string(format!(
+            "{root}/fixtures/Issue191-processor.Z80/processor.Z80.dsn"
+        ))
+        .expect("Issue191 fixture");
+        let board = crate::io::import_dsn(&source).expect("Issue191 import");
+        export_ses(&board, "Issue191-processor.Z80", board.resolution)
+            .expect("matching imported clearance annotations must remain exportable");
+    }
+
+    #[test]
+    fn accepts_equivalent_clearance_annotations_and_rejects_different_ones() {
         let mut explicit_trace = test_board();
         let trace = explicit_trace.insert_trace(
             Polyline::from_int_points(&[IntPoint::new(0, 0), IntPoint::new(1_000, 0)]),
@@ -651,11 +862,9 @@ mod tests {
             1,
         );
         explicit_trace.set_item_clearance_class_explicit(trace, true);
-        assert!(matches!(
-            export_ses(&explicit_trace, "explicit-trace", 10),
-            Err(SesWriteError::UnrepresentableRouteItem { reason, .. })
-                if reason.contains("explicit clearance")
-        ));
+        // SES cannot carry the provenance bit, but this annotation resolves
+        // to the same `default` class that a standard reload derives.
+        assert!(export_ses(&explicit_trace, "explicit-trace", 10).is_ok());
 
         let mut component_trace = test_board();
         let component_trace_id = component_trace.insert_trace(
@@ -675,10 +884,39 @@ mod tests {
         let mut explicit_via = test_board();
         let via = explicit_via.insert_via(1, IntPoint::new(1_000, 0), vec![1], 1, false);
         explicit_via.set_item_clearance_class_explicit(via, true);
+        assert!(export_ses(&explicit_via, "explicit-via", 10).is_ok());
+
+        let mut different_trace = test_board();
+        assert!(different_trace
+            .rules
+            .clearance_matrix
+            .append_class("strict"));
+        let strict = different_trace
+            .rules
+            .clearance_matrix
+            .get_no("strict")
+            .expect("strict clearance class");
+        let trace = different_trace.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(0, 0), IntPoint::new(1_000, 0)]),
+            0,
+            100,
+            vec![1],
+            strict,
+        );
+        different_trace.set_item_clearance_class_explicit(trace, true);
         assert!(matches!(
-            export_ses(&explicit_via, "explicit-via", 10),
+            export_ses(&different_trace, "different-trace", 10),
             Err(SesWriteError::UnrepresentableRouteItem { reason, .. })
-                if reason.contains("explicit clearance")
+                if reason.contains("explicit trace clearance")
+        ));
+
+        let mut different_via = test_board();
+        let via = different_via.insert_via(1, IntPoint::new(1_000, 0), vec![1], 0, false);
+        different_via.set_item_clearance_class_explicit(via, true);
+        assert!(matches!(
+            export_ses(&different_via, "different-via", 10),
+            Err(SesWriteError::UnrepresentableRouteItem { reason, .. })
+                if reason.contains("explicit via clearance")
         ));
 
         let mut mismatched_trace = test_board();

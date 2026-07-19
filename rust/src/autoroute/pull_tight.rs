@@ -30,6 +30,7 @@ pub fn pull_tight_trace(board: &mut BasicBoard, id: ItemId) -> (ItemId, usize) {
     let half_width = trace.half_width;
     let clearance_class = item.base.clearance_class;
     let clearance_class_explicit = item.base.clearance_class_explicit;
+    let lineage_no = item.base.lineage_no;
     let mut corners: Vec<IntPoint> = trace
         .polyline
         .corner_approx_arr()
@@ -119,13 +120,14 @@ pub fn pull_tight_trace(board: &mut BasicBoard, id: ItemId) -> (ItemId, usize) {
     };
     let new_id = {
         let _birth_tag = crate::board::basic_board::birth_tag_scope(3);
-        board.insert_trace_with_provenance(
+        board.insert_trace_with_lineage(
             polyline,
             layer,
             half_width,
             item.base.net_nos.clone(),
             clearance_class,
             clearance_class_explicit,
+            lineage_no,
         )
     };
     if original_birth != 0 {

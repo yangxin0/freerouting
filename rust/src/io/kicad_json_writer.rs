@@ -89,6 +89,21 @@ fn esc(s: &str) -> String {
     crate::io::json::escape(s)
 }
 
+/// KiCad's public layer ids are sparse: `F.Cu` is 0 and `B.Cu` is 31, while
+/// Freerouting keeps a dense ordinal for geometry.  Emit the external ids in
+/// every JSON layer-bearing field so KiCad's native and manual consumers agree
+/// on the destination copper layer.
+fn kicad_layer_id(board: &BasicBoard, layer: usize) -> usize {
+    let count = board.layer_structure.layer_count();
+    if count <= 1 || layer == 0 {
+        0
+    } else if layer + 1 == count {
+        31
+    } else {
+        layer
+    }
+}
+
 fn fixed_state_token(state: FixedState) -> &'static str {
     match state {
         FixedState::Unfixed => "unfixed",
@@ -591,8 +606,9 @@ fn export_kicad_json_unchecked(board: &BasicBoard) -> String {
     let layer_count = board.layer_structure.layer_count();
     for (i, layer) in board.layer_structure.arr.iter().enumerate() {
         let comma = if i + 1 < layer_count { "," } else { "" };
+        let external_id = kicad_layer_id(board, i);
         out.push_str(&format!(
-            "    {{\"index\": {i}, \"name\": \"{}\", \"type\": \"{}\"}}{comma}\n",
+            "    {{\"index\": {external_id}, \"name\": \"{}\", \"type\": \"{}\"}}{comma}\n",
             esc(&layer.name),
             if layer.is_signal { "signal" } else { "plane" }
         ));
@@ -727,7 +743,8 @@ fn export_kicad_json_unchecked(board: &BasicBoard) -> String {
                         .collect::<Vec<_>>()
                         .join(", ");
                     Some(format!(
-                        "{{\"layerIndex\": {layer}, \"corners\": [{corners}]}}"
+                        "{{\"layerIndex\": {}, \"corners\": [{corners}]}}",
+                        kicad_layer_id(board, layer)
                     ))
                 })
                 .collect::<Vec<_>>()
@@ -746,8 +763,8 @@ fn export_kicad_json_unchecked(board: &BasicBoard) -> String {
                 "{{\"name\": \"{}\", \"padstackName\": \"{}\", \"startLayerIndex\": {}, \"endLayerIndex\": {}, \"diameter\": {:.6}, \"layerShapes\": [{}], \"clearanceClass\": \"{}\", \"clearanceValue\": {:.6}, \"attachAllowed\": {}}}",
                 esc(info.get_name()),
                 esc(&padstack.name),
-                padstack.from_layer(),
-                padstack.to_layer(),
+                kicad_layer_id(board, padstack.from_layer()),
+                kicad_layer_id(board, padstack.to_layer()),
                 diameter,
                 layer_shapes,
                 esc(matrix.get_name(info.get_clearance_class()).unwrap_or("default")),
@@ -943,7 +960,8 @@ fn export_kicad_json_unchecked(board: &BasicBoard) -> String {
                             .collect::<Vec<_>>()
                             .join(", ");
                         Some(format!(
-                            "{{\"layerIndex\": {layer}, \"corners\": [{corners}]}}"
+                            "{{\"layerIndex\": {}, \"corners\": [{corners}]}}",
+                            kicad_layer_id(board, layer)
                         ))
                     })
                     .collect::<Vec<_>>()
@@ -1047,7 +1065,7 @@ fn export_kicad_json_unchecked(board: &BasicBoard) -> String {
                     "    {{\"id\": {id}, \"netName\": \"{}\", \"width\": {:.6}, \"layerIndex\": {}, \"clearanceClass\": \"{}\", \"clearanceValue\": {:.6}, \"clearanceExplicit\": {}, \"fixedState\": \"{}\", \"points\": [{}]}}",
                     esc(&net_name),
                     mm(2.0 * t.half_width as f64),
-                    t.layer,
+                    kicad_layer_id(board, t.layer),
                     esc(matrix.get_name(item.base.clearance_class).unwrap_or("default")),
                     mm(matrix.get_value(item.base.clearance_class, 1, t.layer, false) as f64),
                     item.base.clearance_class_explicit,
@@ -1079,14 +1097,15 @@ fn export_kicad_json_unchecked(board: &BasicBoard) -> String {
                                     .collect::<Vec<_>>()
                                     .join(", ");
                                 Some(format!(
-                                    "{{\"layerIndex\": {layer}, \"corners\": [{corners}]}}"
+                                    "{{\"layerIndex\": {}, \"corners\": [{corners}]}}",
+                                    kicad_layer_id(board, layer)
                                 ))
                             })
                             .collect::<Vec<_>>()
                             .join(", ");
                         (
-                            p.from_layer(),
-                            p.to_layer(),
+                            kicad_layer_id(board, p.from_layer()),
+                            kicad_layer_id(board, p.to_layer()),
                             p.get_shape(p.from_layer())
                                 .map(|s| s.bounding_box().max_width())
                                 .unwrap_or(0.0),
@@ -1134,7 +1153,7 @@ fn export_kicad_json_unchecked(board: &BasicBoard) -> String {
                     v.attach_allowed,
                     v.is_escape_via,
                     v.escape_smd_layer
-                        .map(|layer| layer.to_string())
+                        .map(|layer| kicad_layer_id(board, layer).to_string())
                         .unwrap_or_else(|| "null".to_string()),
                     fixed_state_token(item.base.fixed_state),
                 ));
@@ -1186,7 +1205,7 @@ fn export_kicad_json_unchecked(board: &BasicBoard) -> String {
             "    {{\"name\": \"{}\", \"netName\": \"{}\", \"layerIndex\": {}, \"isObstacle\": {}, \"viaOnly\": {}, \"clearanceClass\": \"{}\", \"clearanceValue\": {:.6}, \"clearanceExplicit\": {}, \"fixedState\": \"{}\", \"polygon\": [{}]}}",
             esc(&a.name),
             esc(&net_name),
-            a.layer,
+            kicad_layer_id(board, a.layer),
             a.is_obstacle,
             a.via_only,
             esc(cl_name),

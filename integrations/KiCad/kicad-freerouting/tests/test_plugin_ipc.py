@@ -141,10 +141,42 @@ class TestIpcHelpers:
     def test_board_json_manual_build(self):
         """_build_board_json_manually produces valid JSON with expected keys."""
         # We can test the JSON structure by creating a mock board dict
-        # that mimics pcbnew.BOARD's interface
-        sys.path.insert(0, str(self.PLUGINS_DIR.parent))
+        # that mimics pcbnew.BOARD's interface. Load the helper under a
+        # temporary package so this unit test does not run the plugin's eager
+        # registration or require KiCad's host-only pcbnew module.
+        import importlib.util
+        import types
+
+        module_names = (
+            "plugins",
+            "plugins.config",
+            "plugins.ipc_helpers",
+            "pcbnew",
+        )
+        missing = object()
+        previous_modules = {
+            name: sys.modules.get(name, missing) for name in module_names
+        }
+        fake_plugins = types.ModuleType("plugins")
+        fake_plugins.__path__ = [str(self.PLUGINS_DIR)]
+        fake_pcbnew = types.ModuleType("pcbnew")
         try:
-            from plugins.ipc_helpers import _build_board_json_manually
+            sys.modules["plugins"] = fake_plugins
+            sys.modules["pcbnew"] = fake_pcbnew
+            sys.modules.pop("plugins.config", None)
+            sys.modules.pop("plugins.ipc_helpers", None)
+            spec = importlib.util.spec_from_file_location(
+                "plugins.ipc_helpers", self.PLUGINS_DIR / "ipc_helpers.py"
+            )
+            assert spec is not None and spec.loader is not None
+            ipc_helpers = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = ipc_helpers
+            spec.loader.exec_module(ipc_helpers)
+
+            _build_board_json_manually = ipc_helpers._build_board_json_manually
+            _copper_layer_ids = ipc_helpers._copper_layer_ids
+            resolve_result_layer_id = ipc_helpers.resolve_result_layer_id
+            set_via_layer_span = ipc_helpers.set_via_layer_span
 
             # Create a minimal mock board object
             class MockBoard:
@@ -175,8 +207,65 @@ class TestIpcHelpers:
             assert "traces" in data
             assert "vias" in data
             assert "outline" in data
+            # A real pcbnew module may expose the sparse B.Cu id (31), while
+            # the deliberately minimal mock has no such constants.  Assert
+            # the helper's contract rather than a host-specific constant.
+            assert data["layers"][0]["index"] == 0
+            assert data["layers"][1]["index"] == _copper_layer_ids(MockBoard())[1]
+
+            class SparseLayerIds(MockBoard):
+                def GetLayerID(self, name):
+                    return {"F.Cu": 0, "B.Cu": 31}.get(name, -1)
+
+                def GetLayerName(self, layer_id):
+                    return {0: "F.Cu", 31: "B.Cu"}[layer_id]
+
+            assert _copper_layer_ids(SparseLayerIds()) == [0, 31]
+            sparse_data = json.loads(_build_board_json_manually(SparseLayerIds()))
+            assert [layer["index"] for layer in sparse_data["layers"]] == [0, 31]
+
+            # New sparse results and legacy dense results both resolve by the
+            # declared layer name, not by assuming that the document id is the
+            # enum value exposed by the running KiCad API.
+            sparse_doc = {
+                "layers": [
+                    {"index": 0, "name": "F.Cu"},
+                    {"index": 31, "name": "B.Cu"},
+                ]
+            }
+            assert resolve_result_layer_id(SparseLayerIds(), sparse_doc, 31) == 31
+            assert resolve_result_layer_id(SparseLayerIds(), sparse_doc, 1) == 31
+            assert resolve_result_layer_id(SparseLayerIds(), sparse_doc, 0) == 0
+
+            class RemappedLayerIds(MockBoard):
+                def GetLayerID(self, name):
+                    return {"F.Cu": 4, "B.Cu": 63}.get(name, -1)
+
+            remapped = RemappedLayerIds()
+            assert resolve_result_layer_id(remapped, sparse_doc, 31) == 63
+            assert resolve_result_layer_id(remapped, sparse_doc, 1) == 63
+            assert resolve_result_layer_id(remapped, sparse_doc, 0) == 4
+            unnamed_doc = {"layers": [{"index": 0}, {"index": 31}]}
+            assert resolve_result_layer_id(remapped, unnamed_doc, 31) == 31
+
+            class MockVia:
+                def SetLayerPair(self, start, end):
+                    self.layer_pair = (start, end)
+
+            via = MockVia()
+            set_via_layer_span(
+                via,
+                remapped,
+                sparse_doc,
+                {"startLayerIndex": 0, "endLayerIndex": 31},
+            )
+            assert via.layer_pair == (4, 63)
         finally:
-            sys.path.pop(0)
+            for name, previous in previous_modules.items():
+                if previous is missing:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = previous
 
 
 # ---------------------------------------------------------------------------

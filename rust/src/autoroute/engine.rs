@@ -103,6 +103,25 @@ impl AutorouteEngine {
         }
     }
 
+    /// Creates an empty engine whose change-log cursor is already at the
+    /// current board state.  A new engine has no rooms to invalidate, so
+    /// replaying every historical insertion/removal from the board log would
+    /// only add O(history) work before the first search.  Subsequent changes
+    /// are still observed normally by [`Self::sync_board_changes`].
+    pub fn new_with_clearance_synced(
+        board: &BasicBoard,
+        net_no: i32,
+        allow_ripup: bool,
+        trace_clearance_class: usize,
+        trace_half_width: i32,
+    ) -> Self {
+        let mut engine =
+            Self::new_with_clearance(net_no, allow_ripup, trace_clearance_class, trace_half_width);
+        engine.seen_log = board.change_log().len();
+        engine.seen_epoch = board.change_epoch();
+        engine
+    }
+
     /// Drops every room (the graph arenas are rebuilt lazily).
     pub fn clear_rooms(&mut self) {
         self.graph = RoomGraph::new();
@@ -137,7 +156,7 @@ impl AutorouteEngine {
     }
 
     /// Brings the cached room graph up to date with the board: a changed
-    /// epoch (undo/redo/snapshot pop) drops everything; otherwise rooms
+    /// epoch (undo/redo/rollback) drops everything; otherwise rooms
     /// overlapping the regions changed since the last sync are removed
     /// (Java: additional_update_after_change on every item change).
     pub fn sync_board_changes(&mut self, board: &BasicBoard) {
@@ -156,6 +175,15 @@ impl AutorouteEngine {
             return;
         }
         let log = board.change_log();
+        // A caller may replace the board with an earlier checkpoint/clone
+        // that has a shorter change log without changing the copied epoch.
+        // The old cursor cannot describe that board; fail closed instead of
+        // treating the cache as current.
+        if self.seen_log > log.len() {
+            self.clear_rooms();
+            self.seen_log = log.len();
+            return;
+        }
         if self.seen_log >= log.len() {
             return;
         }
@@ -165,10 +193,12 @@ impl AutorouteEngine {
         let matrix = &board.rules.clearance_matrix;
         for &(layer, bbox) in &log[self.seen_log..] {
             // rooms were restrained by the item inflated by up to
-            // hw + max clearance (+ safety), with miter reach ≤ 2×
+            // hw + max ordinary/same-net clearance (+ safety), with miter
+            // reach ≤ 2×
             let slack = 2.0
                 * (self.trace_half_width
                     + matrix.max_value(layer).max(0)
+                    + board.rules.max_same_net_clearance().max(0)
                     + crate::rules::clearance_matrix::CLEARANCE_SAFETY_MARGIN)
                     as f64;
             let query = bbox.offset(slack);
@@ -227,6 +257,7 @@ impl AutorouteEngine {
                 let slack = 2.0
                     * (self.trace_half_width
                         + matrix.max_value(layer).max(0)
+                        + board.rules.max_same_net_clearance().max(0)
                         + crate::rules::clearance_matrix::CLEARANCE_SAFETY_MARGIN)
                         as f64;
                 let query = bbox.offset(slack);
@@ -989,5 +1020,88 @@ mod tests {
             .room(rooms[0])
             .shape
             .contains(&Point::Int(IntPoint::new(0, 0))));
+    }
+
+    #[test]
+    fn nested_snapshot_commits_preserve_rooms_but_rollback_invalidates_them() {
+        let mut board = test_board();
+        board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        board.insert_via(1, IntPoint::new(9000, 0), vec![1], 1, false);
+        let mut engine = AutorouteEngine::new(1);
+        let rooms = engine.create_start_rooms(
+            &board,
+            TileShape::Box(IntBox::new(IntPoint::new(0, 0), IntPoint::new(0, 0))),
+            0,
+        );
+        assert!(!rooms.is_empty());
+        let cached_rooms = engine.complete_rooms().len();
+        let initial_epoch = board.change_epoch();
+
+        board.generate_snapshot();
+        board.generate_snapshot();
+        // A committed nested change should be handled by the incremental
+        // region log, not treated like an undo.  Keep it well outside the
+        // cached start room so that the room itself remains reusable.
+        board.insert_via(1, IntPoint::new(20_000, 20_000), vec![2], 1, false);
+        assert!(board.pop_snapshot());
+        assert!(board.pop_snapshot());
+        assert_eq!(board.change_epoch(), initial_epoch);
+        engine.sync_board_changes(&board);
+        assert_eq!(
+            engine.complete_rooms().len(),
+            cached_rooms,
+            "committing nested snapshots must not globally clear the room graph"
+        );
+
+        board.generate_snapshot();
+        board.insert_via(1, IntPoint::new(20_000, 20_000), vec![2], 1, false);
+        assert!(board.rollback_snapshot());
+        assert!(board.change_epoch() > initial_epoch);
+        engine.sync_board_changes(&board);
+        assert!(
+            engine.complete_rooms().is_empty(),
+            "rollback must globally invalidate state built against speculative geometry"
+        );
+    }
+
+    #[test]
+    fn a_fresh_synced_engine_starts_at_the_change_log_tail() {
+        let mut board = test_board();
+        board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        let log_tail = board.change_log().len();
+        let epoch = board.change_epoch();
+        let mut engine = AutorouteEngine::new_with_clearance_synced(&board, 1, false, 1, 100);
+        assert_eq!(engine.seen_log, log_tail);
+        assert_eq!(engine.seen_epoch, epoch);
+
+        // New changes after construction remain visible to the normal
+        // incremental synchronizer.
+        board.insert_via(1, IntPoint::new(9_000, 0), vec![2], 1, false);
+        engine.sync_board_changes(&board);
+        assert_eq!(engine.seen_log, board.change_log().len());
+    }
+
+    #[test]
+    fn log_shrink_from_a_checkpoint_clears_cached_rooms() {
+        let mut board = test_board();
+        board.insert_via(1, IntPoint::new(0, 0), vec![1], 1, false);
+        let checkpoint = board.clone();
+        board.insert_via(1, IntPoint::new(9_000, 0), vec![1], 1, false);
+        let mut engine = AutorouteEngine::new(1);
+        assert!(!engine
+            .create_start_rooms(
+                &board,
+                TileShape::Box(IntBox::new(IntPoint::new(0, 0), IntPoint::new(0, 0))),
+                0,
+            )
+            .is_empty());
+        assert!(!engine.complete_rooms().is_empty());
+        engine.sync_board_changes(&board);
+
+        // The checkpoint has a shorter log but the copied epoch is the same.
+        // A stale cursor must not make the old room graph look current.
+        board = checkpoint;
+        engine.sync_board_changes(&board);
+        assert!(engine.complete_rooms().is_empty());
     }
 }

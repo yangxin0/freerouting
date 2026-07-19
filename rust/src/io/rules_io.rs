@@ -1054,6 +1054,36 @@ fn read_rules_inner(board: &mut BasicBoard, content: &str) -> Result<usize, Stri
                 // annotation, while structural references below remain
                 // strict because they affect the board graph immediately.
                 let _member_nets: Vec<&str> = class_args.filter(|name| !name.is_empty()).collect();
+                let clearance_refs: Vec<_> = node.children("clearance_class").collect();
+                if clearance_refs.len() > 1 {
+                    return Err(format!(
+                        "class {class_name:?} has more than one clearance_class reference"
+                    ));
+                }
+                if let Some(clearance_ref) = clearance_refs.first() {
+                    let names: Vec<_> = clearance_ref.args().collect();
+                    if names.len() != 1 || names[0].is_empty() {
+                        return Err(format!(
+                            "class {class_name:?} clearance_class must name exactly one class"
+                        ));
+                    }
+                    let clearance_name = names[0];
+                    let is_alias = matches!(
+                        clearance_name.to_ascii_lowercase().as_str(),
+                        "wire" | "default" | "null"
+                    );
+                    if !is_alias
+                        && board
+                            .rules
+                            .clearance_matrix
+                            .get_no(clearance_name)
+                            .is_none()
+                    {
+                        return Err(format!(
+                            "class {class_name:?} references unknown clearance class {clearance_name:?}"
+                        ));
+                    }
+                }
                 for circuit in node.children("circuit") {
                     for use_via in circuit.children("use_via") {
                         for padstack in use_via.args() {
@@ -2045,6 +2075,40 @@ mod tests {
             board.rules.clearance_matrix.get_class_count(),
             before_class_count,
             "a failed sidecar must not leak newly-created classes"
+        );
+    }
+
+    #[test]
+    fn unknown_class_clearance_reference_is_rejected_atomically() {
+        let mut board = import_dsn(MINI).expect("import");
+        let before_width = board.rules.get_default_trace_half_width(0);
+        let before_class_count = board.rules.clearance_matrix.get_class_count();
+        let default_class = board.rules.get_default_net_class();
+        let before_trace_class = board
+            .rules
+            .net_classes
+            .get(default_class)
+            .get_trace_clearance_class();
+        let error = read_rules(
+            &mut board,
+            r#"(rules PCB mini
+  (rule (width 400))
+  (class default (clearance_class "strict-typo")))"#,
+        )
+        .expect_err("a dangling sidecar clearance class must fail closed");
+        assert!(error.contains("unknown clearance class"), "{error}");
+        assert_eq!(board.rules.get_default_trace_half_width(0), before_width);
+        assert_eq!(
+            board.rules.clearance_matrix.get_class_count(),
+            before_class_count
+        );
+        assert_eq!(
+            board
+                .rules
+                .net_classes
+                .get(default_class)
+                .get_trace_clearance_class(),
+            before_trace_class
         );
     }
 

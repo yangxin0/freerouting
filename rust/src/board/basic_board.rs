@@ -7,7 +7,7 @@
 //! multiple compensated trees follows later; this is the single
 //! uncompensated default tree.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -103,6 +103,47 @@ struct TreeShapeEntry {
     layer: usize,
 }
 
+pub(crate) type LineageViolationKey = (ItemId, ItemId, usize);
+/// A concrete shape pair that was violating before a replacement began.
+/// Keeping the pair's full regions (rather than one closest point) lets a
+/// trace split into several pieces retain an inherited overlap while still
+/// rejecting a replacement that moves the contact outside the old overlap.
+/// The third value is that region's original violation deficit; a different,
+/// more severe contact between the same two lineages must not authorize this
+/// region to worsen.
+pub(crate) type LineageViolationRegion = (TileShape, TileShape, f64);
+
+#[derive(Debug, Clone)]
+enum LineageDrcCapture {
+    SourceShape {
+        lineage: ItemId,
+        layer: usize,
+        shape: TileShape,
+    },
+    Violation {
+        key: LineageViolationKey,
+        deficit: f64,
+        region: LineageViolationRegion,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LineageDrcCheckpoint {
+    snapshot_level: usize,
+    capture_len: usize,
+}
+
+#[derive(Debug)]
+struct LineageDrcTransaction {
+    watermark: ItemId,
+    snapshot_level: usize,
+    /// Append-only observations made while pre-transaction items are removed.
+    /// Snapshot checkpoints record only this vector's length, so a hot nested
+    /// route attempt can roll back outer bookkeeping without cloning all maps.
+    captures: Vec<LineageDrcCapture>,
+    checkpoints: Vec<LineageDrcCheckpoint>,
+}
+
 #[derive(Debug)]
 pub struct BasicBoard {
     pub layer_structure: LayerStructure,
@@ -148,14 +189,20 @@ pub struct BasicBoard {
     plane_items: Vec<ItemId>,
     /// Generator for unique item ids.
     next_id_no: ItemId,
+    /// Nested replacement transactions. Before a pre-transaction item is
+    /// removed, its local violations and geometry are captured here so the
+    /// final gate can distinguish unchanged inherited defects from new or
+    /// relocated ones without a whole-board DRC scan.
+    lineage_drc_transactions: Vec<LineageDrcTransaction>,
     /// Cache of item shapes inflated by an integer margin (room
     /// completion re-inflates the same obstacles for every completed
     /// room otherwise). Keyed per item id — ids are never reused, so an
     /// entry only needs clearing when its item is removed.
     /// Log of changed regions (layer, bbox) since board creation, for
     /// incremental invalidation of cached expansion rooms (Java:
-    /// additional_update_after_change). Undo/redo/pop bump `change_epoch`
-    /// instead, telling consumers to drop everything.
+    /// additional_update_after_change). Undo/redo/rollback bump
+    /// `change_epoch` instead, telling consumers to drop everything. A
+    /// successful snapshot pop is an ordinary incremental commit.
     change_log: Vec<(usize, IntBox)>,
     change_epoch: u64,
     /// Contact cache for the connectivity walks: net completeness and
@@ -180,6 +227,15 @@ pub struct BasicBoard {
 
 impl Clone for BasicBoard {
     fn clone(&self) -> Self {
+        self.clone_with_history(true)
+    }
+}
+
+impl BasicBoard {
+    /// Clones the board's persistent state while choosing whether the
+    /// append-only invalidation history belongs to the new root.  Derived
+    /// caches and in-flight transactions are always reset.
+    fn clone_with_history(&self, keep_history: bool) -> Self {
         // The item database and search tree are immutable snapshots at this
         // point, but the contact/inflation caches are derived from the live
         // rules and geometry.  Cloning those RefCells would carry answers
@@ -202,12 +258,33 @@ impl Clone for BasicBoard {
             tree_entries: self.tree_entries.clone(),
             plane_items: self.plane_items.clone(),
             next_id_no: self.next_id_no,
-            change_log: self.change_log.clone(),
-            change_epoch: self.change_epoch,
+            // A clone is a new transactional root; an in-flight transaction
+            // belongs only to the source board's call stack.
+            lineage_drc_transactions: Vec::new(),
+            change_log: if keep_history {
+                self.change_log.clone()
+            } else {
+                Vec::new()
+            },
+            change_epoch: if keep_history {
+                self.change_epoch
+            } else {
+                self.change_epoch.wrapping_add(1)
+            },
             contact_cache: std::cell::RefCell::new(Default::default()),
             contact_cache_log: std::cell::Cell::new((0, 0)),
             inflation_cache: std::cell::RefCell::new(Default::default()),
         }
+    }
+
+    /// Clones the board as an independent optimizer candidate.  Candidates
+    /// start with cold derived caches and never need to replay the source
+    /// board's historical invalidation regions; retaining that append-only
+    /// log made every worker copy O(history) bytes on large jobs.  Advance
+    /// the epoch so an engine or page cache held by a caller fails closed if
+    /// the candidate is later adopted as the live board.
+    pub(crate) fn clone_for_routing_candidate(&self) -> Self {
+        self.clone_with_history(false)
     }
 }
 
@@ -389,6 +466,7 @@ impl BasicBoard {
             tree_entries: BTreeMap::new(),
             plane_items: Vec::new(),
             next_id_no: 0,
+            lineage_drc_transactions: Vec::new(),
             change_log: Vec::new(),
             contact_cache: std::cell::RefCell::new(crate::datastructures::FxHashMap::default()),
             contact_cache_log: std::cell::Cell::new((0, 0)),
@@ -499,7 +577,7 @@ impl BasicBoard {
         &self.change_log
     }
 
-    /// Bumped by undo/redo/pop_snapshot: log consumers must drop all
+    /// Bumped by undo/redo/rollback: log consumers must drop all
     /// cached state when it changes.
     pub fn change_epoch(&self) -> u64 {
         self.change_epoch
@@ -527,6 +605,13 @@ impl BasicBoard {
         self.next_id_no + 1
     }
 
+    /// Current nested undo/snapshot depth.  Internal DRC transactions bind to
+    /// the snapshot that protects their mutations, so an inner rollback can
+    /// invalidate only its own context.
+    pub(crate) fn snapshot_level(&self) -> usize {
+        self.item_list.stack_level()
+    }
+
     /// Returns all currently-live items created at or after `watermark`.
     /// Item ids are monotonic and never reused, so this is a cheap and
     /// unambiguous transaction watermark for shove/route/optimizer gates.
@@ -536,10 +621,144 @@ impl BasicBoard {
             .collect()
     }
 
+    /// Opens a nested DRC replacement transaction and returns its item-id
+    /// watermark. Removed pre-transaction copper is captured lazily by
+    /// [`Self::remove_item`], keeping the cost local to items actually
+    /// replaced.
+    pub(crate) fn begin_lineage_drc_transaction(&mut self) -> ItemId {
+        let watermark = self.next_item_id();
+        self.lineage_drc_transactions.push(LineageDrcTransaction {
+            watermark,
+            snapshot_level: self.snapshot_level(),
+            captures: Vec::new(),
+            checkpoints: Vec::new(),
+        });
+        watermark
+    }
+
+    /// Closes and validates the most recently opened replacement transaction.
+    pub(crate) fn finish_lineage_drc_transaction(&mut self, watermark: ItemId) -> bool {
+        let Some(top) = self.lineage_drc_transactions.last() else {
+            return false;
+        };
+        // A stale/mismatched helper must not consume the enclosing context.
+        // Nested shove/via paths can fail independently; preserving the stack
+        // here lets the caller roll back or finish the correct transaction.
+        if top.watermark != watermark {
+            return false;
+        }
+        let transaction = self.lineage_drc_transactions.pop().unwrap();
+        let mut baseline = HashMap::new();
+        let mut source_shapes: HashMap<(ItemId, usize), Vec<TileShape>> = HashMap::new();
+        let mut baseline_regions: HashMap<LineageViolationKey, Vec<LineageViolationRegion>> =
+            HashMap::new();
+        for capture in transaction.captures {
+            match capture {
+                LineageDrcCapture::SourceShape {
+                    lineage,
+                    layer,
+                    shape,
+                } => source_shapes
+                    .entry((lineage, layer))
+                    .or_default()
+                    .push(shape),
+                LineageDrcCapture::Violation {
+                    key,
+                    deficit,
+                    region,
+                } => {
+                    baseline
+                        .entry(key)
+                        .and_modify(|severity: &mut f64| *severity = severity.max(deficit))
+                        .or_insert(deficit);
+                    baseline_regions.entry(key).or_default().push(region);
+                }
+            }
+        }
+        crate::drc::lineage_delta_is_clear(
+            self,
+            watermark,
+            &baseline,
+            &source_shapes,
+            &baseline_regions,
+        )
+    }
+
+    /// Discards the bookkeeping for a transaction whose board snapshot will
+    /// be rolled back for a non-DRC reason.
+    pub(crate) fn discard_lineage_drc_transaction(&mut self, watermark: ItemId) {
+        if self
+            .lineage_drc_transactions
+            .last()
+            .is_some_and(|transaction| transaction.watermark == watermark)
+        {
+            self.lineage_drc_transactions.pop();
+        }
+    }
+
+    fn capture_removed_item_for_drc(&mut self, id: ItemId) {
+        if self.lineage_drc_transactions.is_empty() {
+            return;
+        }
+        let Some(item) = self.get_item(id).cloned() else {
+            return;
+        };
+        if !self
+            .lineage_drc_transactions
+            .iter()
+            .any(|transaction| id < transaction.watermark)
+        {
+            return;
+        }
+        let lineage = item.base.lineage_no;
+        let source_shapes: Vec<(usize, TileShape)> = item
+            .tile_shapes(&self.padstacks)
+            .iter()
+            .map(|(shape, layer)| (*layer, shape.clone()))
+            .collect();
+        let violations = crate::drc::lineage_violations_for_item(self, id);
+        for transaction in &mut self.lineage_drc_transactions {
+            if id >= transaction.watermark {
+                continue;
+            }
+            for (layer, shape) in &source_shapes {
+                transaction.captures.push(LineageDrcCapture::SourceShape {
+                    lineage,
+                    layer: *layer,
+                    shape: shape.clone(),
+                });
+            }
+            for violation in &violations {
+                if violation.second_item >= transaction.watermark {
+                    continue;
+                }
+                let region = if violation.first_lineage <= violation.second_lineage {
+                    (
+                        violation.first_shape.clone(),
+                        violation.second_shape.clone(),
+                    )
+                } else {
+                    (
+                        violation.second_shape.clone(),
+                        violation.first_shape.clone(),
+                    )
+                };
+                transaction.captures.push(LineageDrcCapture::Violation {
+                    key: violation.key,
+                    deficit: violation.deficit,
+                    region: (region.0, region.1, violation.deficit),
+                });
+            }
+        }
+    }
+
     /// Inserts an item, assigning it a fresh id. Returns the id.
     pub fn insert_item(&mut self, mut item: Item) -> ItemId {
         let id = self.new_id_no();
         item.base.id_no = id;
+        if item.base.lineage_no == 0 {
+            item.base.lineage_no = id;
+        }
         if item.base.birth == 0 {
             item.base.birth = BIRTH_TAG.with(|t| t.get());
         }
@@ -590,7 +809,31 @@ impl BasicBoard {
         clearance_class: usize,
         clearance_class_explicit: bool,
     ) -> ItemId {
+        self.insert_trace_with_lineage(
+            polyline,
+            layer,
+            half_width,
+            net_nos,
+            clearance_class,
+            clearance_class_explicit,
+            0,
+        )
+    }
+
+    /// Inserts a replacement trace with the stable identity of its source.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn insert_trace_with_lineage(
+        &mut self,
+        polyline: Polyline,
+        layer: usize,
+        half_width: i32,
+        net_nos: Vec<i32>,
+        clearance_class: usize,
+        clearance_class_explicit: bool,
+        lineage_no: ItemId,
+    ) -> ItemId {
         let mut base = ItemBase::new(0, net_nos, clearance_class);
+        base.lineage_no = lineage_no;
         base.clearance_class_explicit = clearance_class_explicit;
         let item = Item::new_polyline_trace(base, half_width, layer, polyline);
         self.insert_item(item)
@@ -648,6 +891,17 @@ impl BasicBoard {
         base.clearance_class_explicit = clearance_class_explicit;
         let item = Item::new_via(base, padstack, center, attach_allowed);
         self.insert_item(item)
+    }
+
+    /// Assigns a replacement item's stable lineage before a transaction's
+    /// final DRC gate. Only routing internals creating a one-for-one physical
+    /// replacement should call this.
+    pub(crate) fn set_item_lineage(&mut self, id: ItemId, lineage_no: ItemId) {
+        if lineage_no > 0 {
+            if let Some(item) = self.item_list.get_mut(&id) {
+                item.base.lineage_no = lineage_no;
+            }
+        }
     }
 
     /// Inserts a router-created escape via on one same-net SMD layer while
@@ -807,6 +1061,7 @@ impl BasicBoard {
         if self.item_list.get(&id).is_none() {
             return false;
         }
+        self.capture_removed_item_for_drc(id);
         self.inflation_cache.borrow_mut().remove(&id);
         if let Some(item) = self.item_list.get(&id).cloned() {
             self.log_item_regions(&item);
@@ -1403,10 +1658,10 @@ impl BasicBoard {
 
     /// True if all connectable items of `net_no` form one connected set.
     ///
-    /// A declared net with no physical item is *not* electrically complete.
-    /// Treating the empty set as connected lets an incomplete import pass the
-    /// router/DRC success gates (and was the source of several false-success
-    /// reports in the API path).
+    /// A declared net with no physical item and no unresolved logical
+    /// endpoint has no electrical obligation and is vacuously complete.
+    /// Importers record missing component pins explicitly, so those still
+    /// fail closed above instead of being confused with harmless declarations.
     pub fn net_is_completely_connected(&self, net_no: i32) -> bool {
         if self.has_unresolved_net_endpoints(net_no) {
             return false;
@@ -1417,7 +1672,7 @@ impl BasicBoard {
             .map(|(id, _)| *id)
             .collect();
         let Some(&first) = net_items.first() else {
-            return false;
+            return true;
         };
         let connected = self.get_connected_set(first, net_no);
         net_items.iter().all(|id| connected.contains(id))
@@ -1595,25 +1850,28 @@ impl BasicBoard {
         let net_nos = item.base.net_nos.clone();
         let clearance_class = item.base.clearance_class;
         let clearance_class_explicit = item.base.clearance_class_explicit;
+        let lineage_no = item.base.lineage_no;
         // splitting is normalization, not a route change: the pieces keep
         // the protected state (Java Trace.split keeps the fixed state)
         let fixed_state = item.base.fixed_state;
         self.remove_item(id);
-        let a = self.insert_trace_with_provenance(
+        let a = self.insert_trace_with_lineage(
             first,
             layer,
             half_width,
             net_nos.clone(),
             clearance_class,
             clearance_class_explicit,
+            lineage_no,
         );
-        let b = self.insert_trace_with_provenance(
+        let b = self.insert_trace_with_lineage(
             second,
             layer,
             half_width,
             net_nos,
             clearance_class,
             clearance_class_explicit,
+            lineage_no,
         );
         self.set_fixed_state(a, fixed_state);
         self.set_fixed_state(b, fixed_state);
@@ -1697,6 +1955,16 @@ impl BasicBoard {
                     // vice versa) would silently change what the shove and
                     // ripup algorithms may touch
                     || other.base.fixed_state != base.fixed_state
+                    // The transaction gate represents provenance with one
+                    // lineage per item. Combining two different source
+                    // lineages would erase one half's provenance: an
+                    // unchanged inherited defect on that half would then be
+                    // indistinguishable from a relocated one. Keep the
+                    // segments separate while a replacement transaction is
+                    // active; outside one, deterministic normalization is
+                    // still safe and useful.
+                    || (!self.lineage_drc_transactions.is_empty()
+                        && other.base.lineage_no != base.lineage_no)
                 {
                     continue;
                 }
@@ -1709,6 +1977,14 @@ impl BasicBoard {
                 let net_nos = base.net_nos.clone();
                 let clearance_class = base.clearance_class;
                 let clearance_class_explicit = base.clearance_class_explicit;
+                // Same-lineage replacement pieces recombine without losing
+                // provenance. Outside a DRC transaction, distinct ordinary
+                // source traces normalize deterministically to the oldest
+                // nonzero lineage.
+                let lineage_no = match (base.lineage_no, other.base.lineage_no) {
+                    (0, lineage) | (lineage, 0) => lineage,
+                    (left, right) => left.min(right),
+                };
                 // Java combines into `this`, keeping its fixed state
                 let fixed_state = base.fixed_state;
                 self.remove_item(current);
@@ -1721,6 +1997,7 @@ impl BasicBoard {
                     clearance_class,
                     clearance_class_explicit,
                 );
+                self.set_item_lineage(current, lineage_no);
                 self.set_fixed_state(current, fixed_state);
                 combined = true;
                 break;
@@ -1742,25 +2019,63 @@ impl BasicBoard {
 
     /// Makes the current state restorable by undo.
     pub fn generate_snapshot(&mut self) {
+        let snapshot_level = self.snapshot_level() + 1;
+        for transaction in &mut self.lineage_drc_transactions {
+            transaction.checkpoints.push(LineageDrcCheckpoint {
+                snapshot_level,
+                capture_len: transaction.captures.len(),
+            });
+        }
         self.item_list.generate_snapshot();
+    }
+
+    /// Resolves DRC capture-log checkpoints at `level`. A commit keeps the
+    /// observations made inside the snapshot; rollback truncates each outer
+    /// transaction to exactly what it knew before entering that snapshot.
+    fn resolve_lineage_snapshot(&mut self, level: usize, commit: bool) {
+        // Transactions opened within this snapshot do not exist outside it.
+        self.lineage_drc_transactions
+            .retain(|transaction| transaction.snapshot_level < level);
+        for transaction in &mut self.lineage_drc_transactions {
+            if !commit {
+                if let Some(checkpoint) = transaction
+                    .checkpoints
+                    .iter()
+                    .rev()
+                    .find(|checkpoint| checkpoint.snapshot_level == level)
+                    .copied()
+                {
+                    transaction.captures.truncate(checkpoint.capture_len);
+                }
+            }
+            transaction
+                .checkpoints
+                .retain(|checkpoint| checkpoint.snapshot_level < level);
+        }
     }
 
     /// Removes the top snapshot without restoring it (commits the changes
     /// made since the snapshot into the previous level).
     pub fn pop_snapshot(&mut self) -> bool {
-        self.change_epoch += 1;
-        self.item_list.pop_snapshot()
+        let level = self.snapshot_level();
+        let popped = self.item_list.pop_snapshot();
+        if popped {
+            self.resolve_lineage_snapshot(level, true);
+        }
+        popped
     }
 
     /// Restores the situation before the last snapshot, resynchronizing
     /// the search tree. Returns false if no undo is possible.
     pub fn undo(&mut self) -> bool {
+        let rolled_level = self.snapshot_level();
         let mut cancelled = Vec::new();
         let mut restored = Vec::new();
         if !self.item_list.undo(&mut cancelled, &mut restored) {
             return false;
         }
-        self.resync_search_tree(&cancelled, &restored);
+        self.resolve_lineage_snapshot(rolled_level, false);
+        self.resync_search_tree(&cancelled, &restored, Some(rolled_level));
         true
     }
 
@@ -1769,6 +2084,7 @@ impl BasicBoard {
     /// so a rejected candidate cannot later be resurrected through the public
     /// board redo API.
     pub fn rollback_snapshot(&mut self) -> bool {
+        let rolled_level = self.snapshot_level();
         let mut cancelled = Vec::new();
         let mut restored = Vec::new();
         if !self
@@ -1777,7 +2093,8 @@ impl BasicBoard {
         {
             return false;
         }
-        self.resync_search_tree(&cancelled, &restored);
+        self.resolve_lineage_snapshot(rolled_level, false);
+        self.resync_search_tree(&cancelled, &restored, Some(rolled_level));
         true
     }
 
@@ -1788,19 +2105,38 @@ impl BasicBoard {
     /// Restores the situation before the last undo. Returns false if no
     /// redo is possible.
     pub fn redo(&mut self) -> bool {
+        let restored_level = self.snapshot_level() + 1;
         let mut cancelled = Vec::new();
         let mut restored = Vec::new();
         if !self.item_list.redo(&mut cancelled, &mut restored) {
             return false;
         }
-        self.resync_search_tree(&cancelled, &restored);
+        // Redo can resurrect mutations whose DRC capture-log branch was
+        // discarded by undo. Routing internals use rollback (no redo); if a
+        // public caller redoes while a transaction is active, fail that
+        // transaction closed rather than validate against incomplete history.
+        self.lineage_drc_transactions.clear();
+        self.resync_search_tree(&cancelled, &restored, Some(restored_level));
         true
     }
 
-    fn resync_search_tree(&mut self, cancelled: &[Item], restored: &[Item]) {
+    fn resync_search_tree(
+        &mut self,
+        cancelled: &[Item],
+        restored: &[Item],
+        invalidated_from_level: Option<usize>,
+    ) {
         // items may reappear or vanish wholesale: cached room graphs and
         // inflations cannot track this incrementally
         self.change_epoch += 1;
+        // Invalidate only contexts bound to the restored snapshot (and any
+        // nested contexts). An inner failed shove/via move must not erase the
+        // enclosing maze/optimizer transaction and its inherited-violation
+        // baseline.
+        if let Some(level) = invalidated_from_level {
+            self.lineage_drc_transactions
+                .retain(|transaction| transaction.snapshot_level < level);
+        }
         for item in cancelled.iter().chain(restored) {
             self.inflation_cache.borrow_mut().remove(&item.base.id_no);
         }
@@ -2110,8 +2446,13 @@ mod tests {
     fn connectivity_contacts_and_connected_sets() {
         let mut board = test_board();
         assert!(
-            !board.net_is_completely_connected(1),
-            "a net with no physical item must not pass the completion gate"
+            board.net_is_completely_connected(1),
+            "an empty declaration has no electrical obligation"
+        );
+        board.record_unresolved_net_endpoint(2, LogicalEndpoint::new("U1", "1"));
+        assert!(
+            !board.net_is_completely_connected(2),
+            "an unresolved logical endpoint remains terminal"
         );
         // net 1: pin-like via at (0,0), trace to (5000,0), via there,
         // trace on layer 1 onwards
@@ -2552,5 +2893,18 @@ mod tests {
         assert_eq!(board.overlapping_items(&query, Some(0)), vec![trace]);
         assert!(!board.redo());
         assert!(board.get_item(via).is_none());
+    }
+
+    #[test]
+    fn routing_candidate_clone_drops_stale_change_history() {
+        let mut board = test_board();
+        board.insert_trace(trace_polyline(&[(0, 0), (5_000, 0)]), 0, 100, vec![1], 1);
+        let source_log = board.change_log().len();
+        let source_epoch = board.change_epoch();
+        let candidate = board.clone_for_routing_candidate();
+        assert!(source_log > 0);
+        assert!(candidate.change_log().is_empty());
+        assert_ne!(candidate.change_epoch(), source_epoch);
+        assert_eq!(candidate.item_count(), board.item_count());
     }
 }

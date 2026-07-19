@@ -44,19 +44,21 @@ pub fn cutout_trace(
     let net_nos = item.base.net_nos.clone();
     let clearance_class = item.base.clearance_class;
     let clearance_class_explicit = item.base.clearance_class_explicit;
+    let lineage_no = item.base.lineage_no;
     board.remove_item(trace_id);
     let mut inserted = Vec::new();
     for piece in pieces {
         if piece.is_empty() {
             continue;
         }
-        inserted.push(board.insert_trace_with_provenance(
+        inserted.push(board.insert_trace_with_lineage(
             piece,
             layer,
             half_width,
             net_nos.clone(),
             clearance_class,
             clearance_class_explicit,
+            lineage_no,
         ));
     }
     inserted
@@ -71,6 +73,7 @@ struct EntryPoint {
     half_width: i32,
     clearance_class: usize,
     clearance_class_explicit: bool,
+    lineage_no: ItemId,
     #[allow(dead_code)]
     trace_line_no: usize,
     /// The trace's polyline line at `trace_line_no`, cached because the
@@ -206,13 +209,14 @@ impl ShapeTraceEntries {
     }
 
     /// The next substitute trace piece: its polyline plus (layer,
-    /// half width, net numbers, clearance class, explicit provenance);
+    /// half width, net numbers, clearance class, explicit provenance,
+    /// stable source lineages at both ends);
     /// `None` at the end.
     #[allow(clippy::type_complexity)]
     pub fn next_substitute_trace_piece(
         &mut self,
         board: &BasicBoard,
-    ) -> Option<(Polyline, usize, i32, Vec<i32>, usize, bool)> {
+    ) -> Option<(Polyline, usize, i32, Vec<i32>, usize, bool, ItemId, ItemId)> {
         loop {
             let (first, last) = self.pop_piece()?;
             // Java `ShapeTraceEntries` queries `(victim trace, shove shape)`;
@@ -250,6 +254,8 @@ impl ShapeTraceEntries {
                 first.net_nos.clone(),
                 first.clearance_class,
                 first.clearance_class_explicit,
+                first.lineage_no,
+                last.lineage_no,
             ));
         }
     }
@@ -306,6 +312,7 @@ impl ShapeTraceEntries {
                 trace.half_width,
                 item.base.clearance_class,
                 item.base.clearance_class_explicit,
+                item.base.lineage_no,
                 line_no,
                 trace.polyline.arr[line_no],
                 edge_no,
@@ -396,6 +403,7 @@ impl ShapeTraceEntries {
                                 trace.half_width,
                                 item.base.clearance_class,
                                 item.base.clearance_class_explicit,
+                                item.base.lineage_no,
                                 trace_line_segment_no,
                                 trace.polyline.arr[trace_line_segment_no],
                                 projection_side,
@@ -626,6 +634,11 @@ impl ShapeTraceEntries {
             && self.entries[last_idx + 1].clearance_class_explicit
                 == self.entries[first_idx].clearance_class_explicit
         {
+            // Do not split on lineage. Adjacent imported segments of one net
+            // need one two-ended substitute; splitting their entry pair can
+            // delete the junction while reporting a successful shove. The
+            // substitute reports both endpoint lineages so the caller can
+            // preserve each source's inherited-clearance provenance.
             last_idx += 1;
         }
         let first = self.entries[first_idx].clone();
@@ -653,6 +666,7 @@ impl ShapeTraceEntries {
         half_width: i32,
         clearance_class: usize,
         clearance_class_explicit: bool,
+        lineage_no: ItemId,
         trace_line_no: usize,
         trace_line: crate::geometry::planar::Line,
         edge_no: usize,
@@ -664,6 +678,7 @@ impl ShapeTraceEntries {
             half_width,
             clearance_class,
             clearance_class_explicit,
+            lineage_no,
             trace_line_no,
             trace_line,
             entry_approx,
@@ -755,11 +770,16 @@ mod tests {
         assert!(entries.store_items(&board, &[trace], false, false));
         assert_eq!(entries.substitute_trace_count(), 1);
         assert_eq!(entries.stack_depth(), 1);
-        let (piece, layer, half_width, net_nos, _, explicit) = entries
+        let (piece, layer, half_width, net_nos, _, explicit, first_lineage, last_lineage) = entries
             .next_substitute_trace_piece(&board)
             .expect("a substitute piece");
         assert_eq!((layer, half_width, net_nos), (0, 100, vec![2]));
         assert!(explicit);
+        assert_eq!(
+            first_lineage,
+            board.get_item(trace).unwrap().base.lineage_no
+        );
+        assert_eq!(last_lineage, first_lineage);
         // the substitute goes around the shove shape: no corner inside
         for c in piece.corner_approx_arr() {
             assert!(
@@ -790,7 +810,18 @@ mod tests {
             [(10, 0, false), (10, 1, false), (11, 2, true), (11, 3, true)]
         {
             let entry = entries.shape.corner_approx(edge);
-            entries.insert_entry_point(trace, vec![2], 100, 1, explicit, 0, line, edge, entry);
+            entries.insert_entry_point(
+                trace,
+                vec![2],
+                100,
+                1,
+                explicit,
+                trace,
+                0,
+                line,
+                edge,
+                entry,
+            );
         }
         for entry in &mut entries.entries {
             entry.stack_level = 1;

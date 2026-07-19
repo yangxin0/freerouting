@@ -33,7 +33,12 @@ from .config import (
     LOG_DIR,
 )
 from .gui_helpers import has_pcbnew_api, wx_show_error, wx_safe_invoke
-from .ipc_helpers import is_ipc_available, get_board_json_via_ipc
+from .ipc_helpers import (
+    is_ipc_available,
+    get_board_json_via_ipc,
+    resolve_result_layer_id,
+    set_via_layer_span,
+)
 from .process_utils import ProcessDialog, STATUS_UNDETERMINED, STATUS_IN_PROGRESS, STATUS_PASS, STATUS_FAIL
 from .router_dsn import DsnRouter
 from .router_ipc import IpcRouter
@@ -595,7 +600,7 @@ class FreeroutingPlugin(pcbnew.ActionPlugin):
                 if net is None:
                     continue
                 width = int(trace.get("width", 0.25) * scale)
-                layer = trace.get("layerIndex", 0)
+                layer = resolve_result_layer_id(board, board_data, trace.get("layerIndex", 0))
                 points = trace.get("points", [])
                 for i in range(len(points) - 1):
                     t = pcbnew.PCB_TRACK(board)
@@ -623,6 +628,7 @@ class FreeroutingPlugin(pcbnew.ActionPlugin):
                 v.SetPosition(pcbnew.VECTOR2I(int(pos.get("x", 0) * scale), int(pos.get("y", 0) * scale)))
                 v.SetWidth(int(via.get("diameter", 0.8) * scale))
                 v.SetDrill(int(via.get("drill", 0.4) * scale))
+                set_via_layer_span(v, board, board_data, via)
                 v.SetNet(net)
                 board.Add(v)
                 if commit:

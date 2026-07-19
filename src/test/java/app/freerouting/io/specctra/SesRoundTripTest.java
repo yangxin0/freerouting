@@ -1,7 +1,13 @@
 package app.freerouting.io.specctra;
 
 import app.freerouting.Freerouting;
+import app.freerouting.board.FixedState;
+import app.freerouting.board.PolylineTrace;
 import app.freerouting.board.RoutingBoard;
+import app.freerouting.geometry.planar.IntPoint;
+import app.freerouting.geometry.planar.Point;
+import app.freerouting.rules.DefaultItemClearanceClasses;
+import app.freerouting.rules.Net;
 import app.freerouting.settings.GlobalSettings;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -118,6 +124,54 @@ class SesRoundTripTest {
   }
 
   /**
+   * Verifies that an internal fromto/order subnet survives a Java/Rust-compatible SES
+   * round-trip. Standard {@code net_number} is translator metadata and must not be interpreted as
+   * the subnet selector.
+   */
+  @Test
+  void namespacedSubnetSelectsExactBoardNet() throws Exception {
+    RoutingBoard source = DsnTestFixtures.loadBoard("Issue026-J2_reference.dsn");
+    Net subnetOne = source.rules.nets.get(1);
+    assertNotNull(subnetOne, "Fixture must contain a net");
+    Net subnetTwo = source.rules.nets.add(subnetOne.name, 2, false);
+
+    int centerX = source.bounding_box.ll.x + source.bounding_box.width() / 2;
+    int centerY = source.bounding_box.ll.y + source.bounding_box.height() / 2;
+    int delta = Math.max(1, Math.min(source.bounding_box.width() / 10, 1_000));
+    Point[] corners = {
+        new IntPoint(centerX - delta, centerY),
+        new IntPoint(centerX + delta, centerY)
+    };
+    int clearanceClass = source.rules.get_default_net_class().default_item_clearance_classes
+        .get(DefaultItemClearanceClasses.ItemClass.TRACE);
+    source.insert_trace(corners, 0, 100, new int[]{subnetTwo.net_number}, clearanceClass,
+        FixedState.USER_FIXED);
+
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    SesWriter.write(source, out, "subnet-round-trip.dsn");
+    String session = out.toString(StandardCharsets.UTF_8);
+    assertTrue(session.contains("(freerouting_subnet 2)"),
+        "Writer must preserve a non-default subnet explicitly");
+
+    // A translator may assign any value here; it is not the DSN subnet number.
+    String originalNetNumber = "(net_number " + subnetTwo.net_number + ")";
+    assertTrue(session.contains(originalNetNumber),
+        "Writer must emit the real board net id as translator metadata");
+    session = session.replace(originalNetNumber, "(net_number 999999)");
+
+    RoutingBoard target = DsnTestFixtures.loadBoard("Issue026-J2_reference.dsn");
+    Net targetSubnetTwo = target.rules.nets.add(subnetOne.name, 2, false);
+    SesImportSummary summary = SesReader.read(
+        new ByteArrayInputStream(session.getBytes(StandardCharsets.UTF_8)), target);
+
+    assertEquals(0, summary.errorsEncountered(),
+        "The namespaced subnet marker must be accepted without import errors");
+    assertTrue(target.get_connectable_items(targetSubnetTwo.net_number).stream()
+            .anyMatch(PolylineTrace.class::isInstance),
+        "The session route must be assigned to subnet 2, not subnet 1");
+  }
+
+  /**
    * Verifies that passing a {@code null} stream to {@link SesReader#read} throws
    * {@link IOException} rather than a {@link NullPointerException}.
    */
@@ -157,4 +211,3 @@ class SesRoundTripTest {
     assertTrue(out.size() > 0, "SesWriter must write data to the stream");
   }
 }
-

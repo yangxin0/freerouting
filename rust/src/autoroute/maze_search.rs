@@ -828,7 +828,8 @@ fn seed_room(
                 + (from..=to)
                     .map(|l| board.rules.clearance_matrix.max_value(l).max(0))
                     .max()
-                    .unwrap_or(0);
+                    .unwrap_or(0)
+                + board.rules.max_same_net_clearance().max(0);
             let pages = engine
                 .drill_pages
                 .entry(choice.padstack)
@@ -1167,7 +1168,8 @@ pub(crate) fn maze_route_with_ripup(
     request: &MazeRouteRequest,
 ) -> Option<RoutedConnection> {
     let allow_ripup = request.ripup_penalty > 0.0;
-    let mut engine = AutorouteEngine::new_with_clearance(
+    let mut engine = AutorouteEngine::new_with_clearance_synced(
+        board,
         request.net_no,
         allow_ripup,
         request.clearance_class,
@@ -1178,8 +1180,8 @@ pub(crate) fn maze_route_with_ripup(
     }
     // with ripup, victims are shoved/removed BEFORE the fallible insertion:
     // make each connection atomic here so a failed insert never leaves
-    // rips behind (this path builds a fresh engine per call, so the
-    // pop_snapshot epoch bump invalidates no reusable room caches)
+    // rips behind. This path builds a fresh engine per call, so its cache is
+    // not reused after either the incremental commit or a rollback.
     board.generate_snapshot();
     match maze_route_with_engine(board, &mut engine, request) {
         Some(connection) => {
@@ -1603,7 +1605,8 @@ pub(crate) fn maze_route(
     board: &mut BasicBoard,
     request: &MazeRouteRequest,
 ) -> Option<Vec<ItemId>> {
-    let mut engine = AutorouteEngine::new_with_clearance(
+    let mut engine = AutorouteEngine::new_with_clearance_synced(
+        board,
         request.net_no,
         false,
         request.clearance_class,
@@ -1915,13 +1918,20 @@ fn insert_connection(
     result: &MazeSearchResult,
 ) -> Option<Vec<ItemId>> {
     board.generate_snapshot();
+    let watermark = board.begin_lineage_drc_transaction();
     let inserted = insert_connection_inner(board, request, result);
     match inserted {
         Some(items) => {
-            board.pop_snapshot();
-            Some(items)
+            if board.finish_lineage_drc_transaction(watermark) {
+                board.pop_snapshot();
+                Some(items)
+            } else {
+                board.rollback_snapshot();
+                None
+            }
         }
         None => {
+            board.discard_lineage_drc_transaction(watermark);
             board.rollback_snapshot();
             None
         }
@@ -1934,7 +1944,6 @@ fn insert_connection_inner(
     result: &MazeSearchResult,
 ) -> Option<Vec<ItemId>> {
     let _birth_tag = crate::board::basic_board::birth_tag_scope(1);
-    let watermark = board.next_item_id();
 
     let mut new_items = Vec::new();
     // Correct the two endpoints so the connection begins and ends exactly at the
@@ -2228,17 +2237,6 @@ fn insert_connection_inner(
         // same-net trace passing under the via center is split (bounded by the
         // trace count, so a false return terminates it).
         while board.split_traces_at(point, layer, request.net_no) {}
-    }
-
-    // Shoves and normalization can create additional items after the direct
-    // trace/via ids were collected.  Validate the complete birth set with
-    // the same pair predicate used by the final DRC.
-    if !board
-        .item_ids_since(watermark)
-        .into_iter()
-        .all(|id| crate::drc::item_is_clear(board, id))
-    {
-        return None;
     }
 
     Some(new_items)

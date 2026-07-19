@@ -9,6 +9,7 @@ use freerouting::autoroute::{
 use freerouting::datastructures::TimeLimit;
 use freerouting::io::json::Json;
 use freerouting::io::{export_ses, import_dsn};
+use std::io::Write;
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -196,6 +197,242 @@ fn validate_argument_shape(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Writes a primary artifact without exposing a truncated destination. The
+/// temporary file lives beside the target so the final rename is atomic on
+/// the destination filesystem.
+fn atomic_write(path: &str, contents: &[u8]) -> std::io::Result<()> {
+    let destination = std::path::Path::new(path);
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("freerouting-output");
+
+    for attempt in 0..100u32 {
+        let temporary = parent.join(format!(
+            ".{file_name}.{}.{}.tmp",
+            std::process::id(),
+            attempt
+        ));
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let result = (|| {
+            file.write_all(contents)?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&temporary, destination)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        return result;
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a temporary output file",
+    ))
+}
+
+fn output_path_identity(path: &str) -> std::path::PathBuf {
+    use std::ffi::OsString;
+    use std::path::{Component, Path, PathBuf};
+
+    enum UnresolvedComponent {
+        CurDir,
+        ParentDir,
+        Normal(OsString),
+    }
+
+    fn apply_component(path: &mut PathBuf, component: &UnresolvedComponent) {
+        match component {
+            UnresolvedComponent::CurDir => {}
+            UnresolvedComponent::ParentDir => {
+                // An absolute path cannot escape its filesystem root.
+                let _ = path.pop();
+            }
+            UnresolvedComponent::Normal(name) => path.push(name),
+        }
+    }
+
+    let path = Path::new(path);
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+
+    // Build an absolute path without normalizing it.  Filesystem traversal
+    // resolves a symlink before applying a following `..`, so normalizing
+    // first can compute the wrong destination for a not-yet-created output.
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+
+    // Resolve symlinks and `..` in the longest canonicalizable prefix, then
+    // replay the unresolved tail lexically.  This mirrors how the eventual
+    // open/rename resolves paths while still identifying nonexistent files.
+    let mut existing = absolute.clone();
+    let mut tail = Vec::new();
+    loop {
+        if let Ok(mut identity) = std::fs::canonicalize(&existing) {
+            for component in tail.iter().rev() {
+                apply_component(&mut identity, component);
+            }
+            return identity;
+        }
+
+        match existing.components().next_back() {
+            Some(Component::CurDir) => tail.push(UnresolvedComponent::CurDir),
+            Some(Component::ParentDir) => tail.push(UnresolvedComponent::ParentDir),
+            Some(Component::Normal(name)) => {
+                tail.push(UnresolvedComponent::Normal(name.to_os_string()));
+            }
+            Some(Component::Prefix(_) | Component::RootDir) | None => break,
+        }
+        let _ = existing.pop();
+    }
+
+    // The current directory or filesystem root should normally provide a
+    // canonical prefix.  Retain a deterministic lexical fallback for an
+    // environment where even that lookup fails.
+    let mut identity = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let _ = identity.pop();
+            }
+            other => identity.push(other.as_os_str()),
+        }
+    }
+    identity
+}
+
+#[cfg(unix)]
+fn existing_paths_alias(left: &str, right: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let (Ok(left), Ok(right)) = (std::fs::metadata(left), std::fs::metadata(right)) else {
+        return false;
+    };
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(windows)]
+fn existing_paths_alias(left: &str, right: &str) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    let (Ok(left), Ok(right)) = (std::fs::metadata(left), std::fs::metadata(right)) else {
+        return false;
+    };
+    match (
+        (left.volume_serial_number(), left.file_index()),
+        (right.volume_serial_number(), right.file_index()),
+    ) {
+        ((Some(left_volume), Some(left_index)), (Some(right_volume), Some(right_index))) => {
+            left_volume == right_volume && left_index == right_index
+        }
+        _ => false,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn existing_paths_alias(_left: &str, _right: &str) -> bool {
+    false
+}
+
+fn paths_alias(
+    left_path: &str,
+    left_identity: &std::path::Path,
+    right_path: &str,
+    right_identity: &std::path::Path,
+) -> bool {
+    left_identity == right_identity || existing_paths_alias(left_path, right_path)
+}
+
+/// The session is the mandatory artifact.  Fail before importing/routing when
+/// its parent cannot exist, rather than discovering a missing directory only
+/// after the expensive route has completed.  Optional artifact destinations
+/// intentionally remain best-effort and are checked at their write point.
+fn validate_primary_output_destination(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("mandatory session destination must not be empty".into());
+    }
+    let destination = std::path::Path::new(path);
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let metadata = std::fs::metadata(parent).map_err(|error| {
+        format!("mandatory session parent directory {parent:?} is unavailable: {error}")
+    })?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "mandatory session parent path {parent:?} is not a directory"
+        ));
+    }
+    if std::fs::metadata(destination).is_ok_and(|metadata| metadata.is_dir()) {
+        return Err(format!(
+            "mandatory session destination {destination:?} is a directory"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_distinct_output_paths(outputs: &[(&str, &str)]) -> Result<(), String> {
+    let mut seen: Vec<(&str, &str, std::path::PathBuf)> = Vec::new();
+    for &(flag, path) in outputs {
+        let identity = output_path_identity(path);
+        if let Some((previous, _, _)) = seen.iter().find(|(_, seen_path, seen_identity)| {
+            paths_alias(path, &identity, seen_path, seen_identity)
+        }) {
+            return Err(format!(
+                "{previous} and {flag} refer to the same output path {path:?}"
+            ));
+        }
+        seen.push((flag, path, identity));
+    }
+    Ok(())
+}
+
+/// Output files must never alias an input file.  Besides losing the source
+/// design, truncating `-de` before import can make a failed invocation look
+/// like a successful empty-board run.  Compare canonical identities so
+/// relative paths, `..`, and existing symlinks cannot bypass the guard.
+fn validate_output_paths_against_inputs(
+    outputs: &[(&str, &str)],
+    inputs: &[(&str, &str)],
+) -> Result<(), String> {
+    validate_distinct_output_paths(outputs)?;
+    let input_ids: Vec<(&str, &str, std::path::PathBuf)> = inputs
+        .iter()
+        .map(|&(flag, path)| (flag, path, output_path_identity(path)))
+        .collect();
+    for &(output_flag, output_path) in outputs {
+        let output_id = output_path_identity(output_path);
+        if let Some((input_flag, _, _)) = input_ids.iter().find(|(_, input_path, input_id)| {
+            paths_alias(output_path, &output_id, input_path, input_id)
+        }) {
+            return Err(format!(
+                "{output_flag} output {output_path:?} would overwrite {input_flag} input"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") || args.is_empty() {
@@ -243,6 +480,32 @@ fn main() -> ExitCode {
         let stem = design.strip_suffix(".dsn").unwrap_or(design);
         format!("{stem}.ses")
     });
+    let mut output_paths = vec![("-do", output.as_str())];
+    for flag in [
+        "--drc-report",
+        "--export-dsn",
+        "--export-rules",
+        "--ratsnest",
+        "--export-json",
+    ] {
+        if let Some(path) = flag_value(flag) {
+            output_paths.push((flag, path));
+        }
+    }
+    let mut input_paths = vec![("-de", design)];
+    for flag in ["--rules", "--profile", "--import-ses"] {
+        if let Some(path) = flag_value(flag) {
+            input_paths.push((flag, path));
+        }
+    }
+    if let Err(error) = validate_output_paths_against_inputs(&output_paths, &input_paths) {
+        eprintln!("error: {error}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(error) = validate_primary_output_destination(&output) {
+        eprintln!("error: {error}");
+        return ExitCode::FAILURE;
+    }
     // like the Java jar, passes are effectively unlimited by default and
     // the wall clock (-tl) is the real bound; a JSON profile (Java:
     // RouterSettings) provides defaults that explicit flags override
@@ -386,7 +649,11 @@ fn main() -> ExitCode {
             }
         }
     };
-    board.rules.set_trace_angle_restriction(angle_restriction);
+    // `--angle` controls route generation, not the retained DSN's static rule
+    // scopes. Keep the source value so DSN export can splice only wiring while
+    // preserving the exact non-wiring semantics it was imported with.
+    let source_angle_restriction = board.rules.get_trace_angle_restriction();
+    let rules_requested = flag_value("--rules").is_some();
     println!(
         "imported {design} in {:?}: {} layers, {} nets, {} items",
         t0.elapsed(),
@@ -413,6 +680,27 @@ fn main() -> ExitCode {
             }
         }
     }
+
+    // Validate a sidecar against the retained DSN while the imported angle is
+    // still active.  A rules file that changes static DSN semantics (including
+    // the angle rule itself) cannot be represented by the route-only DSN
+    // exporter and must remain fail-closed.  This check is kept separate from
+    // the runtime CLI angle below: a route-only `--angle` override is safe to
+    // discard on the private export view, while an actual sidecar mutation is
+    // not.
+    let sidecar_dsn_preflight = if rules_requested && flag_value("--export-dsn").is_some() {
+        freerouting::io::export_dsn(&board)
+            .err()
+            .map(|error| error.to_string())
+    } else {
+        None
+    };
+
+    // Apply the command-line angle after the sidecar.  This preserves the
+    // normal CLI-over-file precedence without contaminating the semantic
+    // comparison above.
+    board.rules.set_trace_angle_restriction(angle_restriction);
+
     if let Some(ses_path) = flag_value("--import-ses") {
         match std::fs::read_to_string(ses_path) {
             Ok(text) => match freerouting::io::import_ses(&mut board, &text) {
@@ -437,6 +725,43 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
+    }
+
+    let design_name = std::path::Path::new(design)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(design);
+
+    // Validate the mandatory format before entering the expensive routing
+    // loop. This catches malformed/pre-routed state and identifier limits up
+    // front; normal router output is required to remain representable by the
+    // same checked writer.
+    if let Err(error) = export_ses(&board, design_name, board.resolution) {
+        eprintln!("error: cannot produce the required session output {output}: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    // The DSN writer deliberately reuses all non-wiring source scopes. Ignore
+    // only the runtime route-angle override by restoring the imported value on
+    // a private export view. Any sidecar mutation was checked before that
+    // override was applied, so a no-op sidecar plus `--angle` remains
+    // exportable while real static changes remain fail-closed.
+    let dsn_export_preflight = flag_value("--export-dsn").and_then(|_| {
+        sidecar_dsn_preflight.clone().or_else(|| {
+            let mut export_view = board.clone();
+            export_view
+                .rules
+                .set_trace_angle_restriction(source_angle_restriction);
+            freerouting::io::export_dsn(&export_view)
+                .err()
+                .map(|error| error.to_string())
+        })
+    });
+    if let Some(error) = &dsn_export_preflight {
+        eprintln!(
+            "error: --export-dsn is incompatible with the current static design state: {error}; \
+             routing will continue so the required SES result can still be written"
+        );
     }
 
     // via padstack: first named "Via*", else any all-layer padstack
@@ -539,6 +864,23 @@ fn main() -> ExitCode {
         );
     }
 
+    // The SES is the primary result of a routing invocation. Serialize and
+    // atomically publish it before attempting any optional artifact so a
+    // secondary writer or path failure cannot erase minutes of routing work.
+    let ses = match export_ses(&board, design_name, board.resolution) {
+        Ok(ses) => ses,
+        Err(e) => {
+            eprintln!("error: cannot serialize {output}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = atomic_write(&output, ses.as_bytes()) {
+        eprintln!("error: cannot write {output}: {e}");
+        return ExitCode::FAILURE;
+    }
+    println!("session written to {output} ({} bytes)", ses.len());
+
+    let mut optional_failed = false;
     if let Some(report_path) = flag_value("--drc-report") {
         let report = freerouting::drc::check_board(&board);
         let json = report.to_kicad_json(&board, design);
@@ -550,38 +892,47 @@ fn main() -> ExitCode {
             ),
             Err(e) => {
                 eprintln!("error: cannot write {report_path}: {e}");
-                return ExitCode::FAILURE;
+                optional_failed = true;
             }
         }
     }
     if let Some(dsn_path) = flag_value("--export-dsn") {
-        match freerouting::io::export_dsn(&board) {
-            Ok(text) => match std::fs::write(dsn_path, &text) {
-                Ok(()) => println!("design written to {dsn_path} ({} bytes)", text.len()),
+        if let Some(error) = &dsn_export_preflight {
+            eprintln!("error: cannot serialize {dsn_path}: {error}");
+            optional_failed = true;
+        } else {
+            let mut export_view = board.clone();
+            export_view
+                .rules
+                .set_trace_angle_restriction(source_angle_restriction);
+            let export_result = freerouting::io::export_dsn(&export_view);
+            match export_result {
+                Ok(text) => match std::fs::write(dsn_path, &text) {
+                    Ok(()) => println!("design written to {dsn_path} ({} bytes)", text.len()),
+                    Err(e) => {
+                        eprintln!("error: cannot write {dsn_path}: {e}");
+                        optional_failed = true;
+                    }
+                },
                 Err(e) => {
-                    eprintln!("error: cannot write {dsn_path}: {e}");
-                    return ExitCode::FAILURE;
+                    eprintln!("error: cannot serialize {dsn_path}: {e}");
+                    optional_failed = true;
                 }
-            },
-            Err(e) => {
-                eprintln!("error: cannot serialize {dsn_path}: {e}");
-                return ExitCode::FAILURE;
             }
         }
     }
     if let Some(rules_out) = flag_value("--export-rules") {
-        let text = match freerouting::io::write_rules(&board, design) {
-            Ok(text) => text,
+        match freerouting::io::write_rules(&board, design) {
+            Ok(text) => match std::fs::write(rules_out, &text) {
+                Ok(()) => println!("rules written to {rules_out}"),
+                Err(e) => {
+                    eprintln!("error: cannot write {rules_out}: {e}");
+                    optional_failed = true;
+                }
+            },
             Err(e) => {
                 eprintln!("error: cannot serialize {rules_out}: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
-        match std::fs::write(rules_out, &text) {
-            Ok(()) => println!("rules written to {rules_out}"),
-            Err(e) => {
-                eprintln!("error: cannot write {rules_out}: {e}");
-                return ExitCode::FAILURE;
+                optional_failed = true;
             }
         }
     }
@@ -591,42 +942,25 @@ fn main() -> ExitCode {
             Ok(()) => println!("ratsnest written to {rn_path}"),
             Err(e) => {
                 eprintln!("error: cannot write {rn_path}: {e}");
-                return ExitCode::FAILURE;
+                optional_failed = true;
             }
         }
     }
     if let Some(json_path) = flag_value("--export-json") {
-        let text = match freerouting::io::export_kicad_json_checked(&board) {
-            Ok(text) => text,
+        match freerouting::io::export_kicad_json_checked(&board) {
+            Ok(text) => match std::fs::write(json_path, &text) {
+                Ok(()) => println!("board JSON written to {json_path} ({} bytes)", text.len()),
+                Err(e) => {
+                    eprintln!("error: cannot write {json_path}: {e}");
+                    optional_failed = true;
+                }
+            },
             Err(e) => {
                 eprintln!("error: cannot serialize {json_path}: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
-        match std::fs::write(json_path, &text) {
-            Ok(()) => println!("board JSON written to {json_path} ({} bytes)", text.len()),
-            Err(e) => {
-                eprintln!("error: cannot write {json_path}: {e}");
-                return ExitCode::FAILURE;
+                optional_failed = true;
             }
         }
     }
-    let design_name = std::path::Path::new(design)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(design);
-    let ses = match export_ses(&board, design_name, board.resolution) {
-        Ok(ses) => ses,
-        Err(e) => {
-            eprintln!("error: cannot serialize {output}: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    if let Err(e) = std::fs::write(&output, &ses) {
-        eprintln!("error: cannot write {output}: {e}");
-        return ExitCode::FAILURE;
-    }
-    println!("session written to {output} ({} bytes)", ses.len());
     // Recompute completion after optimization/normalization: the optimizer's
     // recovery reroutes can finish nets that were incomplete right after the
     // routing pass, and the exit status must reflect the board that was
@@ -644,7 +978,9 @@ fn main() -> ExitCode {
     if violations > 0 {
         println!("DRC: {violations} clearance violation(s) remain");
     }
-    if complete_final != net_count {
+    if optional_failed {
+        ExitCode::FAILURE
+    } else if complete_final != net_count {
         ExitCode::from(2)
     } else if violations > 0 {
         ExitCode::from(3)
@@ -742,5 +1078,133 @@ mod tests {
             );
         }
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn primary_output_is_replaced_atomically_without_temp_files() {
+        let path = std::env::temp_dir().join(format!(
+            "freerouting-atomic-output-{}.ses",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"old").expect("seed destination");
+        atomic_write(path.to_str().unwrap(), b"complete session").expect("atomic write");
+        assert_eq!(std::fs::read(&path).unwrap(), b"complete session");
+        let file_name = path.file_name().unwrap().to_string_lossy();
+        let parent = path.parent().unwrap();
+        assert!(
+            std::fs::read_dir(parent)
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!(".{file_name}.{}.", std::process::id()))),
+            "temporary output must not remain after the rename"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn outputs_cannot_alias_design_or_sidecar_inputs() {
+        let root =
+            std::env::temp_dir().join(format!("freerouting-cli-path-guard-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("create temp directory");
+        let design = root.join("board.dsn");
+        let rules = root.join("board.rules");
+        std::fs::write(&design, "source").expect("write design");
+        std::fs::write(&rules, "source").expect("write rules");
+
+        let outputs = [("-do", design.to_str().unwrap())];
+        let inputs = [
+            ("-de", design.to_str().unwrap()),
+            ("--rules", rules.to_str().unwrap()),
+        ];
+        let error = validate_output_paths_against_inputs(&outputs, &inputs)
+            .expect_err("input/output alias must be rejected");
+        assert!(error.contains("-de input"));
+
+        let outputs = [("--export-json", rules.to_str().unwrap())];
+        let error = validate_output_paths_against_inputs(&outputs, &inputs)
+            .expect_err("sidecar/output alias must be rejected");
+        assert!(error.contains("--rules input"));
+
+        // A not-yet-created output spelling can normalize to an existing
+        // input through a lexical `..` component. Reject the alias
+        // conservatively before any writer or later directory creation can
+        // turn that spelling into a destructive destination.
+        let nested_alias = root.join("missing").join("..").join("board.dsn");
+        let outputs = [("-do", nested_alias.to_str().unwrap())];
+        let inputs = [("-de", design.to_str().unwrap())];
+        let error = validate_output_paths_against_inputs(&outputs, &inputs)
+            .expect_err("lexical alias must be rejected");
+        assert!(error.contains("-de input"));
+
+        #[cfg(unix)]
+        {
+            let hard_link = root.join("hard-linked-output.json");
+            std::fs::hard_link(&design, &hard_link).expect("create hard link to design input");
+            let outputs = [("--export-json", hard_link.to_str().unwrap())];
+            let inputs = [("-de", design.to_str().unwrap())];
+            let error = validate_output_paths_against_inputs(&outputs, &inputs)
+                .expect_err("hard-link input/output alias must be rejected");
+            assert!(error.contains("-de input"));
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mandatory_output_destination_is_checked_before_routing() {
+        let root = std::env::temp_dir().join(format!(
+            "freerouting-cli-destination-guard-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create temp directory");
+        let missing_parent = root.join("missing").join("result.ses");
+        let error = validate_primary_output_destination(missing_parent.to_str().unwrap())
+            .expect_err("missing mandatory output parent must fail early");
+        assert!(error.contains("parent directory"));
+
+        let directory_destination = root.join("result.ses");
+        std::fs::create_dir(&directory_destination).expect("create directory destination");
+        let error = validate_primary_output_destination(directory_destination.to_str().unwrap())
+            .expect_err("directory-valued mandatory output must fail early");
+        assert!(error.contains("is a directory"));
+
+        let error = validate_primary_output_destination("")
+            .expect_err("empty mandatory output must fail early");
+        assert!(error.contains("must not be empty"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn outputs_cannot_alias_through_symlink_followed_by_parent_component() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "freerouting-cli-symlink-path-guard-{}",
+            std::process::id()
+        ));
+        let real = root.join("real");
+        let nested = real.join("nested");
+        std::fs::create_dir_all(&nested).expect("create real output directory");
+        let link = root.join("link");
+        symlink(&nested, &link).expect("create directory symlink");
+
+        // Neither final output exists.  The kernel resolves `link` to
+        // `real/nested` before applying `..`, so both spellings target the
+        // same future file under `real`.
+        let via_link = link.join("..").join("same-output.ses");
+        let direct = real.join("same-output.ses");
+        let outputs = [
+            ("-do", via_link.to_str().unwrap()),
+            ("--export-json", direct.to_str().unwrap()),
+        ];
+        let error = validate_distinct_output_paths(&outputs)
+            .expect_err("symlink/parent output alias must be rejected");
+        assert!(error.contains("same output path"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

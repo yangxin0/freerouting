@@ -170,13 +170,125 @@ def _build_board_json_manually(board):
     return json.dumps(data, indent=2)
 
 
+def _copper_layer_ids(board):
+    """Return the running KiCad board's copper layer ids in stack order."""
+    count = board.GetCopperLayerCount()
+    if count <= 0:
+        return []
+
+    def layer_id(name, fallback):
+        has_board_lookup = hasattr(board, "GetLayerID")
+        try:
+            value = board.GetLayerID(name)
+            if value is not None and int(value) >= 0:
+                return int(value)
+        except Exception:
+            pass
+        # A BOARD exposing GetLayerID is authoritative.  Falling back to
+        # module constants after it returns -1 can silently mix a legacy
+        # dense mock/document with sparse ids (and makes the emitted layer
+        # names impossible to look up again).  Constants remain useful for
+        # older bindings that do not expose the board lookup at all.
+        if not has_board_lookup:
+            try:
+                value = getattr(pcbnew, name.replace(".", "_"))
+                if value is not None and int(value) >= 0:
+                    return int(value)
+            except Exception:
+                pass
+        return fallback
+
+    if count == 1:
+        return [layer_id("F.Cu", 0)]
+    result = [layer_id("F.Cu", 0)]
+    for inner in range(1, count - 1):
+        result.append(layer_id(f"In{inner}.Cu", inner))
+    result.append(layer_id("B.Cu", count - 1))
+    return result
+
+
+def _live_board_layer_id(board, name):
+    """Return the running KiCad board's id for a declared layer name."""
+    if not name:
+        return None
+    getter = getattr(board, "GetLayerID", None)
+    if getter is not None:
+        try:
+            value = int(getter(name))
+            return value if value >= 0 else None
+        except Exception:
+            return None
+
+    # Older bindings may expose only module constants. Do not use a module
+    # constant when BOARD.GetLayerID exists but rejected the name: mixing two
+    # id domains is less safe than retaining the document's declared id.
+    try:
+        value = int(getattr(pcbnew, name.replace(".", "_")))
+        return value if value >= 0 else None
+    except Exception:
+        return None
+
+
+def resolve_result_layer_id(board, data, raw_layer):
+    """Resolve a result layer token to the running KiCad board's layer id.
+
+    Freerouting JSON uses KiCad's conventional sparse document ids (notably
+    ``B.Cu`` is normally 31), while older results used dense stack ordinals.
+    Neither number is guaranteed to equal the enum exposed by every live
+    KiCad API. Resolve the document entry first, then map its declared name
+    through ``BOARD.GetLayerID``. The document id remains the fallback for
+    older bindings that cannot perform a name lookup.
+    """
+    try:
+        raw = int(raw_layer)
+    except (TypeError, ValueError):
+        raw = 0
+    declared = []
+    for layer in data.get("layers", []) if isinstance(data, dict) else []:
+        try:
+            declared.append((int(layer.get("index")), _to_str(layer.get("name"))))
+        except (TypeError, ValueError, AttributeError):
+            continue
+
+    selected = next((layer for layer in declared if layer[0] == raw), None)
+    if selected is None and 0 <= raw < len(declared):
+        selected = declared[raw]
+    if selected is None:
+        return raw
+
+    document_id, name = selected
+    live_id = _live_board_layer_id(board, name)
+    return document_id if live_id is None else live_id
+
+
+def set_via_layer_span(via, board, data, via_data):
+    """Apply a via's start/end span across KiCad API variants."""
+    raw_start = via_data.get("startLayerIndex", 0)
+    raw_end = via_data.get("endLayerIndex", raw_start)
+    start = resolve_result_layer_id(board, data, raw_start)
+    end = resolve_result_layer_id(board, data, raw_end)
+    try:
+        if hasattr(via, "SetLayerPair"):
+            via.SetLayerPair(start, end)
+            return
+    except Exception:
+        logger.debug("SetLayerPair failed; trying individual via layer setters", exc_info=True)
+    for method, value in (("SetStartLayer", start), ("SetEndLayer", end)):
+        try:
+            setter = getattr(via, method, None)
+            if setter is not None:
+                setter(value)
+        except Exception:
+            logger.debug("%s failed while applying via span", method, exc_info=True)
+
+
 def _collect_layers(board, data):
     """Populate ``data["layers"]`` from the board's layer structure."""
     try:
-        for i in range(board.GetCopperLayerCount()):
+        for layer_id in _copper_layer_ids(board):
             data["layers"].append({
-                "index": i,
-                "name": _to_str(board.GetLayerName(i)),
+                "index": layer_id,
+                "name": _to_str(board.GetLayerName(layer_id)),
                 "type": "signal",
             })
     except Exception as e:
@@ -294,6 +406,9 @@ def _collect_traces(board, data):
 def _collect_vias(board, data):
     """Populate ``data["vias"]`` from PCB_VIA items."""
     try:
+        copper_layers = _copper_layer_ids(board)
+        if not copper_layers:
+            return
         via_id = 1
         for track in board.GetTracks():
             if track.Type() == pcbnew.PCB_VIA_T:
@@ -310,12 +425,8 @@ def _collect_vias(board, data):
                     "position": {"x": pos.x / 1e6, "y": pos.y / 1e6},
                     "diameter": track.GetWidth() / 1e6,
                     "drill": drill / 1e6,
-                    "startLayerIndex": 0,
-                    "endLayerIndex": (
-                        board.GetCopperLayerCount() - 1
-                        if hasattr(board, "GetCopperLayerCount")
-                        else 1
-                    ),
+                    "startLayerIndex": copper_layers[0],
+                    "endLayerIndex": copper_layers[-1],
                 })
                 via_id += 1
     except Exception as e:

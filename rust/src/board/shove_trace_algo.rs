@@ -36,8 +36,8 @@ pub fn shove_aside(
     cl_class: usize,
     forbidden: &[(TileShape, usize)],
 ) -> bool {
-    let watermark = board.next_item_id();
     board.generate_snapshot();
+    let watermark = board.begin_lineage_drc_transaction();
     // shove blocking vias out first (Java: ForcedPadAlgo.forced_pad
     // starts with MoveDrillItemAlgo.shove_vias)
     crate::board::move_drill_item::shove_vias(board, shove_shape, layer, own_net_nos, cl_class, 2);
@@ -55,11 +55,7 @@ pub fn shove_aside(
         // caller knows about (including pieces produced while shoving a
         // nested victim).  Validate the complete transaction, not only the
         // top-level victim, with the same predicate as final DRC.
-        let born = board.item_ids_since(watermark);
-        let valid = born
-            .iter()
-            .copied()
-            .all(|id| crate::drc::item_is_clear(board, id));
+        let valid = board.finish_lineage_drc_transaction(watermark);
         if valid {
             board.pop_snapshot();
             true
@@ -68,6 +64,7 @@ pub fn shove_aside(
             false
         }
     } else {
+        board.discard_lineage_drc_transaction(watermark);
         board.rollback_snapshot();
         false
     }
@@ -176,8 +173,16 @@ fn shove_insert(
     }
     // cut all victims now; the substitutes reconnect them
     entries.cutout_traces(board, &obstacles);
-    while let Some((polyline, piece_layer, half_width, net_nos, piece_cl, piece_cl_explicit)) =
-        entries.next_substitute_trace_piece(board)
+    while let Some((
+        polyline,
+        piece_layer,
+        half_width,
+        net_nos,
+        piece_cl,
+        piece_cl_explicit,
+        first_lineage,
+        last_lineage,
+    )) = entries.next_substitute_trace_piece(board)
     {
         if polyline.is_empty() || polyline.corner_count() < 2 {
             continue;
@@ -219,14 +224,61 @@ fn shove_insert(
             }
         }
         let _birth_tag = crate::board::basic_board::birth_tag_scope(2);
-        board.insert_trace_with_provenance(
-            polyline,
-            piece_layer,
-            half_width,
-            net_nos,
-            piece_cl,
-            piece_cl_explicit,
-        );
+        if first_lineage == last_lineage {
+            board.insert_trace_with_lineage(
+                polyline,
+                piece_layer,
+                half_width,
+                net_nos,
+                piece_cl,
+                piece_cl_explicit,
+                first_lineage,
+            );
+        } else {
+            // One substitute can bridge adjacent imported segments with
+            // independent provenance. Split at an existing exact corner so
+            // each endpoint keeps the lineage of the source it replaces;
+            // rounding the geometry here would break trace contacts.
+            let split_corner = polyline.corner_count() / 2;
+            if split_corner > 0 && split_corner + 1 < polyline.corner_count() {
+                let split_line = polyline.arr[split_corner + 1];
+                if let Some([first_piece, last_piece]) = polyline.split(split_corner, split_line) {
+                    board.insert_trace_with_lineage(
+                        first_piece,
+                        piece_layer,
+                        half_width,
+                        net_nos.clone(),
+                        piece_cl,
+                        piece_cl_explicit,
+                        first_lineage,
+                    );
+                    board.insert_trace_with_lineage(
+                        last_piece,
+                        piece_layer,
+                        half_width,
+                        net_nos,
+                        piece_cl,
+                        piece_cl_explicit,
+                        last_lineage,
+                    );
+                    continue;
+                }
+            }
+            // A two-corner substitute has no exact interior split point. It
+            // is still electrically valid; retain the first provenance and
+            // let the transaction gate reject any inherited contact that
+            // cannot be justified by that source rather than dropping the
+            // otherwise valid route outright.
+            board.insert_trace_with_lineage(
+                polyline,
+                piece_layer,
+                half_width,
+                net_nos,
+                piece_cl,
+                piece_cl_explicit,
+                first_lineage,
+            );
+        }
     }
     true
 }
@@ -326,6 +378,90 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn shoves_connected_import_style_segments_without_losing_the_junction() {
+        let mut board = test_board();
+        let left = board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(-10_000, 0), IntPoint::new(0, 0)]),
+            0,
+            100,
+            vec![2],
+            1,
+        );
+        let right = board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(0, 0), IntPoint::new(10_000, 0)]),
+            0,
+            100,
+            vec![2],
+            1,
+        );
+        let left_lineage = board.get_item(left).unwrap().base.lineage_no;
+        let right_lineage = board.get_item(right).unwrap().base.lineage_no;
+        assert_ne!(
+            left_lineage, right_lineage,
+            "separately imported segments have independent provenance"
+        );
+        assert!(board.net_is_completely_connected(2));
+
+        let shape = TileShape::Box(IntBox::from_coords(-1_000, -1_000, 1_000, 1_000));
+        assert!(
+            shove_aside(&mut board, &shape, 0, &[1], 1, &[]),
+            "a segmented route must be just as shovable as one polyline"
+        );
+        let net_items: Vec<ItemId> = board
+            .items()
+            .filter(|(_, item)| item.base.contains_net(2))
+            .map(|(id, _)| *id)
+            .collect();
+        assert!(!net_items.is_empty());
+        assert_eq!(
+            board.get_connected_set(net_items[0], 2).len(),
+            net_items.len(),
+            "the substitute must reconnect both imported source segments"
+        );
+        for lineage in [left_lineage, right_lineage] {
+            assert!(
+                net_items
+                    .iter()
+                    .filter_map(|id| board.get_item(*id))
+                    .filter(|item| item.base.lineage_no == lineage)
+                    .count()
+                    >= 2,
+                "each source lineage must cover its stub and substitute endpoint"
+            );
+        }
+        assert!(crate::drc::check_board(&board).violations.is_empty());
+    }
+
+    #[test]
+    fn refuses_a_segment_group_whose_rules_cannot_fit_one_substitute() {
+        let mut board = test_board();
+        board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(-10_000, 0), IntPoint::new(0, 0)]),
+            0,
+            100,
+            vec![2],
+            1,
+        );
+        board.insert_trace(
+            Polyline::from_int_points(&[IntPoint::new(0, 0), IntPoint::new(10_000, 0)]),
+            0,
+            200,
+            vec![2],
+            1,
+        );
+        assert!(board.net_is_completely_connected(2));
+        let before = board.item_count();
+
+        let shape = TileShape::Box(IntBox::from_coords(-1_000, -1_000, 1_000, 1_000));
+        assert!(
+            !shove_aside(&mut board, &shape, 0, &[1], 1, &[]),
+            "one substitute cannot preserve two source widths"
+        );
+        assert_eq!(board.item_count(), before);
+        assert!(board.net_is_completely_connected(2));
     }
 
     #[test]

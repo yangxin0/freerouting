@@ -9,29 +9,6 @@ use crate::autoroute::batch::BatchRequest;
 use crate::board::basic_board::{BasicBoard, ItemId};
 use crate::board::ItemKind;
 
-type ViolationKey = (ItemId, ItemId, usize);
-type ViolationSnapshot = std::collections::HashMap<ViolationKey, f64>;
-
-/// Returns whether a candidate introduces a new clearance defect or makes an
-/// existing defect materially worse.  Newly-created items are identified by
-/// the transaction watermark; pairs made exclusively from pre-existing items
-/// are compared by their positive clearance deficit.  The relative epsilon is
-/// shared with the final DRC so floating-point noise cannot make an otherwise
-/// equivalent candidate oscillate in and out of the optimizer.
-fn candidate_introduces_clearance_violation(
-    before: &ViolationSnapshot,
-    after: &ViolationSnapshot,
-    id_watermark: ItemId,
-) -> bool {
-    after.iter().any(|(key, severity)| {
-        key.0 >= id_watermark
-            || key.1 >= id_watermark
-            || before.get(key).is_none_or(|previous| {
-                severity > &(previous + previous.max(1.0) * crate::drc::DISTANCE_EPS)
-            })
-    })
-}
-
 /// The via count and trace length of one net's route items.
 fn net_route_cost(board: &BasicBoard, net_no: i32) -> (usize, f64) {
     let mut vias = 0usize;
@@ -161,10 +138,6 @@ pub fn optimize_nets_pass(
     // across net-steps with the same lifecycle as `complete_before` — the
     // `net_no` field is not part of the comparison key, so it is safe to reuse.
     let mut global_before: Option<NetRouteResult> = None;
-    // Authoritative DRC baseline follows the same lifecycle. Rejected steps
-    // restore this exact board; accepted steps promote their already-computed
-    // post-state snapshot without scanning the board a second time.
-    let mut violation_baseline = None;
     for net_no in net_nos {
         if time_limit.is_some_and(|t| t.limit_exceeded()) {
             break;
@@ -186,11 +159,8 @@ pub fn optimize_nets_pass(
         if global_before.is_none() {
             global_before = Some(global_route_result(board, net_no));
         }
-        if violation_baseline.is_none() {
-            violation_baseline = Some(crate::drc::violation_snapshot(board));
-        }
         board.generate_snapshot();
-        let id_watermark = board.next_item_id();
+        let drc_watermark = board.begin_lineage_drc_transaction();
         rip_net_route_items(board, net_no);
         // reroute with a modest per-net budget; in-search ripup enabled
         // so the reroute may push others aside (their recovery is part
@@ -253,28 +223,23 @@ pub fn optimize_nets_pass(
         let broke_a_net = global_improved
             && (1..=board.rules.nets.max_net_no())
                 .any(|m| before[m as usize] && !board.net_is_completely_connected(m));
-        // DRC is the expensive final acceptance gate. Run it only for a
-        // globally improving candidate that already preserves every complete
-        // net. Reject every new pair/layer identity and every worsened deficit.
-        let violations_after = if global_improved && !broke_a_net {
-            Some(crate::drc::violation_snapshot(board))
+        // Use the same lineage/witness delta as maze and shove transactions:
+        // unchanged pieces may inherit an existing defect, while new,
+        // worsened or relocated contacts are rejected. The baseline was
+        // collected locally as route items were removed, avoiding a
+        // whole-board DRC scan for every optimizer candidate.
+        let drc_clear = if global_improved && !broke_a_net {
+            board.finish_lineage_drc_transaction(drc_watermark)
         } else {
-            None
+            board.discard_lineage_drc_transaction(drc_watermark);
+            false
         };
-        let introduces_violation = violations_after.as_ref().is_some_and(|after| {
-            candidate_introduces_clearance_violation(
-                violation_baseline.as_ref().unwrap(),
-                after,
-                id_watermark,
-            )
-        });
-        let keep = global_improved && !broke_a_net && !introduces_violation;
+        let keep = global_improved && !broke_a_net && drc_clear;
         if keep {
             board.pop_snapshot();
             // board changed; refresh both baselines
             complete_before = Some(complete_net_set(board));
             global_before = Some(global_route_result(board, net_no));
-            violation_baseline = violations_after;
             improved += 1;
             consecutive_failures = 0;
         } else {
@@ -469,7 +434,7 @@ pub fn optimize_route_multithreaded_with_strategy(
             adopted: usize,
         }
         let shared = std::sync::Mutex::new(Shared {
-            master: board.clone(),
+            master: board.clone_for_routing_candidate(),
             generation: 0,
             next: 0,
             retry: Vec::new(),
@@ -498,7 +463,7 @@ pub fn optimize_route_multithreaded_with_strategy(
                         // GREEDY tasks copy the live master; GLOBAL tasks
                         // conceptually copy the pass-start board, which is
                         // the same object since GLOBAL never updates it
-                        (net_no, s.master.clone(), s.generation)
+                        (net_no, s.master.clone_for_routing_candidate(), s.generation)
                     };
                     // Compare the clone's WHOLE-BOARD metrics before and after
                     // (Java `ItemRouteResult.improved`): accept only when the
@@ -657,69 +622,6 @@ mod tests {
     use crate::core::Padstacks;
     use crate::geometry::planar::{IntBox, IntPoint, Polyline, TileShape};
     use crate::rules::{BoardRules, ClearanceMatrix};
-
-    fn snapshot(entries: &[(ViolationKey, f64)]) -> ViolationSnapshot {
-        entries.iter().copied().collect()
-    }
-
-    #[test]
-    fn optimizer_rejects_new_violation_touching_created_item() {
-        let before = snapshot(&[((2, 4, 0), 5.0)]);
-        let after = snapshot(&[
-            ((2, 4, 0), 5.0),
-            // The second item was inserted after the transaction watermark.
-            ((2, 12, 0), 0.0),
-        ]);
-
-        assert!(candidate_introduces_clearance_violation(
-            &before, &after, 10
-        ));
-    }
-
-    #[test]
-    fn optimizer_rejects_materially_worse_existing_violation() {
-        let key = (2, 4, 0);
-        let before = snapshot(&[(key, 10.0)]);
-        let after = snapshot(&[(key, 10.0 + 10.0 * crate::drc::DISTANCE_EPS + 1e-9)]);
-
-        // Both items predate the transaction, so the identity watermark alone
-        // cannot detect this moved-copper regression; severity must do it.
-        assert!(candidate_introduces_clearance_violation(
-            &before, &after, 10
-        ));
-    }
-
-    #[test]
-    fn optimizer_ignores_equal_or_epsilon_only_violation_drift() {
-        let key = (2, 4, 0);
-        let previous = 10.0;
-        let epsilon_bound = previous + previous * crate::drc::DISTANCE_EPS;
-        let before = snapshot(&[(key, previous)]);
-
-        assert!(!candidate_introduces_clearance_violation(
-            &before,
-            &snapshot(&[(key, previous)]),
-            10,
-        ));
-        assert!(!candidate_introduces_clearance_violation(
-            &before,
-            &snapshot(&[(key, epsilon_bound)]),
-            10,
-        ));
-    }
-
-    #[test]
-    fn optimizer_rejects_violation_with_no_baseline_entry() {
-        let after = snapshot(&[((2, 4, 0), 0.25)]);
-
-        // A pair made entirely from old items can still be newly violating if
-        // it was absent from the baseline snapshot.
-        assert!(candidate_introduces_clearance_violation(
-            &ViolationSnapshot::new(),
-            &after,
-            10,
-        ));
-    }
 
     #[test]
     fn stale_greedy_candidate_cannot_break_a_live_complete_net() {

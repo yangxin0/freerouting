@@ -802,23 +802,77 @@ fn resolve_json_item_clearance_class(board: &mut BasicBoard, name: &str, value: 
     index
 }
 
+/// Maps KiCad's external layer ids to the board's dense internal layer
+/// ordinals.  KiCad ids are not array offsets (`B.Cu` is commonly 31), so
+/// bounds-checking them against `layers.len()` rejects valid plugin output.
+struct JsonLayerMap {
+    external_to_internal: HashMap<u64, usize>,
+    layer_count: usize,
+    legacy_two_layer_ordinals: bool,
+}
+
+impl JsonLayerMap {
+    fn from_document(doc: &Json, layer_count: usize) -> Result<Self, String> {
+        let declared = doc.arr("layers");
+        let mut external_to_internal = HashMap::new();
+        if declared.is_empty() {
+            external_to_internal.insert(0, 0);
+            external_to_internal.insert(1, 1);
+        } else {
+            for (internal, layer) in declared.iter().enumerate() {
+                let external = match layer.get("index") {
+                    Some(value) => value.as_exact_u64().ok_or_else(|| {
+                        format!("layers[{internal}].index must be an exact non-negative integer")
+                    })?,
+                    None => internal as u64,
+                };
+                if external_to_internal.insert(external, internal).is_some() {
+                    return Err(format!(
+                        "layers[{internal}].index duplicates external layer id {external}"
+                    ));
+                }
+            }
+        }
+        let legacy_two_layer_ordinals = layer_count == 2
+            && external_to_internal.get(&0) == Some(&0)
+            && external_to_internal.get(&1) == Some(&1);
+        Ok(Self {
+            external_to_internal,
+            layer_count,
+            legacy_two_layer_ordinals,
+        })
+    }
+
+    fn resolve(&self, external: u64, key: &str) -> Result<usize, String> {
+        if let Some(&internal) = self.external_to_internal.get(&external) {
+            return Ok(internal);
+        }
+        // Older manual KiCad-plugin JSON used dense layer declarations but
+        // copied the raw back-copper id into routed items.  KiCad releases
+        // have used both 2 and 31 for that id.  The meaning is unambiguous on
+        // a two-layer stack; retain only this narrow compatibility mapping.
+        if self.legacy_two_layer_ordinals && matches!(external, 2 | 31) {
+            return Ok(1);
+        }
+        Err(format!(
+            "{key} external layer id {external} is not declared by the layer stack"
+        ))
+    }
+}
+
 fn json_layer_index(
     object: &Json,
     key: &str,
     default: usize,
-    layer_count: usize,
+    layer_map: &JsonLayerMap,
 ) -> Result<usize, String> {
     let Some(value) = object.get(key) else {
-        return Ok(default.min(layer_count.saturating_sub(1)));
+        return Ok(default.min(layer_map.layer_count.saturating_sub(1)));
     };
     let raw = value
         .as_exact_u64()
         .ok_or_else(|| format!("{key} must be an exact non-negative integer"))?;
-    let index = usize::try_from(raw).map_err(|_| format!("{key} is out of range"))?;
-    if index >= layer_count {
-        return Err(format!("{key} {index} is outside the layer stack"));
-    }
-    Ok(index)
+    layer_map.resolve(raw, key)
 }
 
 /// Parses the optional per-layer convex polygons used by routed vias and
@@ -828,7 +882,7 @@ fn json_layer_index(
 /// sparse blind/buried pad).
 fn parse_layer_shapes(
     value: Option<&Json>,
-    layer_count: usize,
+    layer_map: &JsonLayerMap,
     from: usize,
     to: usize,
     point: impl Fn(&Json) -> IntPoint,
@@ -839,10 +893,10 @@ fn parse_layer_shapes(
     let entries = value
         .as_arr()
         .ok_or_else(|| "layerShapes must be an array".to_string())?;
-    let mut shapes = vec![None; layer_count];
-    let mut seen = vec![false; layer_count];
+    let mut shapes = vec![None; layer_map.layer_count];
+    let mut seen = vec![false; layer_map.layer_count];
     for entry in entries {
-        let layer = json_layer_index(entry, "layerIndex", 0, layer_count)?;
+        let layer = json_layer_index(entry, "layerIndex", 0, layer_map)?;
         if seen[layer] {
             return Err("layerShapes contains a duplicate layerIndex".into());
         }
@@ -1157,6 +1211,7 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
         layers.push(Layer::new("B.Cu", true));
     }
     let layer_count = layers.len();
+    let layer_map = JsonLayerMap::from_document(&doc, layer_count)?;
     let stack = LayerStructure::new(layers);
 
     // clearance matrix: classes null, default, then one per net class;
@@ -1448,12 +1503,12 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
             if padstack_name.is_empty() {
                 return Err(format!("viaInfo {name:?} is missing padstackName"));
             }
-            let from = json_layer_index(info_node, "startLayerIndex", 0, layer_count)?;
+            let from = json_layer_index(info_node, "startLayerIndex", 0, &layer_map)?;
             let to = json_layer_index(
                 info_node,
                 "endLayerIndex",
                 layer_count.saturating_sub(1),
-                layer_count,
+                &layer_map,
             )?;
             if to < from {
                 return Err(format!("viaInfo {name:?} has a reversed layer span"));
@@ -1466,7 +1521,7 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
             let shapes = if info_node.get("layerShapes").is_some() {
                 parse_layer_shapes(
                     info_node.get("layerShapes"),
-                    layer_count,
+                    &layer_map,
                     from,
                     to,
                     |corner| point(Some(corner)),
@@ -1644,7 +1699,7 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
             };
             let shapes = if let Some(layer_shapes) = parse_layer_shapes(
                 pad.get("layerShapes"),
-                layer_count,
+                &layer_map,
                 from_layer,
                 to_layer,
                 |corner| point(Some(corner)),
@@ -1714,7 +1769,7 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
         if corners.len() < 3 {
             continue;
         }
-        let layer = json_layer_index(zone, "layerIndex", 0, layer_count)?;
+        let layer = json_layer_index(zone, "layerIndex", 0, &layer_map)?;
         // `name` is the Freerouting display/name extension for netless
         // obstacles.  `netName` is the electrical identity and must win when
         // both fields are present: a named conduction area is allowed to use
@@ -1814,7 +1869,7 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
     // pre-routed traces and vias, user-fixed like Java
     for t in doc.arr("traces") {
         let net = net_no_by_name(&board.rules, &t.str_or("netName", ""));
-        let layer = json_layer_index(t, "layerIndex", 0, layer_count)?;
+        let layer = json_layer_index(t, "layerIndex", 0, &layer_map)?;
         let hw = (to_int(t.num("width")) / 2).max(1);
         let corners: Vec<IntPoint> = t.arr("points").iter().map(|p| point(Some(p))).collect();
         if corners.len() < 2 {
@@ -1864,10 +1919,7 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
             let Some(raw_layer) = v.get("escapeSmdLayer").and_then(Json::as_exact_u64) else {
                 return Err("isEscapeVia requires an exact non-negative escapeSmdLayer".into());
             };
-            let Ok(layer) = usize::try_from(raw_layer) else {
-                return Err("escapeSmdLayer is out of range".into());
-            };
-            Some(layer)
+            Some(layer_map.resolve(raw_layer, "escapeSmdLayer")?)
         } else {
             None
         };
@@ -1881,8 +1933,8 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
             .filter(|&d| d > 0.0)
             .map(to_int)
             .unwrap_or(def_via_d);
-        let requested_from = json_layer_index(v, "startLayerIndex", 0, layer_count)?;
-        let requested_to = json_layer_index(v, "endLayerIndex", layer_count - 1, layer_count)?;
+        let requested_from = json_layer_index(v, "startLayerIndex", 0, &layer_map)?;
+        let requested_to = json_layer_index(v, "endLayerIndex", layer_count - 1, &layer_map)?;
         if requested_to < requested_from {
             return Err("endLayerIndex must not precede startLayerIndex".into());
         }
@@ -1907,7 +1959,7 @@ pub fn import_kicad_json(content: &str) -> Result<BasicBoard, String> {
             let mut shapes = vec![None; layer_count];
             let mut seen_shape_layer = vec![false; layer_count];
             for layer_shape in v.arr("layerShapes") {
-                let layer = json_layer_index(layer_shape, "layerIndex", 0, layer_count)?;
+                let layer = json_layer_index(layer_shape, "layerIndex", 0, &layer_map)?;
                 if seen_shape_layer[layer] {
                     return Err("layerShapes contains a duplicate layerIndex".into());
                 }
@@ -2347,6 +2399,41 @@ mod tests {
         // the two GND pads are unconnected by wiring, but the GND pour
         // on layer 1 does not reach them on layer 0
         assert!(!board.net_is_completely_connected(1));
+    }
+
+    #[test]
+    fn rejects_duplicate_external_layer_ids() {
+        let duplicate = MINI.replacen(
+            r#"{"index": 1, "name": "B.Cu", "type": "signal"}"#,
+            r#"{"index": 0, "name": "B.Cu", "type": "signal"}"#,
+            1,
+        );
+        let error = import_kicad_json(&duplicate)
+            .expect_err("external layer ids must be unique")
+            .to_string();
+        assert!(error.contains("duplicates layer index 0"), "{error}");
+    }
+
+    #[test]
+    fn imports_issue649_legacy_external_back_copper_id() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let content = std::fs::read_to_string(format!(
+            "{root}/fixtures/Issue649-kicad_ecc83-pp_input_board_v2.json"
+        ))
+        .expect("fixture missing from checkout");
+        let board = import_kicad_json(&content).expect("Issue649 must import");
+        assert_eq!(board.layer_structure.layer_count(), 2);
+        let traces: Vec<_> = board
+            .items()
+            .filter(|(_, item)| matches!(item.kind, ItemKind::PolylineTrace(_)))
+            .collect();
+        assert_eq!(traces.len(), 59, "every legacy trace must import");
+        assert!(
+            traces
+                .iter()
+                .all(|(_, item)| item.first_layer(&board.padstacks) == 1),
+            "external layer id 2 must resolve to the declared B.Cu ordinal"
+        );
     }
 
     #[test]

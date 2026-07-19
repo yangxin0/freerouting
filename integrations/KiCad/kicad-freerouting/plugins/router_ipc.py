@@ -28,7 +28,11 @@ from .config import (
     LOG_DIR,
 )
 from .gui_helpers import wx_show_error
-from .ipc_helpers import get_board_json_via_ipc
+from .ipc_helpers import (
+    get_board_json_via_ipc,
+    resolve_result_layer_id,
+    set_via_layer_span,
+)
 from .process_utils import ProcessDialog
 
 
@@ -355,7 +359,7 @@ class IpcRouter:
                 if net is None:
                     continue
                 width = int(trace.get("width", 0.25) * scale)
-                layer = trace.get("layerIndex", 0)
+                layer = resolve_result_layer_id(board, data, trace.get("layerIndex", 0))
                 points = trace.get("points", [])
                 for i in range(len(points) - 1):
                     t = pcbnew.PCB_TRACK(board)
@@ -384,6 +388,7 @@ class IpcRouter:
                 v.SetPosition(pcbnew.VECTOR2I(int(pos.get("x", 0) * scale), int(pos.get("y", 0) * scale)))
                 v.SetWidth(int(via.get("diameter", 0.8) * scale))
                 v.SetDrill(int(via.get("drill", 0.4) * scale))
+                set_via_layer_span(v, board, data, via)
                 v.SetNet(net)
                 board.Add(v)
                 if commit:

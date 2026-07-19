@@ -52,6 +52,10 @@ pub struct DrillPageArray {
     page_width: i32,
     bounding: IntBox,
     pages: crate::datastructures::FxHashMap<(i32, i32), DrillPage>,
+    /// Largest clearance/via margin used by any cached page.  A changed
+    /// item can affect a page outside the item's own grid cell because page
+    /// holes are calculated from `page.shape.offset(via_margin)`.
+    max_cached_margin: i32,
     /// Consumed prefix of the board change log (invalidation).
     seen_log: usize,
     seen_epoch: u64,
@@ -76,6 +80,7 @@ impl DrillPageArray {
             page_width: (5 * via_extent).max(10_000),
             bounding: board.bounding_box(),
             pages: crate::datastructures::FxHashMap::default(),
+            max_cached_margin: 0,
             seen_log: board.change_log().len(),
             seen_epoch: board.change_epoch(),
         }
@@ -87,13 +92,28 @@ impl DrillPageArray {
     pub fn sync_board_changes(&mut self, board: &BasicBoard) {
         if board.change_epoch() != self.seen_epoch {
             self.pages.clear();
+            self.max_cached_margin = 0;
             self.seen_epoch = board.change_epoch();
             self.seen_log = board.change_log().len();
             return;
         }
         let log = board.change_log();
+        // A checkpoint/clone can legitimately carry a shorter history at the
+        // same epoch.  A cursor beyond that history cannot be replayed, so
+        // invalidate rather than serving pages built for the previous board.
+        if self.seen_log > log.len() {
+            self.pages.clear();
+            self.max_cached_margin = 0;
+            self.seen_log = log.len();
+            return;
+        }
         for (_, bbox) in &log[self.seen_log.min(log.len())..] {
-            let grown = bbox.offset(self.page_width as f64);
+            // A page's cached hole set sees items in its page expanded by
+            // the margin used to build that cache.  Growing only by one page
+            // width misses a change farther away when a large via/clearance
+            // margin was requested, leaving stale (overly restrictive)
+            // candidates after a removal.
+            let grown = bbox.offset(self.max_cached_margin.max(0) as f64);
             let (x0, x1) = (
                 grown.ll.x.div_euclid(self.page_width),
                 grown.ur.x.div_euclid(self.page_width),
@@ -105,8 +125,20 @@ impl DrillPageArray {
             for x in x0..=x1 {
                 for y in y0..=y1 {
                     if let Some(page) = self.pages.get_mut(&(x, y)) {
-                        page.base_drills = None;
-                        page.net_drills = None;
+                        let base_affected = page.base_drills.is_some()
+                            && page.base_margin >= 0
+                            && bbox.intersects(page.shape.offset(page.base_margin as f64));
+                        let net_affected = page.net_drills.is_some()
+                            && page.net_margin >= 0
+                            && bbox.intersects(page.shape.offset(page.net_margin as f64));
+                        if base_affected {
+                            // `nets_present` is derived with the base query, so
+                            // a base invalidation also invalidates the net cache.
+                            page.base_drills = None;
+                            page.net_drills = None;
+                        } else if net_affected {
+                            page.net_drills = None;
+                        }
                     }
                 }
             }
@@ -125,6 +157,7 @@ impl DrillPageArray {
         via_margin: i32,
         attach_smd: bool,
     ) -> Vec<ExpansionDrill> {
+        self.max_cached_margin = self.max_cached_margin.max(via_margin.max(0));
         let (x0, x1) = (
             area.ll.x.div_euclid(self.page_width),
             area.ur.x.div_euclid(self.page_width),
@@ -350,5 +383,88 @@ mod tests {
             drills_after.len(),
             "cache must recompute after a board change"
         );
+    }
+
+    #[test]
+    fn invalidates_pages_for_the_full_cached_via_margin() {
+        let mut board = test_board();
+        // Keep the page around the origin in the board bounds without
+        // blocking it.  The test padstack makes each page 10_000 units wide.
+        board.insert_via(1, IntPoint::new(-100_000, 0), vec![2], 1, false);
+        board.insert_via(1, IntPoint::new(100_000, 0), vec![2], 1, false);
+        let mut pages = DrillPageArray::new(&board, 1);
+        let area = IntBox::from_coords(0, 0, 9_000, 9_000);
+
+        // The foreign via below is more than one page away from page (0, 0),
+        // but its 30_000-unit exclusion margin reaches that page.
+        let before = pages.drills_overlapping(&board, &area, 1, 30_000, false);
+        assert!(!before.is_empty());
+        let foreign = board.insert_via(1, IntPoint::new(25_000, 0), vec![3], 1, false);
+        pages.sync_board_changes(&board);
+        let blocked = pages.drills_overlapping(&board, &area, 1, 30_000, false);
+        assert!(
+            blocked.is_empty(),
+            "a change within the cached via margin must invalidate the distant page"
+        );
+
+        // Removing the same item must invalidate it again and expose the
+        // legal sites; a stale page would remain empty here.
+        assert!(board.remove_item(foreign));
+        pages.sync_board_changes(&board);
+        let after = pages.drills_overlapping(&board, &area, 1, 30_000, false);
+        assert!(!after.is_empty());
+    }
+
+    #[test]
+    fn nested_snapshot_commits_preserve_pages_but_rollback_clears_them() {
+        let mut board = test_board();
+        board.insert_via(1, IntPoint::new(0, 0), vec![2], 1, false);
+        board.insert_via(1, IntPoint::new(20_000, 20_000), vec![2], 1, false);
+        let mut pages = DrillPageArray::new(&board, 1);
+        let area = IntBox::from_coords(-2_000, -2_000, 22_000, 22_000);
+        assert!(!pages
+            .drills_overlapping(&board, &area, 1, 600, false)
+            .is_empty());
+        let cached_pages = pages.pages.len();
+        assert!(cached_pages > 0);
+        let initial_epoch = board.change_epoch();
+
+        board.generate_snapshot();
+        board.generate_snapshot();
+        assert!(board.pop_snapshot());
+        assert!(board.pop_snapshot());
+        pages.sync_board_changes(&board);
+        assert_eq!(board.change_epoch(), initial_epoch);
+        assert_eq!(
+            pages.pages.len(),
+            cached_pages,
+            "committing nested snapshots must retain computed drill pages"
+        );
+        assert!(pages.pages.values().all(|page| page.base_drills.is_some()));
+
+        board.generate_snapshot();
+        board.insert_via(1, IntPoint::new(10_000, 10_000), vec![3], 1, false);
+        assert!(board.rollback_snapshot());
+        pages.sync_board_changes(&board);
+        assert!(pages.pages.is_empty());
+    }
+
+    #[test]
+    fn log_shrink_from_a_checkpoint_clears_cached_pages() {
+        let mut board = test_board();
+        board.insert_via(1, IntPoint::new(-20_000, 0), vec![2], 1, false);
+        board.insert_via(1, IntPoint::new(20_000, 0), vec![2], 1, false);
+        let checkpoint = board.clone();
+        board.insert_via(1, IntPoint::new(0, 0), vec![3], 1, false);
+        let mut pages = DrillPageArray::new(&board, 1);
+        let area = IntBox::from_coords(-9_000, -9_000, 9_000, 9_000);
+        assert!(!pages
+            .drills_overlapping(&board, &area, 1, 600, false)
+            .is_empty());
+        assert!(!pages.pages.is_empty());
+
+        board = checkpoint;
+        pages.sync_board_changes(&board);
+        assert!(pages.pages.is_empty());
     }
 }

@@ -36,20 +36,24 @@ pub fn incomplete_connection_count(board: &BasicBoard) -> usize {
         .sum()
 }
 
-/// Final routing/API failure count. A net whose logical connection count is
-/// zero can still be unusable because it has no represented terminal (or one
-/// unresolved terminal). Count that terminal-state error once so callers do
-/// not report success, while multi-component nets retain their airline count.
+/// Final routing/API failure count. A harmless empty declaration is complete;
+/// a net with one unresolved terminal still fails even though its logical
+/// connection count is zero. Multi-component nets retain their airline count.
 pub fn routing_failure_count(board: &BasicBoard) -> usize {
-    let incomplete = incomplete_connection_count(board);
-    incomplete
-        + (1..=board.rules.nets.max_net_no())
-            .filter(|&net_no| {
-                let component_count = net_components(board, net_no).len()
-                    + board.unresolved_net_endpoint_count(net_no);
-                component_count <= 1 && !board.net_is_completely_connected(net_no)
-            })
-            .count()
+    (1..=board.rules.nets.max_net_no())
+        .map(|net_no| routing_failure_count_for_net(board, net_no))
+        .sum()
+}
+
+/// The same fail-closed count as [`routing_failure_count`] for one net.  The
+/// single-net router uses this when a declaration has no physical items, so
+/// multiple unresolved terminals are reported as their logical connection
+/// obligations (plus one terminal-state failure when there is only one).
+pub(crate) fn routing_failure_count_for_net(board: &BasicBoard, net_no: i32) -> usize {
+    let component_count =
+        net_components(board, net_no).len() + board.unresolved_net_endpoint_count(net_no);
+    component_count.saturating_sub(1)
+        + usize::from(component_count <= 1 && !board.net_is_completely_connected(net_no))
 }
 
 /// A representative point of an item for airline computation: via/pin
@@ -241,7 +245,7 @@ mod tests {
             board
         }
 
-        for (unresolved, obligations, failures) in [(0, 0, 1), (1, 0, 1), (2, 1, 1)] {
+        for (unresolved, obligations, failures) in [(0, 0, 0), (1, 0, 1), (2, 1, 1)] {
             let board = board_with_unresolved(unresolved);
             assert_eq!(incomplete_connection_count(&board), obligations);
             assert_eq!(routing_failure_count(&board), failures);

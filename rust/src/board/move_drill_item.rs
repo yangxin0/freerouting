@@ -91,10 +91,10 @@ pub fn move_via(
     let net_nos = item.base.net_nos.clone();
     let cl_class = item.base.clearance_class;
     let via_clearance_class_explicit = item.base.clearance_class_explicit;
+    let via_lineage = item.base.lineage_no;
     // Everything inserted after this point is part of the move transaction:
     // moving a via can shove foreign traces and create substitute pieces in
     // addition to the replacement via and its bridge stubs.
-    let watermark = board.next_item_id();
 
     // Record the traces contacting the via so we can bridge them to the new
     // position after the move. Java's `DrillItem.move_by` translates the via
@@ -195,9 +195,11 @@ pub fn move_via(
     }
 
     board.generate_snapshot();
+    let watermark = board.begin_lineage_drc_transaction();
     board.remove_item(via_id);
     // clear the destination on every spanned layer by shoving traces
     let Some(ps) = board.padstacks.get_by_no(padstack) else {
+        board.discard_lineage_drc_transaction(watermark);
         board.rollback_snapshot();
         return false;
     };
@@ -218,6 +220,7 @@ pub fn move_via(
         let cl = board.rules.clearance_matrix.max_value(*layer).max(0) as f64;
         let inflated = shape.offset(cl);
         if !shove_aside(board, &inflated, *layer, &net_nos, cl_class, &[]) {
+            board.discard_lineage_drc_transaction(watermark);
             board.rollback_snapshot();
             return false;
         }
@@ -234,6 +237,7 @@ pub fn move_via(
             });
         if blocked {
             let _ = max_via_recursion; // deeper via-shove recursion: future work
+            board.discard_lineage_drc_transaction(watermark);
             board.rollback_snapshot();
             return false;
         }
@@ -246,6 +250,7 @@ pub fn move_via(
         attach_allowed,
         via_clearance_class_explicit,
     );
+    board.set_item_lineage(new_via, via_lineage);
     // Bridge each previously-contacting trace from its endpoint to the new
     // center, preserving connectivity (Java: DrillItem.move_by insert_trace).
     let mut new_items = vec![new_via];
@@ -276,11 +281,7 @@ pub fn move_via(
     // authoritative DRC pairwise rule (incl. same-net drill rules) — the
     // shove corridor above ignores same-net items and never checked the
     // bridge stubs at all
-    if !board
-        .item_ids_since(watermark)
-        .into_iter()
-        .all(|id| crate::drc::item_is_clear(board, id))
-    {
+    if !board.finish_lineage_drc_transaction(watermark) {
         board.rollback_snapshot();
         return false;
     }

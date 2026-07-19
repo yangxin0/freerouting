@@ -278,6 +278,7 @@ public final class SesWriter {
   private static void writeNet(int netNo, BasicBoard board, IdentifierType identifierType,
       CoordinateTransform coordinateTransform, IndentFileWriter file) throws IOException {
     Collection<Item> netItems = board.get_connectable_items(netNo);
+    Net currNet = board.rules.nets.get(netNo);
     boolean headerWritten = false;
     for (Item currItem : netItems) {
       if (currItem.get_fixed_state() == FixedState.SYSTEM_FIXED) {
@@ -290,11 +291,23 @@ public final class SesWriter {
       if (!headerWritten && (isWire || isVia || isConductionArea)) {
         file.start_scope();
         file.write("net ");
-        Net currNet = board.rules.nets.get(netNo);
         if (currNet == null) {
           FRLogger.warn("SesWriter.writeNet: net not found");
         } else {
           identifierType.write(currNet.name, file);
+          // `net_number` is standard translator metadata, not a subnet selector.
+          // The namespaced child preserves Freerouting's internal fromto/order subnet
+          // when a session is read back by either implementation.
+          file.new_line();
+          file.write("(net_number ");
+          file.write(String.valueOf(currNet.net_number));
+          file.write(")");
+          if (currNet.subnet_number != 1) {
+            file.new_line();
+            file.write("(freerouting_subnet ");
+            file.write(String.valueOf(currNet.subnet_number));
+            file.write(")");
+          }
         }
         headerWritten = true;
       }

@@ -9,30 +9,40 @@ use crate::geometry::planar::{IntPoint, Polyline};
 use crate::io::dsn::parse_dsn;
 use crate::rules::ItemClass;
 
-/// Resolves a session `(net NAME ...)` scope.  Unlike DSN wiring, standard
-/// SES has no subnet field and Java's `SesReader` deliberately resolves the
-/// name to subnet 1.  A positive second atom is accepted as a backwards-
-/// compatible extension for sessions produced by older Rust builds, but a
-/// name-only scope must never fan one route out to every same-name subnet.
+/// Resolves a session `(net NAME ...)` scope. Specctra's standard
+/// `net_number` child is translator metadata and is deliberately ignored for
+/// electrical selection (Cadence and Java use the net name). Freerouting's
+/// namespaced child is the only subnet selector; this prevents an arbitrary
+/// translator id from silently routing onto a nonexistent subnet.
 fn session_net_numbers(
     rules: &crate::rules::BoardRules,
     net_node: &crate::io::dsn::SExpr,
 ) -> Result<Vec<i32>, String> {
-    let mut args = net_node.args();
-    let Some(name) = args.next() else {
+    let Some(name) = net_node.args().next() else {
         return Err("session net scope is missing its name".into());
     };
-    let subnet = match args.next() {
-        None => 1,
-        Some(value) => value
-            .parse::<usize>()
-            .ok()
-            .filter(|value| *value > 0)
-            .ok_or_else(|| "session net subnet must be a positive integer".to_string())?,
-    };
-    if args.next().is_some() {
+    if net_node.args().nth(1).is_some() {
         return Err("session net scope has too many arguments".into());
     }
+    let mut subnet_nodes = net_node.children("freerouting_subnet");
+    let subnet = subnet_nodes
+        .next()
+        .map(|node| {
+            let values: Vec<_> = node.args().collect();
+            if values.len() != 1 {
+                return Err("session freerouting_subnet needs exactly one integer".to_string());
+            }
+            values[0]
+                .parse::<usize>()
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| "session freerouting_subnet must be a positive integer".to_string())
+        })
+        .transpose()?;
+    if subnet_nodes.next().is_some() {
+        return Err("session net scope has more than one freerouting_subnet".into());
+    }
+    let subnet = subnet.unwrap_or(1);
     Ok(rules
         .nets
         .get(name, subnet)
@@ -83,12 +93,18 @@ pub(crate) fn session_via_metadata(
                 };
                 (clearance_class, info.attach_smd_allowed())
             }
-            // Sessions from designs without a bound ViaInfo retain Java's
-            // permissive legacy behavior for attachment and use the net's Via
-            // item class for clearance.
+            // Without a bound ViaInfo, DSN import and router request
+            // derivation use the global via-at-SMD switch together with the
+            // concrete padstack's attach permission. SES reload must use the
+            // same rule or a pre-existing DSN via can become attachable merely
+            // by passing through a session file.
             None => (
                 board.rules.item_clearance_class_for(net_no, ItemClass::Via),
-                true,
+                board.rules.via_at_smd_allowed
+                    && board
+                        .padstacks
+                        .get_by_no(padstack_no)
+                        .is_some_and(|padstack| padstack.attach_allowed),
             ),
         };
     let escape_smd_layer = (!attach_allowed)
@@ -496,6 +512,52 @@ mod tests {
     }
 
     #[test]
+    fn standard_net_number_is_translator_metadata_not_a_subnet_selector() {
+        let dsn = r#"(pcb "ses-subnets.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (rule (width 200) (clearance 200)))
+  (placement)
+  (library)
+  (network (net GND 1) (net GND 2)))"#;
+        let mut board = import_dsn(dsn).expect("design import");
+        let subnet_one = board.rules.nets.get("GND", 1).unwrap().net_number;
+        let subnet_two = board.rules.nets.get("GND", 2).unwrap().net_number;
+        let session = r#"(session ses-subnets
+  (routes
+    (resolution um 10)
+    (network_out
+      (net GND
+        (net_number 2)
+        (wire (path F.Cu 200 1000 1000 2000 1000))))))"#;
+        import_ses(&mut board, session).expect("session import");
+        let trace = board
+            .items()
+            .find_map(|(_, item)| matches!(item.kind, ItemKind::PolylineTrace(_)).then_some(item))
+            .expect("session trace");
+        assert_eq!(trace.base.net_nos, vec![subnet_one]);
+        assert!(!trace.base.contains_net(subnet_two));
+
+        let exact = r#"(session ses-subnets
+  (routes
+    (resolution um 10)
+    (network_out
+      (net GND
+        (net_number 999999)
+        (freerouting_subnet 2)
+        (wire (path F.Cu 200 1000 2000 2000 2000))))))"#;
+        import_ses(&mut board, exact).expect("private subnet extension import");
+        let trace = board
+            .items()
+            .filter_map(|(_, item)| matches!(item.kind, ItemKind::PolylineTrace(_)).then_some(item))
+            .last()
+            .expect("exact-subnet trace");
+        assert_eq!(trace.base.net_nos, vec![subnet_two]);
+    }
+
+    #[test]
     fn missing_session_resolution_inherits_the_board_unit_and_scale() {
         let dsn = r#"(pcb "ses-mil.dsn"
   (resolution mil 10)
@@ -620,10 +682,7 @@ mod tests {
     (network_out
       (net N1 nope))))"#;
         let error = import_ses(&mut board, bad_subnet).expect_err("bad subnet must fail");
-        assert!(
-            error.contains("subnet must be a positive integer"),
-            "{error}"
-        );
+        assert!(error.contains("too many arguments"), "{error}");
     }
 
     #[test]

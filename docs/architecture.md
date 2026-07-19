@@ -95,11 +95,18 @@ deliberately narrower than its internal modules expose within the crate:
   recovery cannot inherit a caller's rip-up cost. All internal routing,
   shoving, via-move, and optimizer speculation uses rollback-and-discard
   checkpoints, so rejected geometry cannot reappear through the public redo
-  history.
+  history. A successful snapshot commit preserves the incremental expansion
+  room and drill-page caches; rollback, undo, and redo advance the board epoch
+  and invalidate those caches before rebuilding them. Replacement geometry
+  carries source lineage, and the transactional DRC gate permits an inherited
+  pre-existing violation only when its geometric witness remains on that
+  source; newly created or relocated violations are rejected.
 - DSN, SES, KiCad JSON, and `.rules` writers are checked semantic boundaries.
   They preserve supported metadata and reject state their target format cannot
-  represent. Cross-format tests compare normalized semantics rather than only
-  checking whether a writer can read its own output.
+  represent. The CLI commits the mandatory SES before optional DSN, rules,
+  JSON, DRC, or ratsnest artifacts, so a secondary export failure cannot erase
+  the primary routed result. Cross-format tests compare normalized semantics
+  rather than only checking whether a writer can read its own output.
 
 These boundaries are the primary regression surface for the Rust port. New
 format fields, routing entry points, or mutation paths must either reuse them

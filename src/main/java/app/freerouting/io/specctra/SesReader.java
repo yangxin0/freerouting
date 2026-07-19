@@ -18,6 +18,8 @@ import app.freerouting.rules.Net;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Reads a Specctra session (.ses) file and imports the routing data (wires and vias) into a
@@ -29,6 +31,13 @@ import java.io.OutputStream;
  * {@link app.freerouting.io.specctra.parser.SesFileReader} (now {@link Deprecated}).
  */
 public final class SesReader {
+
+  /**
+   * Freerouting's namespaced SES extension for preserving an internal DSN subnet.  The
+   * standard {@code net_number} child is deliberately not used for this purpose: in the
+   * Specctra grammar it is translator metadata and is not a subnet selector.
+   */
+  private static final String FREEROUTING_SUBNET_SCOPE = "freerouting_subnet";
 
   private final IJFlexScanner scanner;
   private final BasicBoard board;
@@ -200,15 +209,15 @@ public final class SesReader {
     }
     this.scanner.set_scope_identifier(netName);
 
-    Net net = board.rules.nets.get(netName, 1);
-    if (net == null) {
-      FRLogger.warn("SesReader: net not found: '" + netName + "' — skipping");
-      errorsEncountered++;
-      ScopeKeyword.skip_scope(this.scanner);
-      return;
-    }
-    int netNo = net.net_number;
-    int[] netNoArr = new int[]{netNo};
+    // A standard SES net_number is intentionally ignored.  It is assigned by the
+    // producing translator and need not match this board's numbering.  Freerouting's
+    // private child is the only unambiguous way to preserve a DSN fromto/order subnet
+    // across a session round-trip. Route records are staged until all metadata has been
+    // read so child ordering cannot silently change their electrical assignment.
+    int subnetNumber = 1;
+    boolean subnetSeen = false;
+    boolean metadataValid = true;
+    List<PendingRoute> pendingRoutes = new ArrayList<>();
 
     for (;;) {
       Object prevToken = nextToken;
@@ -221,28 +230,131 @@ public final class SesReader {
       }
 
       if (prevToken == Keyword.OPEN_BRACKET) {
-        if (nextToken == Keyword.WIRE) {
-          if (!processWireScope(netNoArr)) {
+        if (nextToken instanceof String childName
+            && FREEROUTING_SUBNET_SCOPE.equals(childName)) {
+          Integer parsedSubnet = readFreeroutingSubnetScope();
+          if (parsedSubnet == null) {
             errorsEncountered++;
+            metadataValid = false;
+          } else if (subnetSeen) {
+            FRLogger.warn("SesReader: duplicate (" + FREEROUTING_SUBNET_SCOPE
+                + ") scope for net '" + netName + "' — skipping duplicate");
+            errorsEncountered++;
+            metadataValid = false;
+          } else {
+            subnetNumber = parsedSubnet;
+            subnetSeen = true;
+          }
+          continue;
+        }
+
+        if (nextToken == Keyword.WIRE) {
+          PendingRouteParse parsedRoute = readWireScope();
+          if (!parsedRoute.valid()) {
+            errorsEncountered++;
+          } else if (parsedRoute.route() != null) {
+            pendingRoutes.add(parsedRoute.route());
           }
         } else if (nextToken == Keyword.VIA) {
-          if (!processViaScope(netNoArr)) {
+          PendingRouteParse parsedRoute = readViaScope();
+          if (!parsedRoute.valid()) {
             errorsEncountered++;
+          } else {
+            pendingRoutes.add(parsedRoute.route());
           }
         } else {
           ScopeKeyword.skip_scope(this.scanner);
         }
       }
     }
+
+    Net net = board.rules.nets.get(netName, subnetNumber);
+    if (net == null) {
+      FRLogger.warn("SesReader: net not found: '" + netName + "' subnet "
+          + subnetNumber + " — skipping");
+      errorsEncountered++;
+      return;
+    }
+    if (!metadataValid) {
+      return;
+    }
+
+    int[] netNoArr = new int[]{net.net_number};
+    for (PendingRoute route : pendingRoutes) {
+      boolean inserted = switch (route) {
+        case PendingWire wire -> insertWire(wire, netNoArr);
+        case PendingVia via -> insertVia(via, netNoArr);
+      };
+      if (!inserted) {
+        errorsEncountered++;
+      }
+    }
   }
 
   /**
-   * Processes a {@code (wire ...)} scope and inserts the trace into the board.
+   * Reads the body of a {@code (freerouting_subnet N)} child.
    *
-   * @return {@code true} if the wire was successfully imported; {@code false} on a parse or
-   *         geometry error (the caller increments {@link #errorsEncountered})
+   * <p>The scanner is positioned immediately after the child name.  The whole child is consumed
+   * even when malformed so that the caller can continue with the enclosing {@code (net ...)}
+   * scope.</p>
+   *
+   * @return the positive subnet number, or {@code null} when the child is malformed
    */
-  private boolean processWireScope(int[] netNoArr) throws IOException {
+  private Integer readFreeroutingSubnetScope() throws IOException {
+    Object value = this.scanner.next_token();
+    Integer subnet = value instanceof Integer integer && integer > 0 ? integer : null;
+
+    Object closing = this.scanner.next_token();
+    if (closing != Keyword.CLOSED_BRACKET) {
+      // Consume nested/remaining content, if any, until this child closes.  In the normal
+      // malformed case the token is simply an extra atom and the next token is already ')'.
+      if (closing == Keyword.OPEN_BRACKET) {
+        ScopeKeyword.skip_scope(this.scanner);
+      }
+      Object token;
+      do {
+        token = this.scanner.next_token();
+      } while (token != null && token != Keyword.CLOSED_BRACKET);
+      subnet = null;
+    }
+
+    if (subnet == null) {
+      FRLogger.warn("SesReader: (" + FREEROUTING_SUBNET_SCOPE
+          + ") requires exactly one positive integer");
+    }
+    return subnet;
+  }
+
+  private sealed interface PendingRoute permits PendingWire, PendingVia {
+  }
+
+  private record PendingWire(PolygonPath path) implements PendingRoute {
+  }
+
+  private record PendingVia(String padstackName, double x, double y) implements PendingRoute {
+  }
+
+  /**
+   * Result of parsing one route child. A valid result with a {@code null} route represents a
+   * deliberately ignored route form, such as a conduction-area wire without a polygon path.
+   */
+  private record PendingRouteParse(boolean valid, PendingRoute route) {
+
+    private static PendingRouteParse valid(PendingRoute route) {
+      return new PendingRouteParse(true, route);
+    }
+
+    private static PendingRouteParse invalid() {
+      return new PendingRouteParse(false, null);
+    }
+  }
+
+  /**
+   * Reads a {@code (wire ...)} scope without changing the board.
+   *
+   * @return the staged route, an ignored valid route, or an invalid parse result
+   */
+  private PendingRouteParse readWireScope() throws IOException {
     PolygonPath wirePath = null;
     Object nextToken = null;
     for (;;) {
@@ -251,7 +363,7 @@ public final class SesReader {
       if (nextToken == null) {
         FRLogger.warn("SesReader.processWireScope: unexpected end of file at '"
             + this.scanner.get_scope_identifier() + "'");
-        return false;
+        return PendingRouteParse.invalid();
       }
       if (nextToken == Keyword.CLOSED_BRACKET) {
         break;
@@ -267,8 +379,15 @@ public final class SesReader {
 
     if (wirePath == null) {
       // conduction areas have no polygon_path — silently skip
-      return true;
+      return PendingRouteParse.valid(null);
     }
+
+    return PendingRouteParse.valid(new PendingWire(wirePath));
+  }
+
+  /** Inserts a previously parsed wire for the resolved net. */
+  private boolean insertWire(PendingWire pendingWire, int[] netNoArr) {
+    PolygonPath wirePath = pendingWire.path();
 
     try {
       int layerNo = wirePath.layer.no;
@@ -303,17 +422,16 @@ public final class SesReader {
   }
 
   /**
-   * Processes a {@code (via ...)} scope and inserts the via into the board.
+   * Reads a {@code (via ...)} scope without changing the board.
    *
-   * @return {@code true} if the via was successfully imported; {@code false} on a parse or
-   *         geometry error (the caller increments {@link #errorsEncountered})
+   * @return the staged route or an invalid parse result
    */
-  private boolean processViaScope(int[] netNoArr) throws IOException {
+  private PendingRouteParse readViaScope() throws IOException {
     Object nextToken = this.scanner.next_token();
     if (!(nextToken instanceof String padstackName)) {
       FRLogger.warn("SesReader.processViaScope: padstack name expected at '"
           + this.scanner.get_scope_identifier() + "'");
-      return false;
+      return PendingRouteParse.invalid();
     }
     this.scanner.set_scope_identifier(padstackName);
 
@@ -327,7 +445,7 @@ public final class SesReader {
       } else {
         FRLogger.warn("SesReader.processViaScope: number expected at '"
             + this.scanner.get_scope_identifier() + "'");
-        return false;
+        return PendingRouteParse.invalid();
       }
     }
 
@@ -341,18 +459,25 @@ public final class SesReader {
     if (nextToken != Keyword.CLOSED_BRACKET) {
       FRLogger.warn("SesReader.processViaScope: closing bracket expected at '"
           + this.scanner.get_scope_identifier() + "'");
-      return false;
+      return PendingRouteParse.invalid();
     }
 
+    return PendingRouteParse.valid(new PendingVia(padstackName, location[0], location[1]));
+  }
+
+  /** Inserts a previously parsed via for the resolved net. */
+  private boolean insertVia(PendingVia pendingVia, int[] netNoArr) {
+
     try {
-      Padstack viaPadstack = this.board.library.padstacks.get(padstackName);
+      Padstack viaPadstack = this.board.library.padstacks.get(pendingVia.padstackName());
       if (viaPadstack == null) {
-        FRLogger.warn("SesReader.processViaScope: via padstack not found: " + padstackName);
+        FRLogger.warn("SesReader.processViaScope: via padstack not found: "
+            + pendingVia.padstackName());
         return false;
       }
 
-      int x = (int) Math.round(location[0] / sessionFileScaleDenominator);
-      int y = (int) Math.round(location[1] / sessionFileScaleDenominator);
+      int x = (int) Math.round(pendingVia.x() / sessionFileScaleDenominator);
+      int y = (int) Math.round(pendingVia.y() / sessionFileScaleDenominator);
       Point viaLocation = Point.get_instance(x, y);
 
       int clearanceClass = board.rules.get_default_net_class().default_item_clearance_classes
@@ -389,4 +514,3 @@ public final class SesReader {
         inputStream, outputStream, board);
   }
 }
-

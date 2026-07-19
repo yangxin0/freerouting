@@ -3,8 +3,9 @@
 //! the KiCad DRC v1 JSON format (`https://schemas.kicad.org/drc.v1.json`)
 //! exactly like the Java report.
 
-use crate::board::basic_board::{BasicBoard, ItemId};
+use crate::board::basic_board::{BasicBoard, ItemId, LineageViolationKey, LineageViolationRegion};
 use crate::board::ItemKind;
+use crate::geometry::planar::{FloatPoint, Side, TileShape};
 
 /// Relative tolerance absorbing floating-point rounding in the Euclidean
 /// copper-distance check. Unit-independent: it scales with the required
@@ -181,6 +182,7 @@ pub(crate) fn clearance_for_new_item(
 /// keep the same pair/layer while moving the copper substantially closer.
 /// The positive deficit is stable across the final DRC and is compared before
 /// accepting a candidate board.
+#[allow(dead_code)]
 pub(crate) fn violation_snapshot(
     board: &BasicBoard,
 ) -> std::collections::HashMap<(ItemId, ItemId, usize), f64> {
@@ -204,8 +206,10 @@ pub(crate) fn violation_keys(
 
 /// True when `id`'s copper keeps the required pairwise clearance to every
 /// other board item — the authoritative DRC rule (`required_clearance`),
-/// including same-net drill rules. The insert/move gates run this on each
-/// item they created so they can never commit copper the final DRC rejects.
+/// including same-net drill rules. It is retained as a small diagnostic and
+/// unit-test oracle; transactional routing uses the lineage-aware delta gate
+/// below so inherited violations remain distinguishable from new ones.
+#[allow(dead_code)]
 pub(crate) fn item_is_clear(board: &BasicBoard, id: ItemId) -> bool {
     let Some(item) = board.get_item(id) else {
         return true;
@@ -237,6 +241,239 @@ pub(crate) fn item_is_clear(board: &BasicBoard, id: ItemId) -> bool {
                     && violates(s.euclidean_distance_to(os), cl)
             }) {
                 return false;
+            }
+        }
+    }
+    true
+}
+
+/// One concrete violating shape pair used by replacement transactions. The
+/// shape pair records the whole pre-existing contact region; retaining only a
+/// lineage-pair key would let a shove relocate a violation elsewhere between
+/// the same two ancestors and incorrectly call it inherited, while retaining
+/// only one closest point would reject an otherwise unchanged trace split.
+pub(crate) struct LineageViolationProbe {
+    pub key: LineageViolationKey,
+    pub deficit: f64,
+    pub first_item: ItemId,
+    pub second_item: ItemId,
+    pub first_lineage: ItemId,
+    pub second_lineage: ItemId,
+    pub first_shape: TileShape,
+    pub second_shape: TileShape,
+    pub first_witness: FloatPoint,
+    pub second_witness: FloatPoint,
+}
+
+fn closest_witness(first: &TileShape, second: &TileShape) -> (FloatPoint, FloatPoint, f64) {
+    if first.intersects(second) {
+        let point = first.intersection(second).centre_of_gravity();
+        return (point, point, 0.0);
+    }
+    let first_corners = first.corner_approx_arr();
+    let second_corners = second.corner_approx_arr();
+    if first_corners.is_empty() || second_corners.is_empty() {
+        return (
+            first.centre_of_gravity(),
+            second.centre_of_gravity(),
+            f64::MAX,
+        );
+    }
+    let projection = |point: FloatPoint, a: FloatPoint, b: FloatPoint| {
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let length_square = dx * dx + dy * dy;
+        if length_square <= 0.0 {
+            return a;
+        }
+        let factor =
+            (((point.x - a.x) * dx + (point.y - a.y) * dy) / length_square).clamp(0.0, 1.0);
+        FloatPoint::new(a.x + factor * dx, a.y + factor * dy)
+    };
+    let mut best = (first_corners[0], second_corners[0], f64::MAX);
+    for (corners, other_corners, reversed) in [
+        (&first_corners, &second_corners, false),
+        (&second_corners, &first_corners, true),
+    ] {
+        for &point in corners {
+            for index in 0..other_corners.len() {
+                let projected = projection(
+                    point,
+                    other_corners[index],
+                    other_corners[(index + 1) % other_corners.len()],
+                );
+                let distance = point.distance(projected);
+                if distance < best.2 {
+                    best = if reversed {
+                        (projected, point, distance)
+                    } else {
+                        (point, projected, distance)
+                    };
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Finds the concrete violations involving one item. This is local in the
+/// spatial tree and is used only when a transaction removes an old item or
+/// validates a newly born replacement.
+pub(crate) fn lineage_violations_for_item(
+    board: &BasicBoard,
+    id: ItemId,
+) -> Vec<LineageViolationProbe> {
+    let Some(item) = board.get_item(id) else {
+        return Vec::new();
+    };
+    let mut result = Vec::new();
+    for (shape, layer) in item.tile_shapes(&board.padstacks) {
+        let search_radius = board
+            .rules
+            .clearance_matrix
+            .max_value(*layer)
+            .max(board.rules.max_same_net_clearance())
+            .max(0) as f64;
+        for other_id in board.overlapping_items(&shape.offset(search_radius), Some(*layer)) {
+            if other_id == id {
+                continue;
+            }
+            let Some(other) = board.get_item(other_id) else {
+                continue;
+            };
+            let Some(required) = required_clearance(board, item, other, *layer) else {
+                continue;
+            };
+            for (other_shape, other_layer) in other.tile_shapes(&board.padstacks) {
+                if other_layer != layer
+                    || other_shape
+                        .intersection(&shape.offset(required))
+                        .dimension()
+                        < 2
+                {
+                    continue;
+                }
+                let (first_witness, second_witness, actual) = closest_witness(shape, other_shape);
+                if !violates(actual, required) {
+                    continue;
+                }
+                let first_lineage = item.base.lineage_no;
+                let second_lineage = other.base.lineage_no;
+                let key = if first_lineage <= second_lineage {
+                    (first_lineage, second_lineage, *layer)
+                } else {
+                    (second_lineage, first_lineage, *layer)
+                };
+                result.push(LineageViolationProbe {
+                    key,
+                    deficit: (required - actual).max(0.0),
+                    first_item: id,
+                    second_item: other_id,
+                    first_lineage,
+                    second_lineage,
+                    first_shape: shape.clone(),
+                    second_shape: other_shape.clone(),
+                    first_witness,
+                    second_witness,
+                });
+            }
+        }
+    }
+    result
+}
+
+fn source_contains_witness(
+    source_shapes: &std::collections::HashMap<(ItemId, usize), Vec<TileShape>>,
+    lineage: ItemId,
+    layer: usize,
+    witness: FloatPoint,
+) -> bool {
+    source_shapes.get(&(lineage, layer)).is_some_and(|shapes| {
+        shapes
+            .iter()
+            .any(|shape| shape.side_of_border(witness, 1e-6) != Side::OnTheLeft)
+    })
+}
+
+// Witnesses are produced by floating-point projection against integer-grid
+// polygons.  Permit one board unit of boundary roundoff (far below a normal
+// trace width) so a split piece whose closest point lands exactly on an old
+// edge is still recognized as the inherited contact.
+const REGION_EPS: f64 = 1.0;
+
+/// Returns the largest original deficit among concrete shape-pair regions
+/// containing the current closest pair. A single closest point is too narrow
+/// for a trace split: each new piece can legitimately choose a different point
+/// along the same inherited overlap. Keeping the deficit per region prevents a
+/// mild contact from worsening merely because another contact between the same
+/// lineage pair was already more severe.
+fn inherited_deficit_limit(
+    first: FloatPoint,
+    second: FloatPoint,
+    regions: &[LineageViolationRegion],
+) -> Option<f64> {
+    regions
+        .iter()
+        .filter_map(|(first_shape, second_shape, deficit)| {
+            (first_shape.side_of_border(first, REGION_EPS) != Side::OnTheLeft
+                && second_shape.side_of_border(second, REGION_EPS) != Side::OnTheLeft)
+                .then_some(*deficit)
+        })
+        .reduce(f64::max)
+}
+
+/// Validates all violating contacts involving items born in a replacement
+/// transaction. A defect is accepted only when the same lineage pair/layer
+/// already violated, its deficit did not increase, and each replacement's
+/// current contact witnesses remain inside a pre-existing shape-pair region
+/// and on any removed source copper.
+pub(crate) fn lineage_delta_is_clear(
+    board: &BasicBoard,
+    watermark: ItemId,
+    baseline: &std::collections::HashMap<LineageViolationKey, f64>,
+    source_shapes: &std::collections::HashMap<(ItemId, usize), Vec<TileShape>>,
+    baseline_regions: &std::collections::HashMap<LineageViolationKey, Vec<LineageViolationRegion>>,
+) -> bool {
+    for id in board.item_ids_since(watermark) {
+        for violation in lineage_violations_for_item(board, id) {
+            let Some(previous) = baseline.get(&violation.key) else {
+                return false;
+            };
+            if violation.deficit > previous + previous.max(1.0) * DISTANCE_EPS {
+                return false;
+            }
+            let (current_first, current_second) =
+                if violation.first_lineage <= violation.second_lineage {
+                    (violation.first_witness, violation.second_witness)
+                } else {
+                    (violation.second_witness, violation.first_witness)
+                };
+            let Some(region_limit) = baseline_regions.get(&violation.key).and_then(|regions| {
+                inherited_deficit_limit(current_first, current_second, regions)
+            }) else {
+                return false;
+            };
+            if violation.deficit > region_limit + region_limit.max(1.0) * DISTANCE_EPS {
+                return false;
+            }
+            for (item_id, witness) in [
+                (violation.first_item, violation.first_witness),
+                (violation.second_item, violation.second_witness),
+            ] {
+                if item_id < watermark {
+                    continue;
+                }
+                let Some(item) = board.get_item(item_id) else {
+                    return false;
+                };
+                if !source_contains_witness(
+                    source_shapes,
+                    item.base.lineage_no,
+                    violation.key.2,
+                    witness,
+                ) {
+                    return false;
+                }
             }
         }
     }
@@ -508,6 +745,296 @@ mod tests {
             0,
         );
         BasicBoard::new(stack, rules, padstacks)
+    }
+
+    fn trace(points: &[(i32, i32)]) -> Polyline {
+        Polyline::from_int_points(
+            &points
+                .iter()
+                .map(|&(x, y)| IntPoint::new(x, y))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn lineage_gate_allows_unchanged_split_of_inherited_violation() {
+        let mut board = test_board();
+        let source = board.insert_trace(trace(&[(0, 0), (4_000, 0)]), 0, 100, vec![1], 1);
+        board.insert_trace(trace(&[(0, 250), (4_000, 250)]), 0, 100, vec![2], 1);
+        assert_eq!(check_board(&board).violations.len(), 1);
+
+        let watermark = board.begin_lineage_drc_transaction();
+        assert!(board.split_traces_at(IntPoint::new(2_000, 0), 0, 1));
+        assert!(
+            board.finish_lineage_drc_transaction(watermark),
+            "splitting does not create or move the inherited defect"
+        );
+        assert!(board.get_item(source).is_none());
+        assert!(board.item_ids_since(watermark).iter().all(|id| board
+            .get_item(*id)
+            .unwrap()
+            .base
+            .lineage_no
+            == source));
+    }
+
+    #[test]
+    fn lineage_gate_survives_normalization_combine_of_replacement_piece() {
+        let mut board = test_board();
+        let source = board.insert_trace(trace(&[(0, 0), (4_000, 0)]), 0, 100, vec![1], 1);
+        board.insert_trace(trace(&[(0, 250), (4_000, 250)]), 0, 100, vec![2], 1);
+        assert_eq!(check_board(&board).violations.len(), 1);
+
+        board.generate_snapshot();
+        let watermark = board.begin_lineage_drc_transaction();
+        board.remove_item(source);
+        // Model the normalization path after a shove: two replacement pieces
+        // retain the source lineage, then combine_trace joins them.  Before
+        // the lineage-preserving combine this produced a fresh lineage and
+        // the inherited violation was incorrectly rejected as new.
+        let first = board.insert_trace_with_lineage(
+            trace(&[(0, 0), (2_000, 0)]),
+            0,
+            100,
+            vec![1],
+            1,
+            false,
+            source,
+        );
+        board.insert_trace_with_lineage(
+            trace(&[(2_000, 0), (4_000, 0)]),
+            0,
+            100,
+            vec![1],
+            1,
+            false,
+            source,
+        );
+        let combined = board.combine_trace(first);
+        assert_eq!(
+            board.get_item(combined).unwrap().base.lineage_no,
+            source,
+            "normalization must retain the source lineage"
+        );
+        assert!(board.finish_lineage_drc_transaction(watermark));
+        assert!(board.pop_snapshot());
+        assert_eq!(check_board(&board).violations.len(), 1);
+    }
+
+    #[test]
+    fn transactional_combine_keeps_distinct_source_lineages_separate() {
+        let mut board = test_board();
+        let first = board.insert_trace(trace(&[(0, 0), (2_000, 0)]), 0, 100, vec![1], 1);
+        let second = board.insert_trace(trace(&[(2_000, 0), (4_000, 0)]), 0, 100, vec![1], 1);
+        board.insert_trace(trace(&[(0, 250), (1_900, 250)]), 0, 100, vec![2], 1);
+        board.insert_trace(trace(&[(2_100, 250), (4_000, 250)]), 0, 100, vec![3], 1);
+        assert!(!lineage_violations_for_item(&board, first).is_empty());
+        assert!(!lineage_violations_for_item(&board, second).is_empty());
+
+        let watermark = board.begin_lineage_drc_transaction();
+        assert_eq!(board.combine_trace(first), first);
+        assert!(board.get_item(first).is_some());
+        assert!(board.get_item(second).is_some());
+        assert!(
+            board.finish_lineage_drc_transaction(watermark),
+            "normalization must not collapse two independent provenance regions"
+        );
+    }
+
+    #[test]
+    fn lineage_gate_rejects_a_genuinely_new_violation() {
+        let mut board = test_board();
+        board.insert_trace(trace(&[(0, 0), (4_000, 0)]), 0, 100, vec![1], 1);
+
+        let watermark = board.begin_lineage_drc_transaction();
+        board.insert_trace(trace(&[(0, 250), (4_000, 250)]), 0, 100, vec![2], 1);
+        assert!(!board.finish_lineage_drc_transaction(watermark));
+    }
+
+    #[test]
+    fn lineage_gate_rejects_relocated_violation_with_same_pair_and_deficit() {
+        let mut board = test_board();
+        let source = board.insert_trace(trace(&[(0, 0), (4_000, 0)]), 0, 100, vec![1], 1);
+        board.insert_trace(trace(&[(0, 250), (4_000, 250)]), 0, 100, vec![2], 1);
+        assert_eq!(check_board(&board).violations.len(), 1);
+
+        let watermark = board.begin_lineage_drc_transaction();
+        board.remove_item(source);
+        board.insert_trace_with_lineage(
+            trace(&[(0, 500), (4_000, 500)]),
+            0,
+            100,
+            vec![1],
+            1,
+            false,
+            source,
+        );
+        assert!(
+            !board.finish_lineage_drc_transaction(watermark),
+            "an equal-severity defect at a different contact is not inherited"
+        );
+    }
+
+    #[test]
+    fn lineage_gate_binds_deficit_to_the_matching_contact_region() {
+        let mut board = test_board();
+        assert!(board.rules.clearance_matrix.append_class("strict"));
+        let strict = board.rules.clearance_matrix.get_no("strict").unwrap();
+        board
+            .rules
+            .clearance_matrix
+            .set_value_on_all_layers(1, strict, 300);
+
+        // Two disjoint contacts share the same lineage-pair key. The first is
+        // maximally severe (overlapping copper, deficit 200); the second has a
+        // 100-unit deficit. Replacing only the second region under a stricter
+        // class raises its deficit to 200 without moving either witness. A
+        // key-wide max would accept that regression; its own region must not.
+        let first_source = board.insert_trace(trace(&[(0, 0), (1_000, 0)]), 0, 100, vec![1], 1);
+        let first_other = board.insert_trace(trace(&[(0, 0), (1_000, 0)]), 0, 100, vec![2], 1);
+        let second_source =
+            board.insert_trace(trace(&[(5_000, 2_000), (6_000, 2_000)]), 0, 100, vec![1], 1);
+        let second_other =
+            board.insert_trace(trace(&[(5_000, 2_300), (6_000, 2_300)]), 0, 100, vec![2], 1);
+        board.set_item_lineage(second_source, first_source);
+        board.set_item_lineage(second_other, first_other);
+        assert_eq!(check_board(&board).violations.len(), 2);
+
+        let watermark = board.begin_lineage_drc_transaction();
+        board.remove_item(first_source);
+        board.remove_item(second_source);
+        board.insert_trace_with_lineage(
+            trace(&[(0, 0), (1_000, 0)]),
+            0,
+            100,
+            vec![1],
+            1,
+            false,
+            first_source,
+        );
+        board.insert_trace_with_lineage(
+            trace(&[(5_000, 2_000), (6_000, 2_000)]),
+            0,
+            100,
+            vec![1],
+            strict,
+            false,
+            first_source,
+        );
+        assert!(
+            !board.finish_lineage_drc_transaction(watermark),
+            "a severe contact elsewhere must not authorize this region to worsen"
+        );
+    }
+
+    #[test]
+    fn nested_rollback_keeps_the_outer_lineage_transaction() {
+        let mut board = test_board();
+        let source = board.insert_trace(trace(&[(0, 0), (4_000, 0)]), 0, 100, vec![1], 1);
+        board.insert_trace(trace(&[(0, 250), (4_000, 250)]), 0, 100, vec![2], 1);
+        assert_eq!(check_board(&board).violations.len(), 1);
+
+        // The outer replacement removes the first source trace and must keep
+        // its inherited violation baseline while nested shove/via attempts
+        // speculate and roll back.
+        board.generate_snapshot();
+        let outer = board.begin_lineage_drc_transaction();
+        board.remove_item(source);
+
+        board.generate_snapshot();
+        let inner = board.begin_lineage_drc_transaction();
+        assert!(
+            !board.finish_lineage_drc_transaction(inner + 1),
+            "a stale watermark must not consume the nested context"
+        );
+        board.insert_trace(trace(&[(0, 250), (4_000, 250)]), 0, 100, vec![3], 1);
+        assert!(!board.finish_lineage_drc_transaction(inner));
+        assert!(board.rollback_snapshot());
+
+        // A successful nested helper commits its snapshot into the outer
+        // level; that must preserve the outer baseline just like rollback.
+        board.generate_snapshot();
+        let committed_inner = board.begin_lineage_drc_transaction();
+        assert!(board.finish_lineage_drc_transaction(committed_inner));
+        assert!(board.pop_snapshot());
+
+        // If the inner rollback erased the outer context, this valid
+        // one-for-one replacement would be rejected as an unexplained new
+        // violation. Stable lineage plus the original witness should pass.
+        board.insert_trace_with_lineage(
+            trace(&[(0, 0), (4_000, 0)]),
+            0,
+            100,
+            vec![1],
+            1,
+            false,
+            source,
+        );
+        assert!(board.finish_lineage_drc_transaction(outer));
+        assert!(board.pop_snapshot());
+        assert_eq!(check_board(&board).violations.len(), 1);
+    }
+
+    #[test]
+    fn inner_rollback_discards_outer_capture_contributions() {
+        let mut board = test_board();
+        let source = board.insert_trace(trace(&[(0, 0), (4_000, 0)]), 0, 100, vec![1], 1);
+        board.insert_trace(trace(&[(0, 250), (4_000, 250)]), 0, 100, vec![2], 1);
+
+        board.generate_snapshot();
+        let outer = board.begin_lineage_drc_transaction();
+        board.generate_snapshot();
+        let inner = board.begin_lineage_drc_transaction();
+        // Removing the source records its inherited defect in both active
+        // transactions. The inner attempt then fails for a non-DRC reason.
+        board.remove_item(source);
+        board.discard_lineage_drc_transaction(inner);
+        assert!(board.rollback_snapshot());
+        assert!(board.get_item(source).is_some());
+
+        // A new duplicate with the same lineage/contact must still be rejected.
+        // If the rolled-back inner baseline leaked into the outer transaction,
+        // it would incorrectly authorize this new violation as inherited.
+        board.insert_trace_with_lineage(
+            trace(&[(0, 0), (4_000, 0)]),
+            0,
+            100,
+            vec![1],
+            1,
+            false,
+            source,
+        );
+        assert!(!board.finish_lineage_drc_transaction(outer));
+        assert!(board.rollback_snapshot());
+    }
+
+    #[test]
+    fn inner_commit_keeps_outer_capture_contributions() {
+        let mut board = test_board();
+        let source = board.insert_trace(trace(&[(0, 0), (4_000, 0)]), 0, 100, vec![1], 1);
+        board.insert_trace(trace(&[(0, 250), (4_000, 250)]), 0, 100, vec![2], 1);
+
+        board.generate_snapshot();
+        let outer = board.begin_lineage_drc_transaction();
+        board.generate_snapshot();
+        let inner = board.begin_lineage_drc_transaction();
+        board.remove_item(source);
+        board.insert_trace_with_lineage(
+            trace(&[(0, 0), (4_000, 0)]),
+            0,
+            100,
+            vec![1],
+            1,
+            false,
+            source,
+        );
+        assert!(board.finish_lineage_drc_transaction(inner));
+        assert!(board.pop_snapshot());
+        assert!(
+            board.finish_lineage_drc_transaction(outer),
+            "committed inner observations must remain in the outer baseline"
+        );
+        assert!(board.pop_snapshot());
     }
 
     #[test]

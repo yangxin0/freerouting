@@ -53,6 +53,224 @@ fn cli_routes_a_board_and_writes_a_session() {
     let _ = std::fs::remove_file(&ses);
 }
 
+#[test]
+fn cli_preserves_the_primary_session_when_an_optional_write_fails() {
+    let root = root();
+    let dsn = format!("{root}/{SMALL_FIXTURE}");
+    let out_dir = std::env::temp_dir();
+    let ses = out_dir.join(format!(
+        "fr_cli_primary_survives_{}.ses",
+        std::process::id()
+    ));
+    let missing_dir = out_dir.join(format!("fr_cli_missing_optional_{}", std::process::id()));
+    let report = missing_dir.join("report.json");
+    let _ = std::fs::remove_file(&ses);
+    let _ = std::fs::remove_dir_all(&missing_dir);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_freerouting"))
+        .args([
+            "-de",
+            &dsn,
+            "-do",
+            ses.to_str().unwrap(),
+            "-mp",
+            "1",
+            "-tl",
+            "0",
+            "--drc-report",
+            report.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run freerouting binary");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "the optional write failure must be reported: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let session = std::fs::read_to_string(&ses)
+        .expect("the mandatory session must survive an optional write failure");
+    assert!(session.contains("(session") && session.contains("(network_out"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot write"),
+        "optional failure diagnostic missing"
+    );
+    let _ = std::fs::remove_file(&ses);
+}
+
+#[test]
+fn cli_angle_override_keeps_the_static_dsn_source_exportable() {
+    let root = root();
+    let dsn = format!("{root}/{SMALL_FIXTURE}");
+    let out_dir = std::env::temp_dir();
+    let suffix = std::process::id();
+    let ses = out_dir.join(format!("fr_cli_angle_{suffix}.ses"));
+    let routed_dsn = out_dir.join(format!("fr_cli_angle_{suffix}.dsn"));
+    let _ = std::fs::remove_file(&ses);
+    let _ = std::fs::remove_file(&routed_dsn);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_freerouting"))
+        .args([
+            "-de",
+            &dsn,
+            "-do",
+            ses.to_str().unwrap(),
+            "-mp",
+            "1",
+            "-tl",
+            "0",
+            "--angle",
+            "90",
+            "--export-dsn",
+            routed_dsn.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run freerouting binary");
+
+    assert_ne!(
+        output.status.code(),
+        Some(1),
+        "angle-only DSN export must not trip stale-source validation: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(ses.exists(), "mandatory session missing");
+    let design = std::fs::read_to_string(&routed_dsn).expect("routed DSN missing");
+    assert!(design.contains("(pcb") && design.contains("(wiring"));
+    let _ = std::fs::remove_file(&ses);
+    let _ = std::fs::remove_file(&routed_dsn);
+}
+
+#[test]
+fn cli_angle_override_with_a_noop_sidecar_keeps_dsn_exportable() {
+    let root = root();
+    let dsn = format!("{root}/{SMALL_FIXTURE}");
+    let out_dir = std::env::temp_dir();
+    let suffix = std::process::id();
+    let ses = out_dir.join(format!("fr_cli_noop_rules_angle_{suffix}.ses"));
+    let routed_dsn = out_dir.join(format!("fr_cli_noop_rules_angle_{suffix}.dsn"));
+    let rules = out_dir.join(format!("fr_cli_noop_rules_angle_{suffix}.rules"));
+    let _ = std::fs::remove_file(&ses);
+    let _ = std::fs::remove_file(&routed_dsn);
+    std::fs::write(&rules, "(rules PCB noop)").expect("write no-op sidecar");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_freerouting"))
+        .args([
+            "-de",
+            &dsn,
+            "-do",
+            ses.to_str().unwrap(),
+            "-mp",
+            "1",
+            "-tl",
+            "0",
+            "--angle",
+            "90",
+            "--rules",
+            rules.to_str().unwrap(),
+            "--export-dsn",
+            routed_dsn.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run freerouting binary");
+
+    assert_ne!(
+        output.status.code(),
+        Some(1),
+        "a no-op sidecar must not make a route-only angle export stale: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(ses.exists(), "mandatory session missing");
+    let design = std::fs::read_to_string(&routed_dsn).expect("routed DSN missing");
+    assert!(design.contains("(pcb") && design.contains("(wiring"));
+    let _ = std::fs::remove_file(&ses);
+    let _ = std::fs::remove_file(&routed_dsn);
+    let _ = std::fs::remove_file(&rules);
+}
+
+#[test]
+fn cli_sidecar_rule_changes_fail_dsn_preflight_but_keep_the_session() {
+    let root = root();
+    let dsn = format!("{root}/{SMALL_FIXTURE}");
+    let out_dir = std::env::temp_dir();
+    let suffix = std::process::id();
+    let ses = out_dir.join(format!("fr_cli_rules_{suffix}.ses"));
+    let routed_dsn = out_dir.join(format!("fr_cli_rules_{suffix}.dsn"));
+    let rules = out_dir.join(format!("fr_cli_rules_{suffix}.rules"));
+    let _ = std::fs::remove_file(&ses);
+    let _ = std::fs::remove_file(&routed_dsn);
+    std::fs::write(
+        &rules,
+        "(rules PCB regression (rule (width 999) (clearance 999)))",
+    )
+    .expect("write sidecar");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_freerouting"))
+        .args([
+            "-de",
+            &dsn,
+            "-do",
+            ses.to_str().unwrap(),
+            "-mp",
+            "1",
+            "-tl",
+            "0",
+            "--rules",
+            rules.to_str().unwrap(),
+            "--export-dsn",
+            routed_dsn.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run freerouting binary");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(ses.exists(), "mandatory session missing");
+    assert!(
+        !routed_dsn.exists(),
+        "stale static rule scopes must not be blessed into a DSN"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("incompatible with the current static design state")
+            && stderr.contains("required SES result can still be written"),
+        "missing early stale-source diagnostic: {stderr}"
+    );
+    let _ = std::fs::remove_file(&ses);
+    let _ = std::fs::remove_file(&rules);
+}
+
+#[test]
+fn cli_rejects_conflicting_primary_and_optional_output_paths_before_routing() {
+    let root = root();
+    let dsn = format!("{root}/{SMALL_FIXTURE}");
+    let output_path =
+        std::env::temp_dir().join(format!("fr_cli_conflicting_output_{}", std::process::id()));
+    let _ = std::fs::remove_file(&output_path);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_freerouting"))
+        .args([
+            "-de",
+            &dsn,
+            "-do",
+            output_path.to_str().unwrap(),
+            "--export-dsn",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run freerouting binary");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        !output_path.exists(),
+        "a conflicting secondary artifact must not overwrite the SES"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refer to the same output path"));
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("imported"),
+        "path conflicts must be rejected before import/routing"
+    );
+}
+
 /// Strict connectivity oracle approximating what a Java SES/DRC reload checks:
 /// two connection points are joined ONLY when a wire endpoint sits exactly on
 /// each. Union-find keyed by exact (x, y, layer): a trace unions its two
@@ -352,7 +570,18 @@ fn ses_import_reconnects_a_routed_net() {
 
     // an unknown net scope must be skipped (reported), never imported as
     // netless copper that violates against every real net
-    let renamed = ses.replacen("(net \"", "(net \"UNKNOWN-", 1);
+    // Ordinary Specctra identifiers are emitted bare; quoted identifiers are
+    // also legal. Insert the prefix after the opening quote when present so
+    // this regression protects the import contract rather than a formatting
+    // choice.
+    let net_name_start = ses
+        .find("(net ")
+        .expect("fixture session should contain a net scope")
+        + "(net ".len();
+    let quoted_name = matches!(ses.as_bytes().get(net_name_start), Some(b'"' | b'\''));
+    let insert_at = net_name_start + if quoted_name { 1 } else { 0 };
+    let mut renamed = ses.clone();
+    renamed.insert_str(insert_at, "UNKNOWN-");
     assert_ne!(renamed, ses, "fixture session should contain a net scope");
     let mut fresh2 = import_dsn(&content).expect("import failed");
     let summary2 = import_ses(&mut fresh2, &renamed).expect("SES import failed");

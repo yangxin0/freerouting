@@ -94,8 +94,8 @@ pub(crate) fn insert_forced_via_with_escape(
     if shapes.is_empty() {
         return None;
     }
-    let watermark = board.next_item_id();
     board.generate_snapshot();
+    let watermark = board.begin_lineage_drc_transaction();
     for (shape, layer) in &shapes {
         let max_cl = board.rules.clearance_matrix.max_value(*layer).max(0) as f64;
         let corridor = shape.offset(max_cl + 1.0);
@@ -103,6 +103,7 @@ pub(crate) fn insert_forced_via_with_escape(
             if crate::debug::shove() {
                 eprintln!("FORCED VIA shove failed at {location:?} layer {layer}");
             }
+            board.discard_lineage_drc_transaction(watermark);
             board.rollback_snapshot();
             return None;
         }
@@ -120,6 +121,7 @@ pub(crate) fn insert_forced_via_with_escape(
             if crate::debug::shove() {
                 eprintln!("FORCED VIA blocked at {location:?} layer {layer}");
             }
+            board.discard_lineage_drc_transaction(watermark);
             board.rollback_snapshot();
             return None;
         }
@@ -145,11 +147,7 @@ pub(crate) fn insert_forced_via_with_escape(
     // Validate the entire transaction.  Shoving may have inserted foreign
     // substitute traces; checking only the via lets an invalid substitute
     // escape into the committed board.
-    if !board
-        .item_ids_since(watermark)
-        .into_iter()
-        .all(|new_id| crate::drc::item_is_clear(board, new_id))
-    {
+    if !board.finish_lineage_drc_transaction(watermark) {
         if crate::debug::shove() {
             eprintln!("FORCED VIA violates drill clearance at {location:?}");
         }

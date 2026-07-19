@@ -95,7 +95,8 @@ pub fn fanout_pin(board: &mut BasicBoard, pin_id: ItemId, request: &BatchRequest
         deadline: request.deadline,
         is_fanout: true,
     };
-    let mut engine = crate::autoroute::engine::AutorouteEngine::new_with_clearance(
+    let mut engine = crate::autoroute::engine::AutorouteEngine::new_with_clearance_synced(
+        board,
         net_no,
         false,
         clearance_class,

@@ -49,7 +49,7 @@ impl fmt::Display for DsnWriteError {
             }
             Self::UnrepresentableIdentifier { kind, value } => write!(
                 f,
-                "the {kind} identifier {value:?} contains both Specctra quote delimiters"
+                "the {kind} identifier {value:?} contains the declared Specctra quote delimiter"
             ),
         }
     }
@@ -57,37 +57,121 @@ impl fmt::Display for DsnWriteError {
 
 impl std::error::Error for DsnWriteError {}
 
-/// Specctra has no escape production inside quoted atoms. Prefer the usual
-/// double quote, fall back to a single quote, and reject a value containing
-/// both delimiters instead of emitting a document that the reader cannot
-/// parse back to the same name.
-fn dsn_quoted(value: &str, kind: &'static str) -> Result<String, DsnWriteError> {
-    let quote = if !value.contains('"') {
-        '"'
-    } else if !value.contains('\'') {
-        '\''
-    } else {
+/// Specctra has no escape production inside quoted atoms.  Use the delimiter
+/// declared by the retained source parser; silently switching to the other
+/// quote would make KiCad/Java lex it as an ordinary character.
+fn dsn_quoted(value: &str, kind: &'static str, quote: char) -> Result<String, DsnWriteError> {
+    if value.contains(quote)
+        || value
+            .chars()
+            .any(|character| matches!(character, '\r' | '\n' | '\0'))
+    {
         return Err(DsnWriteError::UnrepresentableIdentifier {
             kind,
             value: value.to_string(),
         });
-    };
+    }
     Ok(format!("{quote}{value}{quote}"))
+}
+
+/// NAME/LAYER_NAME scanner states permit quote characters after the first
+/// character of a bare identifier. This matters when the identifier itself
+/// contains the document's active delimiter: quoting it is impossible, but a
+/// token such as `O'Net` is still losslessly representable in a single-quote
+/// document. Keep this predicate deliberately narrower than the full legacy
+/// ANSI grammar and fall back to quoted output for everything else.
+fn is_safe_bare_name(value: &str, quote: char) -> bool {
+    let mut chars = value.char_indices();
+    let Some((_, first)) = chars.next() else {
+        return false;
+    };
+    let ordinary = |character: char| {
+        character.is_ascii_alphanumeric()
+            || matches!(
+                character,
+                '_' | '.'
+                    | '/'
+                    | '\\'
+                    | ':'
+                    | '#'
+                    | '$'
+                    | '&'
+                    | '>'
+                    | '<'
+                    | ','
+                    | ';'
+                    | '='
+                    | '@'
+                    | '['
+                    | ']'
+                    | '~'
+                    | '*'
+                    | '?'
+                    | '!'
+                    | '%'
+                    | '^'
+                    | '-'
+                    | '+'
+            )
+    };
+    if !ordinary(first) || (quote == '$' && first == '$') {
+        return false;
+    }
+    if !chars.all(|(_, character)| ordinary(character) || matches!(character, '\'' | '"')) {
+        return false;
+    }
+
+    // The Rust parser separates a quote after `_`/`-` when it forms the
+    // quoted half of a composite clearance type. Avoid emitting that
+    // ambiguous spelling for an ordinary identifier.
+    let bytes = value.as_bytes();
+    for index in 1..bytes.len() {
+        let delimiter = bytes[index];
+        if (matches!(delimiter, b'\'' | b'"') || (quote == '$' && delimiter == b'$'))
+            && matches!(bytes[index - 1], b'_' | b'-')
+            && bytes[index + 1..].contains(&delimiter)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Prefer the writer's established quoted spelling, but use a legal bare
+/// NAME token when the active delimiter occurs inside the identifier.
+fn dsn_name(value: &str, kind: &'static str, quote: char) -> Result<String, DsnWriteError> {
+    if value.contains(quote) && is_safe_bare_name(value, quote) {
+        Ok(value.to_string())
+    } else {
+        dsn_quoted(value, kind, quote)
+    }
 }
 
 /// Returns an unquoted token for ordinary DSN names and quotes names that
 /// contain scanner delimiters. This keeps the common output compatible with
 /// existing tools while making unusual layer names lossless.
-fn dsn_atom(value: &str, kind: &'static str) -> Result<String, DsnWriteError> {
-    if !value.is_empty()
+fn dsn_atom(value: &str, kind: &'static str, quote: char) -> Result<String, DsnWriteError> {
+    let ordinary_atom = !value.is_empty()
         && value.chars().all(|ch| {
-            !ch.is_whitespace() && !matches!(ch, '(' | ')' | '"' | '\'' | '#' | ';' | '\\')
-        })
-    {
+            !ch.is_whitespace() && !matches!(ch, '(' | ')' | '"' | '\'' | '$' | '#' | ';' | '\\')
+        });
+    if ordinary_atom || (value.contains(quote) && is_safe_bare_name(value, quote)) {
         Ok(value.to_string())
     } else {
-        dsn_quoted(value, kind)
+        dsn_quoted(value, kind, quote)
     }
+}
+
+fn source_quote_delimiter(source: &str) -> char {
+    let Ok(root) = crate::io::dsn::parse_dsn(source) else {
+        return '"';
+    };
+    root.child("parser")
+        .and_then(|parser| parser.child("string_quote"))
+        .and_then(|quote| quote.arg())
+        .and_then(|value| value.chars().next())
+        .filter(|quote| matches!(quote, '\'' | '"' | '$'))
+        .unwrap_or('"')
 }
 
 /// Serializes the board as a Specctra design file. Requires the board to
@@ -98,6 +182,7 @@ pub fn export_dsn(board: &BasicBoard) -> Result<String, DsnWriteError> {
         .dsn_source
         .as_ref()
         .ok_or(DsnWriteError::MissingSource)?;
+    let quote = source_quote_delimiter(source);
     let (root_close, _) = crate::io::dsn::document_structure(source, "wiring")
         .map_err(|_| DsnWriteError::MalformedSource)?;
     if let Some(reason) = board.dsn_source_staleness() {
@@ -142,10 +227,21 @@ pub fn export_dsn(board: &BasicBoard) -> Result<String, DsnWriteError> {
         if item.base.component_no != 0 {
             continue;
         }
-        if via.is_escape_via || via.escape_smd_layer.is_some() {
+        // DSN wiring has no escape marker. The importer reconstructs the
+        // narrow same-net SMD exemption from the via rule and the physical
+        // pin overlap, so only canonical, derivable metadata is representable.
+        let derived_escape_layer = item
+            .base
+            .net_nos
+            .first()
+            .filter(|_| !via.attach_allowed)
+            .and_then(|&net_no| board.pure_smd_escape_layer(net_no, via.padstack, via.center));
+        if via.is_escape_via != derived_escape_layer.is_some()
+            || via.escape_smd_layer != derived_escape_layer
+        {
             return Err(DsnWriteError::UnrepresentableRouteItem {
                 item_id: *item_id,
-                reason: "DSN wiring cannot preserve escape-via metadata",
+                reason: "DSN wiring cannot reconstruct noncanonical escape-via metadata",
             });
         }
         // A wiring via has no attach attribute.  Check the exact value that
@@ -238,7 +334,7 @@ pub fn export_dsn(board: &BasicBoard) -> Result<String, DsnWriteError> {
             })?;
         Ok(format!(
             "\n      (clearance_class {})",
-            dsn_quoted(name, "clearance class")?
+            dsn_name(name, "clearance class", quote)?
         ))
     };
     for (item_id, item) in board.items() {
@@ -258,7 +354,7 @@ pub fn export_dsn(board: &BasicBoard) -> Result<String, DsnWriteError> {
                 )?;
                 format!(
                     "\n      (net {} {})",
-                    dsn_quoted(&net.name, "net")?,
+                    dsn_name(&net.name, "net", quote)?,
                     net.subnet_number
                 )
             }
@@ -280,7 +376,7 @@ pub fn export_dsn(board: &BasicBoard) -> Result<String, DsnWriteError> {
                         number: t.layer as i64,
                     })?
                     .name;
-                let layer_token = dsn_atom(layer_name, "layer")?;
+                let layer_token = dsn_atom(layer_name, "layer", quote)?;
                 wiring.push_str(&format!(
                     "    (wire\n      (path {} {}",
                     layer_token,
@@ -306,7 +402,7 @@ pub fn export_dsn(board: &BasicBoard) -> Result<String, DsnWriteError> {
                         number: v.padstack as i64,
                     },
                 )?;
-                let padstack_token = dsn_quoted(&padstack.name, "padstack")?;
+                let padstack_token = dsn_name(&padstack.name, "padstack", quote)?;
                 wiring.push_str(&format!(
                     "    (via {} {} {}{net_line}{}{}\n    )\n",
                     padstack_token,
@@ -441,6 +537,143 @@ mod tests {
     }
 
     #[test]
+    fn preserves_a_single_quote_source_delimiter_for_names_with_double_quotes() {
+        // Specctra permits either quote delimiter in the parser declaration.
+        // The retained source is the authority for newly emitted wiring: a
+        // double-quoted token would be lexed as ordinary data by a consumer
+        // whose document declares `'`.  The net name intentionally contains
+        // the *other* quote to prove that we do not switch delimiters or
+        // reject a representable identifier.
+        let source = r#"(pcb 'mini"dsn'
+  (parser (string_quote '))
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb -1000 -1000 50000 50000))
+    (rule (width 200) (clearance 200))
+  )
+  (placement)
+  (library
+    (padstack 'Via[0-1]_600:300_um'
+      (shape (circle F.Cu 600 0 0))
+      (shape (circle B.Cu 600 0 0))
+      (attach off)
+    )
+  )
+  (network
+    (net 'N"1')
+  )
+)"#;
+        let mut board = import_dsn(source).expect("single-quote DSN import");
+        board.insert_trace(
+            crate::geometry::planar::Polyline::from_int_points(&[
+                crate::geometry::planar::IntPoint::new(1000, 1000),
+                crate::geometry::planar::IntPoint::new(9000, 1000),
+            ]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        let exported = export_dsn(&board).expect("single-quote DSN export");
+        assert!(exported.contains("(net 'N\"1' 1)"));
+        let reloaded = import_dsn(&exported).expect("single-quote DSN re-import");
+        assert_eq!(reloaded.rules.nets.get_by_no(1).unwrap().name, "N\"1");
+        assert_eq!(
+            reloaded
+                .items()
+                .filter(|(_, item)| matches!(item.kind, ItemKind::PolylineTrace(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn preserves_an_active_quote_inside_a_bare_identifier() {
+        let source = r#"(pcb 'mini'
+  (parser (string_quote '))
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb -1000 -1000 50000 50000))
+    (rule (width 200) (clearance 200))
+  )
+  (placement)
+  (library
+    (padstack 'Via[0-1]_600:300_um'
+      (shape (circle F.Cu 600 0 0))
+      (shape (circle B.Cu 600 0 0))
+      (attach off)
+    )
+  )
+  (network
+    (net O'Net)
+  )
+)"#;
+        let mut board = import_dsn(source).expect("single-quote DSN import");
+        board.insert_trace(
+            crate::geometry::planar::Polyline::from_int_points(&[
+                crate::geometry::planar::IntPoint::new(1000, 1000),
+                crate::geometry::planar::IntPoint::new(9000, 1000),
+            ]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+
+        let exported = export_dsn(&board).expect("bare active-quote identifier export");
+        assert!(exported.contains("(net O'Net 1)"));
+        let reloaded = import_dsn(&exported).expect("bare active-quote DSN re-import");
+        assert_eq!(reloaded.rules.nets.get_by_no(1).unwrap().name, "O'Net");
+    }
+
+    #[test]
+    fn preserves_a_dollar_source_delimiter() {
+        let source = r#"(pcb mini
+  (parser (string_quote $) (space_in_quoted_tokens on))
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb -1000 -1000 50000 50000))
+    (rule (width 200) (clearance 200))
+  )
+  (placement)
+  (library
+    (padstack $Via[0-1]_600:300_um$
+      (shape (circle F.Cu 600 0 0))
+      (shape (circle B.Cu 600 0 0))
+      (attach off)
+    )
+  )
+  (network
+    (net $N 'quoted"$)
+  )
+)"#;
+        let mut board = import_dsn(source).expect("dollar-quote DSN import");
+        board.insert_trace(
+            crate::geometry::planar::Polyline::from_int_points(&[
+                crate::geometry::planar::IntPoint::new(1000, 1000),
+                crate::geometry::planar::IntPoint::new(9000, 1000),
+            ]),
+            0,
+            100,
+            vec![1],
+            1,
+        );
+        let exported = export_dsn(&board).expect("dollar-quote DSN export");
+        assert!(exported.contains("(net $N 'quoted\"$ 1)"));
+        let reloaded = import_dsn(&exported).expect("dollar-quote DSN re-import");
+        assert_eq!(
+            reloaded.rules.nets.get_by_no(1).unwrap().name,
+            "N 'quoted\""
+        );
+    }
+
+    #[test]
     fn wiring_exports_only_explicit_clearance_overrides() {
         let mut board = import_dsn(MINI_DSN).expect("import");
         let inherited = board.insert_trace(
@@ -558,6 +791,75 @@ mod tests {
             false,
         );
         assert!(export_dsn(&board).is_ok());
+    }
+
+    #[test]
+    fn canonical_escape_via_round_trips_as_derived_metadata() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let source = std::fs::read_to_string(format!("{root}/fixtures/SMD-routing-issue-demo.dsn"))
+            .expect("SMD fixture");
+        let mut board = import_dsn(&source).expect("SMD fixture import");
+        let last_layer = board.layer_structure.layer_count() - 1;
+        let candidate = board.items().find_map(|(_, item)| {
+            let ItemKind::Via(pin) = &item.kind else {
+                return None;
+            };
+            if item.base.component_no == 0
+                || board
+                    .padstacks
+                    .get_by_no(pin.padstack)
+                    .is_none_or(|padstack| padstack.from_layer() != padstack.to_layer())
+            {
+                return None;
+            }
+            let net_no = *item.base.net_nos.first()?;
+            (1..=board.padstacks.count()).find_map(|via_padstack| {
+                let padstack = board.padstacks.get_by_no(via_padstack)?;
+                if padstack.from_layer() != 0 || padstack.to_layer() < last_layer {
+                    return None;
+                }
+                let layer = board.pure_smd_escape_layer(net_no, via_padstack, pin.center)?;
+                Some((net_no, via_padstack, pin.center, layer))
+            })
+        });
+        let (net_no, via_padstack, center, escape_layer) =
+            candidate.expect("fixture must contain a pure-SMD escape site");
+        let clearance_class = match board
+            .rules
+            .via_clearance_class_for_padstack(net_no, via_padstack)
+        {
+            Some(0) => board.rules.get_trace_clearance_class(net_no),
+            Some(class) => class,
+            None => board
+                .rules
+                .item_clearance_class_for(net_no, crate::rules::ItemClass::Via),
+        };
+        board.insert_escape_via(
+            via_padstack,
+            center,
+            vec![net_no],
+            clearance_class,
+            false,
+            escape_layer,
+        );
+
+        let text = export_dsn(&board).expect("canonical escape via export");
+        let reloaded = import_dsn(&text).expect("canonical escape via re-import");
+        let reloaded_via = reloaded
+            .items()
+            .find_map(|(_, item)| match &item.kind {
+                ItemKind::Via(via)
+                    if item.base.component_no == 0
+                        && via.center == center
+                        && via.padstack == via_padstack =>
+                {
+                    Some(via)
+                }
+                _ => None,
+            })
+            .expect("reloaded routing via");
+        assert!(reloaded_via.is_escape_via);
+        assert_eq!(reloaded_via.escape_smd_layer, Some(escape_layer));
     }
 
     #[test]

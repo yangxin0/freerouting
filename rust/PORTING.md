@@ -26,25 +26,37 @@ The imported outline's strip width is a scalar geometry compensation against
 the default area class; final outline/item pair checks still use the canonical
 lower-ID/higher-ID matrix cell. This intentional outline policy is distinct
 from runtime clearance evaluation.
-DSN, SES, and KiCad interchange paths preserve units, outlines, netless copper
-where the schema permits it, item classes, and explicit-vs-inherited state.
+DSN and KiCad interchange preserve units, outlines, netless copper, item
+classes, and explicit-vs-inherited state where their schemas or the versioned
+Freerouting extension can encode them. SES is a routing overlay interpreted
+together with its retained base DSN rather than a standalone board snapshot.
 Logical DSN terminals retain separate component/pin identities and remain
 owned by their exact subnet even when their placement geometry is unavailable.
 The router may connect the physical copper that exists, but completion,
 scoring, API gates, and checked cross-format export retain the unresolved
 obligation instead of turning it into a vacuous success.
 Where a format has no representation, its checked writer fails closed instead
-of silently dropping state: SES omits SystemFixed copper already present in
-the base DSN and rejects explicit/incompatible clearance, attach, escape, or
-subnet metadata; KiCad carries a versioned extension for Freerouting-only
-state; and DSN refuses to splice wiring into a retained source after any
-non-wiring semantic mutation. KiCad also carries item fixed-state and obstacle
-names, while malformed legacy outline polygons are normalized on import.
+of silently dropping state. SES omits SystemFixed copper already present in
+the base DSN. For every other emitted route item, that base remains the
+reconstruction authority, and the writer proves that clearance, attach, and
+escape state can be derived identically on reload. Standard
+`net_number` remains translator metadata, not a subnet selector; the namespaced
+`freerouting_subnet` child preserves Freerouting's repeated-name subnets in
+both the Java and Rust readers. DSN refuses to splice wiring into a retained
+source after any non-wiring semantic mutation. KiCad carries a
+versioned extension for Freerouting-only state, including item fixed-state and
+obstacle names, while malformed legacy outline polygons are normalized on
+import. Optional artifact failures do not discard the mandatory SES: the CLI
+commits SES atomically before attempting secondary exports and reports their
+failures afterward.
 KiCad JSON carries a versioned Freerouting routing-metadata extension for
 per-layer widths, active layers, item clearance bindings, and class flags;
-legacy scalar JSON remains readable. CLI and API/MCP validation, routing
-budgets, and exit status are covered across integration and protocol-boundary
-tests.
+legacy scalar JSON remains readable. The KiCad plugin's manual application
+fallback maps document layer ids (including conventional `B.Cu = 31` and
+legacy dense ordinals) back to the running board by declared layer name, so it
+does not assume a binding-specific enum value. CLI and API/MCP validation,
+routing budgets, and exit status are covered across integration and
+protocol-boundary tests.
 
 The common invariant boundary is `board::validate_board_references`: every
 checked writer runs format-specific representability checks and then this
@@ -53,13 +65,15 @@ test deliberately corrupts the `.rules` reload target before applying the
 sidecar and compares normalized DSN, rules, SES, and KiCad state, so a test
 cannot pass merely because the destination already contained the source rules.
 The fixture sweep is intentionally explicit about malformed input: five
-legacy DSNs define conflicting padstacks under one name, Issue179 contains an
-empty network-class declaration, and Issue721 is truncated; all are rejected
-rather than guessed or silently skipped.
+legacy DSNs define conflicting padstacks under one name and Issue179 contains
+an empty network-class declaration; those are rejected rather than guessed or
+silently skipped. Issue721 is a valid regression fixture (including `#`-prefixed
+net names) and is required to import successfully.
 
 Verification on this tree:
 
-- `cargo test --all-targets --no-fail-fast`: 403 passed, 0 failed, 0 ignored
+- `cargo test --all-targets --no-fail-fast`: 451 passed, 0 failed, 0 ignored
+  (430 library, 7 CLI unit, 11 CLI/DRC, and 3 cross-format/fixture tests)
 - `cargo fmt --all -- --check`: clean
 - `cargo clippy --all-targets -- -D warnings`: clean
 
@@ -67,20 +81,21 @@ Remaining differences within this audited contract-consolidation scope are
 deliberate model/performance boundaries: the tile
 router retains the documented occupy-on-push maze tradeoff; the cost model
 still represents trace width as one scalar per layer and does not yet model
-all directional `layer_rule` costs; and the compact board model cannot
-represent every native KiCad component transform/pad taxonomy or multiple
-outline contours. These are separate model phases, not unverified claims
-about the audited contracts.
+all directional `layer_rule` costs; the compact board model cannot represent
+every native KiCad component transform/pad taxonomy or multiple outline
+contours; and the append-only change log and room/grid tombstones remain
+available for a separate compaction/performance phase. These are separate
+model/performance phases, not unverified claims about the audited contracts.
 
 The final format-hardening pass added focused regression coverage for these
 boundaries: KiCad board-level routing switches and fixed-state/name metadata
-round-trip through the checked writer; SES rejects route items whose class or
-via metadata would be reconstructed differently (while retaining ordinary
-component-pin vias); and DSN records a typed non-wiring import baseline and
+round-trip through the checked writer; SES rejects every emitted route item
+whose class or via metadata would be reconstructed differently from the base
+DSN (while component-pin vias remain part of that base); and DSN records a
+typed non-wiring import baseline and
 returns `StaleSource` for changed rules, outline, padstack, net, or static-item
-state while still allowing route-only edits. The 403 tests comprise 391
-library tests, three CLI unit tests, six CLI/DRC integration tests, and one
-each for cross-format semantics, replay, and the real-board fixture targets.
+state while still allowing route-only edits. The exact test count is reported
+by the verification commands above rather than maintained separately here.
 
 > **Historical note: see "Second-round audit (2026-07-16)" below.** Its
 > partial-remediation wording predates the contract consolidation above. The

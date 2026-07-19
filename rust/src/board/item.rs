@@ -28,6 +28,11 @@ pub enum FixedState {
 pub struct ItemBase {
     /// Unique id, used for deterministic ordering.
     pub id_no: i32,
+    /// Stable identity of the physical copper this item replaces. Fresh
+    /// items receive their own id; lossless replacements such as trace
+    /// splits and shove cutouts retain the source lineage. Transactional DRC
+    /// uses this instead of the short-lived replacement id.
+    pub lineage_no: i32,
     /// The nets this item belongs to (empty for pure obstacles).
     pub net_nos: Vec<i32>,
     /// Index in the clearance matrix.
@@ -50,6 +55,12 @@ impl ItemBase {
     pub fn new(id_no: i32, net_nos: Vec<i32>, clearance_class: usize) -> Self {
         ItemBase {
             id_no,
+            // The constructor's id is often a caller-owned component or test
+            // label, not the board-assigned item id.  Lineage is assigned by
+            // `BasicBoard::insert_item`; leaving it zero here prevents
+            // imported pins that share a component number from aliasing one
+            // another in transactional DRC keys.
+            lineage_no: 0,
             net_nos,
             clearance_class,
             clearance_class_explicit: false,

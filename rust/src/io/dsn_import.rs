@@ -47,23 +47,36 @@ fn item_class_of(name: &str) -> Option<crate::rules::ItemClass> {
     }
 }
 
-/// Applies one `*_same_net` token to the item-class DRC table.  These tokens
-/// are consumed before composite clearance-pair expansion so they cannot be
-/// interpreted as (or counted alongside) ordinary matrix class pairs.
-fn apply_same_net_type_token(rules: &mut BoardRules, token: &str, value: i32) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpecialClearanceType {
+    SmdToTurnGap,
+    SameNet(crate::rules::ItemClass, crate::rules::ItemClass),
+}
+
+/// Classifies the special clearance tokens once, accepting the underscore and
+/// hyphen spellings used by Specctra writers. Classified tokens are consumed
+/// before ordinary composite-pair expansion.
+fn special_clearance_type(token: &str) -> Option<SpecialClearanceType> {
     let normalized = token.to_ascii_lowercase().replace('-', "_");
-    let Some(base) = normalized.strip_suffix("_same_net") else {
-        return false;
-    };
-    let Some((first, second)) = base.split_once('_') else {
-        return false;
-    };
+    if normalized == "smd_to_turn_gap" {
+        return Some(SpecialClearanceType::SmdToTurnGap);
+    }
+    let base = normalized.strip_suffix("_same_net")?;
+    let (first, second) = base.split_once('_')?;
     let (Some(first_class), Some(second_class)) = (item_class_of(first), item_class_of(second))
     else {
-        return false;
+        return None;
     };
-    rules.set_same_net_clearance(first_class, second_class, value);
-    true
+    Some(SpecialClearanceType::SameNet(first_class, second_class))
+}
+
+fn apply_special_clearance_type(rules: &mut BoardRules, special: SpecialClearanceType, value: i32) {
+    match special {
+        SpecialClearanceType::SmdToTurnGap => rules.set_pin_edge_to_turn_dist(value as f64),
+        SpecialClearanceType::SameNet(first, second) => {
+            rules.set_same_net_clearance(first, second, value);
+        }
+    }
 }
 
 /// Resolves a DSN clearance-class name to a clearance-matrix class index,
@@ -562,11 +575,8 @@ pub(crate) fn apply_rule_scope_clearances_on_layer(
             if *quoted {
                 continue;
             }
-            let lower = kind.to_ascii_lowercase().replace('-', "_");
-            if lower == "smd_to_turn_gap" {
-                rules.set_pin_edge_to_turn_dist(value as f64);
-                applied += 1;
-            } else if apply_same_net_type_token(rules, kind, value) {
+            if let Some(special) = special_clearance_type(kind) {
+                apply_special_clearance_type(rules, special, value);
                 applied += 1;
             }
         }
@@ -602,12 +612,7 @@ fn type_pairs(type_node: &SExpr) -> Vec<(String, String)> {
         .iter()
         .skip(1)
         .filter_map(|t| t.as_atom().map(|s| (s.to_string(), t.is_quoted())))
-        .filter(|(s, quoted)| {
-            *quoted
-                || (!s.eq_ignore_ascii_case("smd_to_turn_gap")
-                    && !s.to_ascii_lowercase().ends_with("_same_net")
-                    && !s.to_ascii_lowercase().ends_with("-same_net"))
-        })
+        .filter(|(s, quoted)| *quoted || special_clearance_type(s).is_none())
         .collect();
     if tokens.len() == 3 && !tokens[1].1 && (tokens[1].0 == "_" || tokens[1].0 == "-") {
         return vec![(tokens[0].0.clone(), tokens[2].0.clone())];
@@ -644,8 +649,19 @@ fn rule_has_smd_to_turn_gap(rule_node: &SExpr) -> bool {
             })
         })
         .filter_map(|child| child.child("type"))
-        .flat_map(|type_node| type_node.args())
-        .any(|name| name.eq_ignore_ascii_case("smd_to_turn_gap"))
+        .any(|type_node| {
+            type_node
+                .as_list()
+                .unwrap_or(&[])
+                .iter()
+                .skip(1)
+                .any(|token| {
+                    !token.is_quoted()
+                        && token.as_atom().is_some_and(|name| {
+                            special_clearance_type(name) == Some(SpecialClearanceType::SmdToTurnGap)
+                        })
+                })
+        })
 }
 
 fn rule_has_clearance_declaration(rule_node: &SExpr) -> bool {
@@ -844,11 +860,9 @@ fn apply_class_rule_scope(
             if *quoted {
                 continue;
             }
-            if name.eq_ignore_ascii_case("smd_to_turn_gap") {
-                rules.set_pin_edge_to_turn_dist(value as f64);
-                gap_seen = true;
-                applied += 1;
-            } else if apply_same_net_type_token(rules, name, value) {
+            if let Some(special) = special_clearance_type(name) {
+                apply_special_clearance_type(rules, special, value);
+                gap_seen |= special == SpecialClearanceType::SmdToTurnGap;
                 applied += 1;
             }
         }
@@ -1249,10 +1263,11 @@ pub(crate) fn apply_class_scope(
 
 /// The fixed state of a `(wire ...)`/`(via ...)` wiring node from its
 /// `(type ...)` attribute, mapped like Java `Wiring.calc_fixed`:
-/// `shove_fixed` → ShoveFixed, `fix` → SystemFixed, `normal` (and absent) →
-/// Unfixed; every other explicit token, including KiCad's `route`, is
-/// UserFixed. This matches Java `Wiring.calc_fixed`; the writer represents a
-/// genuinely unfixed item by omitting `(type ...)`.
+/// `shove_fixed` → ShoveFixed, `fix` → SystemFixed, and `normal` (or an
+/// absent type) → Unfixed. Java treats every other explicit token as
+/// UserFixed, but legacy Rust writers emitted `(type route)` for ordinary
+/// rippable wiring, so that spelling remains Unfixed for round-trip
+/// compatibility. `protect` and unknown explicit spellings remain UserFixed.
 fn wiring_fixed_state(node: &SExpr) -> crate::board::FixedState {
     let Some(t) = node.child("type").and_then(|t| t.arg()) else {
         return crate::board::FixedState::Unfixed;
@@ -1261,7 +1276,7 @@ fn wiring_fixed_state(node: &SExpr) -> crate::board::FixedState {
         crate::board::FixedState::ShoveFixed
     } else if t.eq_ignore_ascii_case("fix") {
         crate::board::FixedState::SystemFixed
-    } else if t.eq_ignore_ascii_case("normal") {
+    } else if t.eq_ignore_ascii_case("normal") || t.eq_ignore_ascii_case("route") {
         crate::board::FixedState::Unfixed
     } else {
         crate::board::FixedState::UserFixed
@@ -1755,15 +1770,18 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
             }
             let mut pins = Vec::new();
             for pin_node in image_node.children("pin") {
-                let mut args = pin_node.args();
-                let padstack_name = args.next().unwrap_or_default().to_string();
                 // optional (rotate ...) etc. are lists, args() skips them;
-                // the remaining atoms are pin name and the two offsets
-                let rest: Vec<&str> = args.collect();
-                if rest.len() < 3 {
-                    continue;
-                }
-                let pin_name = rest[rest.len() - 3].to_string();
+                // the direct grammar is exactly padstack, pin name and two
+                // offsets. Selecting the last three atoms let trailing lexer
+                // garbage silently replace the pin name and coordinates.
+                let args: Vec<&str> = pin_node.args().collect();
+                let [padstack_name, pin_name, raw_dx, raw_dy] = args.as_slice() else {
+                    return Err(err(format!(
+                        "image {name:?} pin needs exactly a padstack, pin name, and x/y offset"
+                    )));
+                };
+                let padstack_name = (*padstack_name).to_string();
+                let pin_name = (*pin_name).to_string();
                 if padstacks.get(&padstack_name).is_none() {
                     return Err(err(format!(
                         "image {name:?} pin {pin_name:?} references unknown padstack {padstack_name:?}"
@@ -1774,8 +1792,18 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                         "image {name:?} declares duplicate pin {pin_name:?}"
                     )));
                 }
-                let dx: f64 = rest[rest.len() - 2].parse().unwrap_or(0.0);
-                let dy: f64 = rest[rest.len() - 1].parse().unwrap_or(0.0);
+                let parse_offset = |raw: &str| {
+                    raw.parse::<f64>()
+                        .ok()
+                        .filter(|value| value.is_finite())
+                        .ok_or_else(|| {
+                            err(format!(
+                                "image {name:?} pin {pin_name:?} has invalid offset {raw:?}"
+                            ))
+                        })
+                };
+                let dx = parse_offset(raw_dx)?;
+                let dy = parse_offset(raw_dy)?;
                 pins.push(ImagePin {
                     padstack_name,
                     pin_name,
@@ -2864,16 +2892,38 @@ fn import_dsn_inner(content: &str) -> Result<BasicBoard, ImportError> {
                             .get_by_no(padstack_no)
                             .is_some_and(|p| p.attach_allowed)
                 });
-            let id = board.insert_via(
-                padstack_no,
-                IntPoint::new(scale(x), scale(y)),
-                net_nos,
-                clearance_class,
-                attach,
-            );
-            if explicit_clearance.is_some() {
-                board.set_item_clearance_class_explicit(id, true);
-            }
+            let center = IntPoint::new(scale(x), scale(y));
+            // Older DSN output has no explicit escape-via marker. Rebuild the
+            // router's narrow pure-SMD provenance from the same canonical
+            // predicate used by maze insertion and interchange readers, or a
+            // routed DSN cannot be exported again without losing semantics.
+            let escape_layer = (!attach)
+                .then(|| match net_nos.as_slice() {
+                    [net_no] => board.pure_smd_escape_layer(*net_no, padstack_no, center),
+                    _ => None,
+                })
+                .flatten();
+            let explicit = explicit_clearance.is_some();
+            let id = if let Some(layer) = escape_layer {
+                board.insert_escape_via_with_provenance(
+                    padstack_no,
+                    center,
+                    net_nos,
+                    clearance_class,
+                    attach,
+                    layer,
+                    explicit,
+                )
+            } else {
+                board.insert_via_with_provenance(
+                    padstack_no,
+                    center,
+                    net_nos,
+                    clearance_class,
+                    attach,
+                    explicit,
+                )
+            };
             board.set_fixed_state(id, fixed_state);
         }
     }
@@ -3306,6 +3356,58 @@ mod tests {
     }
 
     #[test]
+    fn image_pin_hash_names_and_trailing_comments_do_not_shift_geometry() {
+        let dsn = r#"(pcb "pin-hash.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (boundary (rect pcb 0 0 10000 10000))
+    (rule (width 20) (clearance 20)))
+  (placement (component FP (place U1 1000 1000 front 0)))
+  (library
+    (image FP
+      (pin Pad P 100 200 # trailing pin comment
+      )
+      (pin Pad (rotate 90) #PIN 300 400))
+    (padstack Pad (shape (rect F.Cu -50 -50 50 50)) (attach off)))
+  (network
+    (net N1 (pins U1-P))
+    (net N2 (pins U1-#PIN))))"#;
+        let board = import_dsn(dsn).expect("positional pin lexer state must import");
+        let n1 = board.rules.nets.get("N1", 1).unwrap().net_number;
+        let n2 = board.rules.nets.get("N2", 1).unwrap().net_number;
+        let mut pins: Vec<_> = board
+            .items()
+            .filter_map(|(_, item)| match &item.kind {
+                crate::board::ItemKind::Via(via) if item.base.component_no != 0 => {
+                    Some((via.center, item.base.net_nos.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        pins.sort_by_key(|(center, _)| (center.x, center.y));
+        assert_eq!(
+            pins,
+            vec![
+                (IntPoint::new(11_000, 12_000), vec![n1]),
+                (IntPoint::new(13_000, 14_000), vec![n2]),
+            ]
+        );
+
+        for pin in [
+            "(pin Pad P 0 0 unexpected)",
+            "(pin Pad P NaN 0)",
+            "(pin Pad P 0 inf)",
+        ] {
+            let malformed = dsn.replace("(pin Pad P 100 200 # trailing pin comment\n      )", pin);
+            assert!(
+                import_dsn(&malformed).is_err(),
+                "malformed pin was accepted: {pin}"
+            );
+        }
+    }
+
+    #[test]
     fn malformed_known_numeric_scopes_fail_instead_of_defaulting_or_skipping() {
         for (dsn, expected) in [
             (
@@ -3507,10 +3609,47 @@ mod tests {
     }
 
     #[test]
+    fn accepts_name_only_unplaced_components() {
+        let dsn = r#"(pcb "unplaced.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (rule (width 200) (clearance 200)))
+  (placement (component "FP" (place U1)))
+  (library
+    (image "FP" (pin "Pad" 1 0 0))
+    (padstack "Pad" (shape (circle F.Cu 1000 0 0))))
+  (network (net "N1" (pins U1-1)))
+)"#;
+        let board = import_dsn(dsn).expect("name-only placement must import");
+        assert!(!board.rules.nets.get_by_name("N1").is_empty());
+        assert_eq!(
+            board
+                .items()
+                .filter(|(_, item)| item.base.component_no != 0)
+                .count(),
+            0,
+            "an unplaced component has no physical pin geometry"
+        );
+    }
+
+    #[test]
+    fn imports_issue721_hash_prefixed_nets() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let path = format!("{root}/fixtures/Issue721-Autorouter_CE2632_HarryMu_2026-6-15.dsn");
+        let content = std::fs::read_to_string(path).expect("fixture missing from checkout");
+        let board = import_dsn(&content).expect("Issue721 must import");
+        assert!(!board.rules.nets.get_by_name("#WLRXD").is_empty());
+        assert!(!board.rules.nets.get_by_name("#WLTXD").is_empty());
+        crate::board::validation::validate_board_references(&board)
+            .expect("Issue721 import must satisfy board invariants");
+    }
+
+    #[test]
     fn wiring_fixed_states_round_trip_through_export() {
-        // (type shove_fixed) / (type fix) / (type protect) map to their
-        // fixed states on import (Java Wiring.calc_fixed) and are written
-        // back by the exporter, surviving the round trip
+        // Fixed/protected spellings retain their states, while the legacy
+        // Rust writer's `(type route)` remains ordinary rippable wiring.
         let dsn = r#"(pcb "fs.dsn"
   (resolution um 10)
   (structure
@@ -3542,7 +3681,7 @@ mod tests {
         use crate::board::FixedState::*;
         assert_eq!(
             states(&board),
-            vec![Unfixed, ShoveFixed, UserFixed, UserFixed, SystemFixed]
+            vec![Unfixed, Unfixed, ShoveFixed, UserFixed, SystemFixed]
         );
         let out = crate::io::dsn_export::export_dsn(&board).expect("export");
         let board2 = import_dsn(&out).expect("re-import");
@@ -4411,6 +4550,38 @@ mod tests {
                 .is_none(),
             "special same-net token must not create a matrix class"
         );
+    }
+
+    #[test]
+    fn hyphenated_special_clearance_types_do_not_create_phantom_classes() {
+        use crate::rules::ItemClass;
+        let dsn = r#"(pcb "hyphen-special-types.dsn"
+  (resolution um 10)
+  (structure
+    (layer F.Cu (type signal))
+    (layer B.Cu (type signal))
+    (boundary (rect pcb 0 0 100000 100000))
+    (rule
+      (width 200)
+      (clearance 200)
+      (clearance 70 (type via-via-same-net))
+      (clearance 80 (type smd-to-turn-gap)))
+  )
+  (placement)
+  (library)
+  (network (net "N1"))
+)"#;
+        let board = import_dsn(dsn).expect("import");
+        assert_eq!(
+            board
+                .rules
+                .get_same_net_clearance(ItemClass::Via, ItemClass::Via),
+            Some(700)
+        );
+        assert_eq!(board.rules.get_pin_edge_to_turn_dist(), 800.0);
+        let matrix = &board.rules.clearance_matrix;
+        assert!(matrix.get_no("via-same-net").is_none());
+        assert!(matrix.get_no("to-turn-gap").is_none());
     }
 
     #[test]

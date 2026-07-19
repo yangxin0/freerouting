@@ -998,17 +998,11 @@ mod tests {
         // interchange input, so the importer must reject it rather than
         // inventing a class name or silently applying its rules to `default`.
         expected.insert("Issue179-Autorouter_PCB1_2023-3-24.dsn");
-        expected.insert("Issue721-Autorouter_CE2632_HarryMu_2026-6-15.dsn");
         let actual: std::collections::BTreeSet<_> =
             import_errors.keys().map(String::as_str).collect();
         assert_eq!(
             actual, expected,
             "fixture imports failed unexpectedly: {import_errors:#?}"
-        );
-        assert!(
-            import_errors["Issue721-Autorouter_CE2632_HarryMu_2026-6-15.dsn"]
-                .contains("unterminated list"),
-            "the known Issue721 fixture must remain classified as truncated input"
         );
         assert!(
             import_errors["Issue179-Autorouter_PCB1_2023-3-24.dsn"].contains("missing its name"),

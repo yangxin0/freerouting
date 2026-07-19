@@ -214,12 +214,15 @@ fn finish_route_attempt(
 /// via cost are always derived here, so the public single-net entry point has
 /// the same rule contract as [`batch_route`] and the pass scheduler.
 pub fn route_net(board: &mut BasicBoard, net_no: i32, request: &BatchRequest) -> BatchResult {
-    if board.rules.nets.get_by_no(net_no).is_none()
-        || net_components(board, net_no).is_empty()
-        || request.validate(board).is_err()
-    {
+    if board.rules.nets.get_by_no(net_no).is_none() || request.validate(board).is_err() {
         return BatchResult {
             failed_connections: 1,
+            ..BatchResult::default()
+        };
+    }
+    if net_components(board, net_no).is_empty() {
+        return BatchResult {
+            failed_connections: crate::ratsnest::routing_failure_count_for_net(board, net_no),
             ..BatchResult::default()
         };
     }
@@ -242,7 +245,6 @@ pub(crate) fn route_net_with_store(
 ) -> BatchResult {
     let mut result = BatchResult::default();
     if net_components(board, net_no).is_empty() {
-        result.failed_connections = 1;
         return result;
     }
     let mut use_sets = true;
@@ -386,7 +388,8 @@ pub(crate) fn route_net_with_store(
                     );
                 }
                 *store = Some(
-                    crate::autoroute::engine::AutorouteEngine::new_with_clearance(
+                    crate::autoroute::engine::AutorouteEngine::new_with_clearance_synced(
+                        board,
                         net_no,
                         false,
                         request.clearance_class,
@@ -476,6 +479,12 @@ pub fn route_net_with_ripup(
             ..BatchResult::default()
         };
     }
+    if net_components(board, net_no).is_empty() {
+        return BatchResult {
+            failed_connections: crate::ratsnest::routing_failure_count_for_net(board, net_no),
+            ..BatchResult::default()
+        };
+    }
     // `generate_snapshot` necessarily invalidates an already-exposed user
     // redo branch. Keep a full checkpoint only for that uncommon case so a
     // rejected valid route is observationally read-only; ordinary routing
@@ -513,7 +522,6 @@ fn valid_ripup_request(
     ripup_penalty: f64,
 ) -> bool {
     board.rules.nets.get_by_no(net_no).is_some()
-        && !net_components(board, net_no).is_empty()
         && request.validate(board).is_ok()
         && ripup_penalty.is_finite()
         && ripup_penalty >= 0.0
@@ -1299,13 +1307,45 @@ mod tests {
 
         let empty = route_net(&mut board, 1, &request());
         assert_eq!(empty.routed_connections, 0);
-        assert_eq!(empty.failed_connections, 1);
+        assert_eq!(empty.failed_connections, 0);
+        let empty_ripup = route_net_with_ripup(&mut board, 1, &request(), 1.0);
+        assert_eq!(empty_ripup.failed_connections, 0);
         assert_eq!(board.items().count(), before_items);
 
         let empty_batch = batch_route_passes(&mut board, &request(), 99);
         assert_eq!(empty_batch.routed_connections, 0);
-        assert_eq!(empty_batch.failed_connections, 1);
+        assert_eq!(empty_batch.failed_connections, 0);
         assert_eq!(board.items().count(), before_items);
+
+        board.record_unresolved_net_endpoint(
+            1,
+            crate::board::basic_board::LogicalEndpoint::new("MISSING", "1"),
+        );
+        assert_eq!(route_net(&mut board, 1, &request()).failed_connections, 1);
+        assert_eq!(
+            route_net_with_ripup(&mut board, 1, &request(), 1.0).failed_connections,
+            1
+        );
+
+        // Two unresolved terminals represent one logical connection, not two
+        // independently routable failures.  The direct single-net APIs must
+        // agree with the batch/ratsnest failure metric in this empty-physical
+        // case.
+        let mut multiple_unresolved = test_board(1);
+        for component in ["MISSING_A", "MISSING_B"] {
+            multiple_unresolved.record_unresolved_net_endpoint(
+                1,
+                crate::board::basic_board::LogicalEndpoint::new(component, "1"),
+            );
+        }
+        assert_eq!(
+            route_net(&mut multiple_unresolved, 1, &request()).failed_connections,
+            1
+        );
+        assert_eq!(
+            route_net_with_ripup(&mut multiple_unresolved, 1, &request(), 1.0).failed_connections,
+            1
+        );
 
         let zero_budget = BatchRequest {
             max_expansions: 0,

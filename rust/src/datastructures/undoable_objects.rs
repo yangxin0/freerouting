@@ -58,6 +58,13 @@ impl<K: Ord + Clone, V: Clone + PartialEq> UndoableObjects<K, V> {
         self.redo_possible && self.stack_level < self.deleted_objects_stack.len()
     }
 
+    /// Current nested snapshot depth.  Board-level speculative transactions
+    /// use this to preserve an enclosing DRC context when an inner snapshot
+    /// is rolled back.
+    pub fn stack_level(&self) -> usize {
+        self.stack_level
+    }
+
     fn alloc(&mut self, node: Node<K, V>) -> NodeId {
         self.nodes.push(node);
         self.nodes.len() - 1
